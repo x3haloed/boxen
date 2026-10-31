@@ -9,6 +9,9 @@ use serde_json::{Value, json};
 use std::io::Write;
 use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
 
+pub fn default_backend() -> String {
+    "codex".into()
+}
 fn default_auto() -> bool {
     true
 }
@@ -24,6 +27,8 @@ pub struct Create {
     pub identity: String,
     #[serde(default)]
     pub memory: String,
+    #[serde(default = "default_backend")]
+    pub backend: String,
     pub cwd: String,
     #[serde(default)]
     pub model: String,
@@ -40,6 +45,8 @@ pub struct Resident {
     pub name: String,
     pub identity: String,
     pub memory: String,
+    #[serde(default = "default_backend")]
+    pub backend: String,
     pub cwd: String,
     pub model: String,
     pub quota_bytes: usize,
@@ -51,6 +58,9 @@ pub struct Resident {
 impl Resident {
     fn validate(&self) -> Result<()> {
         jobs::valid_id(&self.id)?;
+        if !matches!(self.backend.as_str(), "codex" | "openrouter") {
+            return Err("unsupported resident backend".into());
+        }
         state::key(&self.owner)?;
         state::key(&self.machine_id)?;
         if self.name.trim().is_empty() || self.name.len() > 100 {
@@ -109,6 +119,9 @@ pub struct Residents {
     issues: Vec<Value>,
 }
 impl Residents {
+    pub fn machine_id(&self) -> &str {
+        &self.machine_id
+    }
     // Jobs' authority lock is held for this store's entire lifetime. All mutations
     // serialize here; no resident lock is held across calls into Jobs.
     pub fn open(directory: PathBuf, machine_id: String) -> Result<Self> {
@@ -247,6 +260,7 @@ impl Residents {
             name: initial.name.clone(),
             identity: initial.identity.clone(),
             memory: initial.memory.clone(),
+            backend: initial.backend.clone(),
             cwd: initial.cwd.clone(),
             model: initial.model.clone(),
             quota_bytes: initial.quota_bytes,

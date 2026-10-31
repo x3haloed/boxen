@@ -344,6 +344,7 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 owner,
                 serde_json::from_value::<Spec>(request["spec"].clone())?,
             )?)?),
+            "runtime_info" => Ok(jobs.runtime_info()),
             "mailbox_status" => Ok(jobs.mailboxes.status()),
             "mailbox_send" => {
                 let client = request["client_id"].as_str().ok_or("client_id required")?;

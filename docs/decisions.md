@@ -85,9 +85,9 @@ Acceptance criteria:
 
 Use destination-local files and explicit placement initially. Resident identity, shared memory, automatic scheduling, and relocation are not prerequisites for this slice. File transfer is not required to prove it.
 
-The next slice adds the first resident: a named identity, one canonical conversation, and a quota-managed identity/memory store on an explicitly selected host. The built-in inference runtime remains planned to verify both runtime kinds. Movement follows; parallel conversations, clones, and reintegration remain part of the beta requirements.
+The next slice adds the first resident: a named identity, one canonical conversation, and a quota-managed identity/memory store on an explicitly selected host. The [first built-in inference runtime](inference.md) now verifies text/tool execution and mailbox communication through OpenRouter. Broader provider and modality support remain planned. Movement follows; parallel conversations, clones, and reintegration remain part of the beta requirements.
 
-The initial [LAN pairing prerequisite](p2p.md) now carries [remote Codex workloads with live event streaming](workloads.md). The executing daemon owns each run and its retained event sequence. A client can detach and reconnect; a daemon restart marks unfinished execution uncertain rather than retrying it automatically. Broader recovery, storage retention, scheduling, production enrollment UX, and wide-area connectivity remain open. The built-in inference runtime is the next planned backend, not part of this implemented slice.
+The initial [LAN pairing prerequisite](p2p.md) now carries [remote Codex workloads with live event streaming](workloads.md). The executing daemon owns each run and its retained event sequence. A client can detach and reconnect; a daemon restart marks unfinished execution uncertain rather than retrying it automatically. Broader recovery, storage retention, scheduling, production enrollment UX, and wide-area connectivity remain open. The [built-in inference backend](inference.md) now adds OpenRouter text/tool workloads using the same run, observation, control, and mailbox authorities.
 
 ## Recovery favors availability
 

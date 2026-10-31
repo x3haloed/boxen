@@ -1,7 +1,10 @@
 #[cfg(cosmo)]
 extern crate cosmo_compat as _;
 
+mod agent_tools;
+mod chat;
 mod codex;
+mod inference;
 #[cfg(feature = "inference-probe")]
 mod inference_probe;
 mod jobs;
@@ -45,9 +48,9 @@ boxen [--data-dir PATH] identity\n\
 boxen [--data-dir PATH] trust PUBLIC_KEY LABEL\n\
 boxen [--data-dir PATH] untrust PUBLIC_KEY\n\
 boxen [--data-dir PATH] peers\n\
-boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--codex PATH]\n\
+boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--codex PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
-boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID]\n\
+boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|openrouter]\n\
 boxen [--data-dir PATH] runs HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] watch HOST:PORT PUBLIC_KEY RUN_ID [--after SEQUENCE] [--once]\n\
 boxen [--data-dir PATH] cancel HOST:PORT PUBLIC_KEY RUN_ID\n\n\
@@ -58,7 +61,7 @@ boxen [--data-dir PATH] log-file HOST:PORT PUBLIC_KEY /absolute/daemon/path.json
 boxen [--data-dir PATH] log-status HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] log-off HOST:PORT PUBLIC_KEY\n\n\
 boxen residents HOST:PORT PUBLIC_KEY\n\
-boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
+boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|openrouter] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-get HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
 boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-message HOST:PORT PUBLIC_KEY RESIDENT_ID BODY [--id MESSAGE_ID] [--subject SUBJECT] [--client-id ID]\n\
@@ -71,7 +74,7 @@ Pair by exchanging identity public keys through a trusted channel and\n\
 running trust on BOTH machines. --ui must bind to IPv4 loopback.\n\
 Default data: ~/.boxen (or BOXEN_HOME). Default peer port: 42424.\n\
 MODEL '-' selects the executing machine's configured default.\n\
-Workloads run through Codex app-server with Full access on the destination."
+Workloads use Codex app-server or the OpenRouter built-in runtime with Full access on the destination."
         );
         #[cfg(feature = "inference-probe")]
         println!(
@@ -87,6 +90,9 @@ Workloads run through Codex app-server with Full access on the destination."
     if command == "platform-check" && args.is_empty() {
         println!("{}", platform::check()?);
         return Ok(());
+    }
+    if command == "inference-worker" {
+        return inference::worker();
     }
     let state = Arc::new(State::open(directory)?);
     match command.as_str() {
@@ -114,6 +120,13 @@ Workloads run through Codex app-server with Full access on the destination."
             println!("{}", serde_json::to_string_pretty(&reply)?);
         }
         "serve" => {
+            let endpoint = take_option(&mut args, "--openrouter-endpoint")?
+                .unwrap_or_else(|| chat::ENDPOINT.into());
+            let key_file = take_option(&mut args, "--openrouter-key-file")?
+                .map(PathBuf::from)
+                .unwrap_or_else(|| state.directory().join("credentials/openrouter.key"));
+            let inference_config = inference::Config { endpoint, key_file };
+            inference_config.validate()?;
             let codex = take_option(&mut args, "--codex")?
                 .or_else(|| env::var("BOXEN_CODEX").ok())
                 .unwrap_or_else(|| "codex".into());
@@ -131,10 +144,11 @@ Workloads run through Codex app-server with Full access on the destination."
             let ui_listener = TcpListener::bind(ui_addr)?;
             let token = state.control_token()?;
             logging::install(state.public_key())?;
-            let jobs = jobs::Jobs::open(
+            let jobs = jobs::Jobs::open_with_inference(
                 state.directory().join("runs"),
                 codex,
                 state.public_key().into(),
+                inference_config,
             )?;
             jobs.start_dispatcher();
             logging::record(
@@ -179,6 +193,7 @@ Workloads run through Codex app-server with Full access on the destination."
             );
         }
         "resident-create" => {
+            let backend = take_option(&mut args, "--backend")?.unwrap_or_else(|| "codex".into());
             let auto = take_option(&mut args, "--auto-activate")?
                 .map(|v| v.parse::<bool>())
                 .transpose()?
@@ -204,7 +219,7 @@ Workloads run through Codex app-server with Full access on the destination."
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"resident_create","spec":{"id":id,"name":args[2],"cwd":args[3],"model":if args[4]=="-" {""}else{&args[4]},"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
+                    serde_json::json!({"op":"resident_create","spec":{"backend":backend,"id":id,"name":args[2],"cwd":args[3],"model":if args[4]=="-" {""}else{&args[4]},"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
                 )?
             );
         }
@@ -314,6 +329,7 @@ Workloads run through Codex app-server with Full access on the destination."
             );
         }
         "start" => {
+            let backend = take_option(&mut args, "--backend")?.unwrap_or_else(|| "codex".into());
             let thread = take_option(&mut args, "--thread")?;
             let id = take_option(&mut args, "--id")?.unwrap_or(state::random_hex()?);
             if args.len() != 5 {
@@ -323,7 +339,7 @@ Workloads run through Codex app-server with Full access on the destination."
                 resident_id: None,
                 id: id.clone(),
                 thread_id: thread.unwrap_or(id),
-                backend: "codex".into(),
+                backend,
                 cwd: args[2].clone(),
                 model: if args[3] == "-" {
                     String::new()

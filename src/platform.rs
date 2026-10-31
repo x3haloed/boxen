@@ -63,6 +63,31 @@ pub fn host_os() -> &'static str {
     }
 }
 
+/// Rust's Linux-target current_exe uses /proc even when the APE runs on macOS.
+/// Cosmopolitan resolves the application separately from its APE interpreter.
+pub fn executable() -> Result<std::path::PathBuf> {
+    #[cfg(cosmo)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" {
+            fn GetProgramExecutableName() -> *const std::ffi::c_char;
+        }
+        // SAFETY: Cosmopolitan returns its NUL-terminated startup-owned executable path.
+        let pointer = unsafe { GetProgramExecutableName() };
+        if pointer.is_null() {
+            return Err("Cosmopolitan executable path is unavailable".into());
+        }
+        let path = unsafe { std::ffi::CStr::from_ptr(pointer) };
+        Ok(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+            path.to_bytes(),
+        )))
+    }
+    #[cfg(not(cosmo))]
+    {
+        Ok(std::env::current_exe()?)
+    }
+}
+
 pub fn check() -> Result<Value> {
     let pair = Arc::new((Mutex::new(false), Condvar::new()));
     let start = Instant::now();

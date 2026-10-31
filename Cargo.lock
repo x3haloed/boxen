@@ -55,6 +55,7 @@ dependencies = [
  "cosmo-build",
  "cosmo-compat",
  "fs2",
+ "libc",
  "serde",
  "serde_json",
  "snow",

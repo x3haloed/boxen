@@ -31,6 +31,7 @@
 <form id="createResident">
   <label>Name<input id="residentName" required maxlength="100"></label>
   <label>Resident working directory<input id="residentCwd" placeholder="/absolute/path/on/that/machine" required></label>
+  <label>Resident backend<select id="residentBackend"><option value="codex">Codex app-server</option><option value="openrouter">OpenRouter · built-in runtime</option></select></label>
   <label>Resident model<input id="residentModel" placeholder="Executing machine’s configured default"></label>
   <label>Initial identity<textarea id="residentIdentity" rows="3"></textarea></label>
   <label>Initial memory<textarea id="residentMemory" rows="3"></textarea></label>
@@ -53,7 +54,7 @@
 </details>
 <form id="work">
   <label>Working directory on executing machine<input id="cwd" placeholder="/absolute/path/on/that/machine" required></label>
-  <label>Backend<select id="backend"><option value="codex">Codex app-server</option></select></label>
+  <label>Backend<select id="backend"><option value="codex">Codex app-server</option><option value="openrouter">OpenRouter · built-in runtime</option></select></label>
   <label>Model<input id="model" placeholder="Executing machine’s configured default"></label>
   <p class="meta">Full access · files and tools belong to the executing machine.</p>
   <label id="subjectLabel" hidden>Subject<input id="mailSubject" value="Message" maxlength="256"></label>
@@ -119,10 +120,11 @@ function controls() {
   $('autoActivate').disabled=!connected||syncing||residentBusy;
   if(resident)$('autoActivate').checked=resident.auto_activate;
   $('send').disabled = !connected || syncing || submitting || residentBusy;
-  $('model').disabled=!!resident;
+  $('model').disabled=!!resident||!!selectedThread&&$('backend').value==='openrouter'; $('backend').disabled=!!selectedThread||!!pendingStart;
+  if(resident)$('backend').value=resident.backend||'codex';
   $('createResidentButton').disabled=!connected||residentBusy||submitting;
   $('createResidentButton').textContent=pendingResident?'Retry original resident creation':'Create resident';
-  for(const input of $('createResident').querySelectorAll('input,textarea'))input.disabled=residentBusy||!!pendingResident;
+  for(const input of $('createResident').querySelectorAll('input,textarea,select'))input.disabled=residentBusy||!!pendingResident;
   for(const input of $('editResident').querySelectorAll('input,textarea,button'))input.disabled=!connected||syncing||residentBusy;
   if(resident)$('residentInfo').textContent='Resident '+resident.id+' · machine '+resident.machine_id+' · stored revision '+resident.revision+' · '+resident.used_bytes+' / '+resident.quota_bytes+' bytes · editor based on revision '+editorRevision;
   $('peer').disabled=submitting||residentBusy;$('address').disabled=submitting||residentBusy;$('threads').disabled=!connected||submitting||residentBusy;$('connectButton').disabled=submitting||residentBusy;
@@ -214,6 +216,13 @@ function render(run,event) {
   if(event.kind==='request_answered'){resolveRequest(run,event.data.request_id);return;}
   if(event.kind==='control'){if(event.data.text)add('You · steering',event.data.text);else add('Control',event.data.type);return;}
   if(event.kind==='control_error'){add('Control error',event.data.message);return;}
+  if(['assistant_delta','reasoning_delta'].includes(event.kind)){const row=itemFor(run,event.data.id,event.kind==='reasoning_delta'?'Thinking':records.find(r=>r.record.spec.id===run)?.record.resident?'Private narration':'Agent');row.content.append(document.createTextNode(event.data.text));return;}
+  if(event.kind==='assistant_message'){const row=itemFor(run,event.data.id,event.data.private?'Private narration':'Agent');row.content.textContent=event.data.text;return;}
+  if(event.kind==='tool_arguments_delta'){const delta=event.data.delta||{};const row=itemFor(run,'arguments-'+event.data.step+'-'+delta.index,'Tool arguments');if(delta.function?.name)row.title.textContent='Tool arguments · '+delta.function.name;row.content.append(document.createTextNode(delta.function?.arguments||''));return;}
+  if(event.kind==='tool_started'){add('Tool · '+event.data.tool,event.data.arguments);return;}
+  if(event.kind==='tool_output'){const row=itemFor(run,event.data.call_id,'Command output');row.content.append(document.createTextNode(event.data.text));return;}
+  if(event.kind==='tool_result'){add('Tool result · '+event.data.tool,JSON.stringify(event.data.result,null,2));if(event.data.tool==='boxen_send_message')refreshMailbox(generation,{...target});return;}
+  if(['context_projection','tool_outcome_unknown'].includes(event.kind)){add('Runtime incident',JSON.stringify(event.data,null,2));return;}
   if(event.kind!=='backend')return;
   const message=event.data, method=message.method, params=message.params||{};
   if(message.id!==undefined){if(method==='item/tool/call'&&['boxen_continuity','boxen_mailbox','boxen_send_message','boxen_thread_request','boxen_thread_result'].includes(params.tool)&&records.find(r=>r.record.spec.id===run)?.record.spec.resident_id)return;answerPanel(run,message);return;}
@@ -371,7 +380,7 @@ async function showThread(thread, refresh=false) {
       const related=records.filter(r=>r.record.spec.thread_id===selectedThread);
       const resident=residents.find(r=>r.id===selectedThread);
       if(resident){$('cwd').value=resident.cwd;$('model').value=resident.model;}
-      if(related.length){$('cwd').value=related[0].record.spec.cwd;$('model').value=related.at(-1).record.spec.model;}
+      if(related.length){$('backend').value=related[0].record.spec.backend;$('cwd').value=related[0].record.spec.cwd;$('model').value=related.at(-1).record.spec.model;}
       syncing=true;controls();
       for(const record of related){
         if(gen!==generation)return;
@@ -430,7 +439,7 @@ $('work').onsubmit=async event=>{
       await operation({op:'control',id:currentRun.record.spec.id,action:{type:'steer',text}});$('prompt').value='';return;
     }
     // Keep an uncertain submission's id and exact input so retry cannot duplicate it.
-    if(!pendingStart) { const run=id();pendingStart={id:run,thread_id:selectedThread||run,resident_id:residents.some(r=>r.id===selectedThread)?selectedThread:null,backend:'codex',cwd:$('cwd').value,model:$('model').value,prompt:text}; rememberSubmission(); }
+    if(!pendingStart) { const run=id();pendingStart={id:run,thread_id:selectedThread||run,resident_id:residents.some(r=>r.id===selectedThread)?selectedThread:null,backend:$('backend').value,cwd:$('cwd').value,model:$('model').value,prompt:text}; rememberSubmission(); }
     const snapshot=await operation({op:'start',spec:pendingStart},destination);if(gen!==generation)return;pendingStart=null;rememberSubmission();
     if(!records.some(r=>r.record.spec.id===snapshot.record.spec.id))records.push(snapshot);selectedThread=snapshot.record.spec.thread_id;$('prompt').value='';
     updateThreads();save();showThread(selectedThread);
@@ -442,7 +451,7 @@ $('createResident').onsubmit=async event=>{
   residentBusy=true;controls();const destination={...target},gen=generation;
   try {
     if(pendingResident&&pendingResident.target.peer!==destination.peer)throw new Error('A resident creation is unconfirmed on another machine. Reconnect there to retry its original ID.');
-    if(!pendingResident){pendingResident={target:destination,spec:{id:id(),name:$('residentName').value,cwd:$('residentCwd').value,model:$('residentModel').value,identity:$('residentIdentity').value,memory:$('residentMemory').value,quota_bytes:Number($('residentQuota').value)}};localStorage.setItem('boxen-pending-resident',JSON.stringify(pendingResident));}
+    if(!pendingResident){pendingResident={target:destination,spec:{backend:$('residentBackend').value,id:id(),name:$('residentName').value,cwd:$('residentCwd').value,model:$('residentModel').value,identity:$('residentIdentity').value,memory:$('residentMemory').value,quota_bytes:Number($('residentQuota').value)}};localStorage.setItem('boxen-pending-resident',JSON.stringify(pendingResident));}
     const resident=await operation({op:'resident_create',spec:pendingResident.spec},destination);
     pendingResident=null;localStorage.removeItem('boxen-pending-resident');
     if(gen!==generation)return;

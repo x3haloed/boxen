@@ -6,7 +6,7 @@ Boxen brings agent runtimes, inference providers, and granted compute together s
 
 The spirit: **All your box are belong to us.**
 
-Boxen is in early development. Paired LAN machines can now execute anonymous Codex threads with live thinking summaries, messages, tool activity, and command output. Detaching the viewer leaves execution running; reconnecting replays missed events.
+Boxen is in early development. Paired LAN machines can execute Codex threads and built-in OpenRouter text/tool workloads with live messages, backend-exposed thinking summaries, tool activity, and command output. Detaching the viewer leaves execution running; reconnecting replays missed events.
 
 ## Try the LAN prototype
 
@@ -52,9 +52,9 @@ Create a named resident without assigning a job. It has one canonical conversati
 
 See [the first resident](docs/residents.md) for continuity and [mailboxes](docs/mailboxes.md) for communication, activation, tools, CLI/API, and current limits. This first implementation stays on one selected host; synchronization and movement come later.
 
-The next runtime is being researched in [inference providers and the Boxen runtime](docs/research/inference-runtime.md), including source comparisons, Watch's compatibility cases, proposed ownership boundaries, and verification criteria. Inference-provider support is not implemented yet.
+The [built-in inference runtime](docs/inference.md) now supports OpenRouter text/tool workloads and mailbox residents alongside Codex. Select OpenRouter in the GUI or pass `--backend openrouter` to `start` or `resident-create`. The executing daemon reads its own OpenRouter key from `~/.boxen/credentials/openrouter.key`; credentials are not automatically distributed to peers.
 
-An opt-in [transport and replay experiment](docs/research/inference-transport-experiment.md) now verifies HTTPS streaming and fresh-process replay with OpenRouter in native and portable builds. It is separate from the daemon backend. [Managed-session portability](docs/research/managed-session-portability.md) remains a distinct, unverified capability.
+The [provider/runtime research](docs/research/inference-runtime.md) and [transport experiment](docs/research/inference-transport-experiment.md) explain the boundaries and evidence. [Managed-session portability](docs/research/managed-session-portability.md) remains distinct and unverified.
 
 ## Live daemon diagnostics
 

@@ -6,7 +6,7 @@ It is **not an inference backend in the daemon**, an autonomous agent loop, a cr
 
 ## Build and run
 
-The `inference-probe` feature uses Ureq 3.5.0 with rustls/ring and bundled WebPKI roots, without a Node runtime, external HTTP executable, gzip, or an async runtime requirement. It is not enabled in ordinary builds. Dependency selection remains provisional pending broader platform and operational tests.
+The `inference-probe` feature uses Ureq 3.5.0 with rustls/ring and bundled WebPKI roots, without a Node runtime, external HTTP executable, gzip, or an async runtime requirement. The experiment commands are not enabled in ordinary builds. The [subsequent daemon runtime](../inference.md) now shares this transport and includes its dependency in normal builds. Dependency selection remains provisional pending broader platform and operational tests.
 
 ```sh
 cargo build --locked --release --features inference-probe

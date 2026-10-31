@@ -302,6 +302,35 @@ pub struct History {
     pub rebuild_reason: Option<String>,
 }
 impl History {
+    pub fn journal_directory(&self) -> &std::path::Path {
+        &self.directory
+    }
+    pub fn inference_messages(&self) -> Result<(Vec<Value>, usize)> {
+        let mut groups = std::collections::VecDeque::new();
+        let mut bytes = 0;
+        let mut omitted = 0;
+        for run in &self.runs {
+            let inner = run.inner.lock().unwrap();
+            let group: Vec<Value> = inner
+                .events
+                .iter()
+                .filter(|e| e.kind == "inference_message")
+                .map(|e| e.data.clone())
+                .collect();
+            let size = serde_json::to_vec(&group)?.len();
+            bytes += size;
+            groups.push_back((group, size));
+            while bytes > 512 * 1024 {
+                if let Some((group, size)) = groups.pop_front() {
+                    bytes = bytes.saturating_sub(size);
+                    omitted += group.len();
+                } else {
+                    break;
+                }
+            }
+        }
+        Ok((groups.into_iter().flat_map(|g| g.0).collect(), omitted))
+    }
     pub fn reconstruction(&self) -> Result<String> {
         let mut recent = std::collections::VecDeque::new();
         let mut bytes = 0usize;
@@ -348,6 +377,7 @@ pub struct Jobs {
     directory: PathBuf,
     runs: Mutex<HashMap<String, Arc<Run>>>,
     codex_path: String,
+    pub inference: crate::inference::Config,
     _lock: File,
     pub residents: Arc<Residents>,
     transitions: Mutex<()>,
@@ -356,7 +386,30 @@ pub struct Jobs {
 }
 
 impl Jobs {
+    pub fn runtime_info(&self) -> Value {
+        json!({"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text"],"tools":true,"full_access":true}]})
+    }
+
+    pub fn machine_id(&self) -> &str {
+        self.residents.machine_id()
+    }
+    #[cfg(test)]
     pub fn open(directory: PathBuf, codex_path: String, machine_id: String) -> Result<Arc<Self>> {
+        let config = crate::inference::Config {
+            endpoint: crate::chat::ENDPOINT.into(),
+            key_file: directory
+                .parent()
+                .ok_or("runs parent required")?
+                .join("credentials/openrouter.key"),
+        };
+        Self::open_with_inference(directory, codex_path, machine_id, config)
+    }
+    pub fn open_with_inference(
+        directory: PathBuf,
+        codex_path: String,
+        machine_id: String,
+        inference: crate::inference::Config,
+    ) -> Result<Arc<Self>> {
         logging::record(
             Level::Info,
             Target::State,
@@ -398,6 +451,7 @@ impl Jobs {
             directory,
             runs: Mutex::new(HashMap::new()),
             codex_path,
+            inference,
             _lock: lock,
         });
         for entry in fs::read_dir(&jobs.directory)? {
@@ -665,7 +719,7 @@ impl Jobs {
             resident_id: Some(id.into()),
             id: run_id,
             thread_id: id.into(),
-            backend: "codex".into(),
+            backend: resident.backend,
             cwd: resident.cwd,
             model: resident.model,
             prompt,
@@ -689,6 +743,9 @@ impl Jobs {
         }
         let response = inner.events.iter().rev().find_map(|e| {
             let item = &e.data["params"]["item"];
+            if e.kind == "assistant_message" {
+                return e.data["text"].as_str().map(str::to_owned);
+            }
             if e.kind == "backend"
                 && e.data["method"] == "item/completed"
                 && item["type"] == "agentMessage"
@@ -792,12 +849,15 @@ impl Jobs {
             self.residents
                 .context(owner, &spec.thread_id, spec.resident_id.as_deref())?;
         if let Some(r) = &resident
-            && (spec.cwd != r.cwd || spec.model != r.model)
+            && (spec.cwd != r.cwd || spec.model != r.model || spec.backend != r.backend)
         {
             return Err("resident working directory and model are pinned to its definition".into());
         }
-        if spec.backend != "codex" {
-            return Err("only the codex backend is available".into());
+        if !matches!(spec.backend.as_str(), "codex" | "openrouter") {
+            return Err("unsupported backend".into());
+        }
+        if spec.backend == "openrouter" && activation.is_none() {
+            self.inference.ready()?;
         }
         if spec.prompt.is_empty() || spec.prompt.len() > 256 * 1024 {
             return Err("prompt must contain 1–262144 bytes".into());
@@ -829,6 +889,11 @@ impl Jobs {
             }
             if !terminal(&prior.status) {
                 return Err("thread already has an active run; another request is accepted after it ends, and steering is a separate control operation".into());
+            }
+            if prior.record.spec.backend != spec.backend
+                || (spec.backend == "openrouter" && prior.record.spec.model != spec.model)
+            {
+                return Err("this slice pins a thread's runtime and inference model; a new thread can select a different one".into());
             }
             if prior.record.spec.cwd != spec.cwd {
                 return Err("follow-up must retain the thread working directory".into());
@@ -896,15 +961,20 @@ impl Jobs {
         let binary = self.codex_path.clone();
         let jobs = self.clone();
         std::thread::spawn(move || {
-            if let Err(error) = codex::execute(
-                &binary,
-                &spec,
-                resume,
-                run.clone(),
-                receiver,
-                jobs.clone(),
-                history,
-            ) {
+            let result = if spec.backend == "openrouter" {
+                crate::inference::execute(&spec, run.clone(), receiver, jobs.clone(), history)
+            } else {
+                codex::execute(
+                    &binary,
+                    &spec,
+                    resume,
+                    run.clone(),
+                    receiver,
+                    jobs.clone(),
+                    history,
+                )
+            };
+            if let Err(error) = result {
                 run.diagnostic(
                     Level::Error,
                     "execution.failed",
