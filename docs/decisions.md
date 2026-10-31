@@ -101,11 +101,11 @@ Identity-bearing agents use mailbox communication and receive their own mailbox 
 
 Identity-less ephemeral threads use ordinary request/response semantics. They are workload control channels rather than long-lived agents. Agents can address them by thread ID through dedicated thread request/response tools with Codex-like conventions; those tools are distinct from tools that send to agent mailboxes or rooms. The conventional response remains part of the ephemeral request contract, preserving the reliability of ordinary remote Codex work.
 
-These are the agreed target contracts. The first resident implementation currently accepts direct turn submissions and exposes assistant output in the observer transcript; it does not yet implement mailbox allocation, queued message batching, explicit outgoing delivery, independent activation, or inter-agent thread request tools. Existing `resident-message` is a provisional turn-submission interface, not a durable mailbox send API. The language-only revision does not claim or simulate those missing capabilities.
+The [mailbox implementation](mailboxes.md) now enforces these contracts for host-local communication. Existing residents are registered automatically, direct resident turn submissions are rejected, and activation is independent of message receipt. Automatic activation on new mail is enabled by default and configurable per resident. Mail arriving during execution waits for the next activation. Rooms, offline cross-host routing, and completion-driven resident activation remain later work.
 
 ## Scheduling and heartbeat pattern
 
-An ordinary scheduler supports one-time future events and recurring jobs of different kinds. A heartbeat is a typical recurring-job pattern: for example, an hourly system ping to an agent carrying directions crafted and retained when the heartbeat job was defined. The scheduler determines when an event is due; the event handler determines its effect. A separate heartbeat-only scheduling subsystem is not the intended design. The scheduler and independent resident activation remain to be implemented.
+An ordinary scheduler supports one-time future events and recurring jobs of different kinds. A heartbeat is a typical recurring-job pattern: for example, an hourly system ping to an agent carrying directions crafted and retained when the heartbeat job was defined. The scheduler determines when an event is due; the event handler determines its effect. A separate heartbeat-only scheduling subsystem is not the intended design. Independent resident activation is implemented; the general scheduler remains to be implemented.
 
 ## Causal agent-facing language
 

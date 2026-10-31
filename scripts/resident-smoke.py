@@ -81,11 +81,7 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
             if text: assert text in detail, detail
 
     def message(resident, prompt):
-        run = spec(prompt, resident["id"])
-        run["resident_id"] = resident["id"]
-        run["cwd"] = resident["cwd"]
-        run["model"] = resident["model"]
-        return run
+        return {"op":"resident_activate","id":resident["id"],"activation_id":secrets.token_hex(32),"directions":prompt}
 
     def get_resident(ident):
         return request({"op":"resident_get","id":ident})
@@ -121,13 +117,13 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         print("PASS concurrent memory writes use compare-and-set; stale/oversized/foreign writes leave durable state unchanged")
 
         run=message(resident,"RESIDENT_WRITE")
-        accepted=request({"op":"start","spec":run})
+        accepted=request(run)
         assert accepted["record"]["resident"]["revision"]==2
-        events,snapshot=collect(run["id"])
+        events,snapshot=collect(run["activation_id"])
         assert snapshot["status"]=="completed", snapshot
         assert any(e["kind"]=="resident_tool_result" and e["data"]["success"] for e in events)
         assert get_resident(ident)["memory"]=="fixture durable memory"
-        assert request({"op":"start","spec":run})["record"]["resident"]["revision"]==2
+        assert request(run)["record"]["resident"]["revision"]==2
         assert request({"op":"resident_create","spec":definition})["revision"]==3
         print("PASS resident runtime receives pinned continuity and host context; dynamic tool commits durable memory; retries retain original context")
 
@@ -136,49 +132,48 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         resident=get_resident(ident)
         assert resident["revision"]==3 and resident["memory"]=="fixture durable memory"
         follow=message(resident,"RESIDENT_READ")
-        request({"op":"start","spec":follow})
-        events,next_snapshot=collect(follow["id"])
+        request(follow)
+        events,next_snapshot=collect(follow["activation_id"])
         assert next_snapshot["backend_thread"]==snapshot["backend_thread"]
         assert next_snapshot["status"]=="completed"
-        result=[e["data"]["result"] for e in events if e["kind"]=="resident_tool_result"][-1]
+        result=[e["data"]["result"] for e in events if e["kind"]=="resident_tool_result" and e["data"].get("tool")=="boxen_continuity"][-1]
         assert result["memory"]=="fixture durable memory" and result["revision"]==3
         print("PASS executing-daemon restart preserves identity, memory, canonical Boxen thread and backend conversation continuity")
 
         for prompt in ["RESIDENT_QUOTA","RESIDENT_STALE"]:
-            attempted=message(resident,prompt);request({"op":"start","spec":attempted})
-            assert collect(attempted["id"])[1]["status"]=="completed"
+            attempted=message(resident,prompt);request(attempted)
+            assert collect(attempted["activation_id"])[1]["status"]=="completed"
             assert get_resident(ident)==resident
         print("PASS model-facing tool reports quota/conflict errors without mutating memory or terminating the conversation")
 
-        invalid=message(resident,"wrong canonical thread")
-        rejected({"op":"start","spec":{**invalid,"thread_id":secrets.token_hex(32)}},"canonical")
+        invalid={**spec("direct resident turn",ident),"resident_id":ident}
+        rejected({"op":"start","spec":invalid},"mailbox")
         rejected({"op":"start","spec":{**invalid,"resident_id":None}},"requires its resident_id")
-        rejected({"op":"start","spec":{**invalid,"model":"other"}},"pinned")
-        active=message(resident,"SLOW RESIDENT_READ");request({"op":"start","spec":active})
-        rejected({"op":"start","spec":message(resident,"competing")},"active run")
-        with request({"id":active["id"],"after":0},watch=True) as stream:
+        active=message(resident,"SLOW RESIDENT_READ");request(active)
+        rejected(message(resident,"competing"),"already active")
+        with request({"id":active["activation_id"],"after":0},watch=True) as stream:
             for line in stream:
                 if json.loads(line)["snapshot"]["status"]=="running":break
         processes[-1].kill();processes[-1].wait(timeout=5)
         tokens[1]=start_daemon(1)
-        interrupted=collect(active["id"])[1]
+        interrupted=collect(active["activation_id"])[1]
         assert interrupted["status"]=="interrupted"
-        resumed=message(resident,"RESIDENT_READ");request({"op":"start","spec":resumed})
-        resumed_events,resumed_snapshot=collect(resumed["id"])
+        resumed=message(resident,"RESIDENT_READ");request(resumed)
+        resumed_events,resumed_snapshot=collect(resumed["activation_id"])
         assert resumed_snapshot["status"]=="completed"
-        assert any(e["kind"]=="recovery_notice" and e["data"]["prior_run_id"]==active["id"] for e in resumed_events)
-        old_events,old_snapshot=collect(active["id"])
+        assert any(e["kind"]=="recovery_notice" and e["data"]["prior_run_id"]==active["activation_id"] for e in resumed_events)
+        old_events,old_snapshot=collect(active["activation_id"])
         assert sum(e["kind"]=="user_message" for e in old_events)<=1
         assert old_snapshot["status"]=="interrupted"
         assert get_resident(ident)==resident
         print("PASS canonical execution guard and crash recovery keep resident available without receipts or automatic replay; uncertainty remains visible")
 
         pathlib.Path(temporary,"fixture-forget-session").touch()
-        rebuilt=message(resident,"RESIDENT_READ");request({"op":"start","spec":rebuilt})
-        rebuilt_events,rebuilt_snapshot=collect(rebuilt["id"])
+        rebuilt=message(resident,"RESIDENT_READ");request(rebuilt)
+        rebuilt_events,rebuilt_snapshot=collect(rebuilt["activation_id"])
         assert rebuilt_snapshot["status"]=="completed"
         assert any(e["kind"]=="backend_session_rebuilt" for e in rebuilt_events)
-        assert any(e["kind"]=="resident_tool_result" and e["data"]["result"]["memory"]==resident["memory"] for e in rebuilt_events)
+        assert any(e["kind"]=="resident_tool_result" and e["data"]["result"].get("memory")==resident["memory"] for e in rebuilt_events)
         assert rebuilt_snapshot["record"]["spec"]["thread_id"]==ident
         print("PASS missing backend session rebuilds with retained continuity/history while preserving the canonical Boxen conversation")
 
@@ -194,8 +189,8 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert "resident_unavailable" in incident_log.read_text()
         assert get_resident(ident)==resident
         rejected({"op":"start","spec":spec("cannot silently replace a damaged resident",broken_id)},"unavailable")
-        continued=message(resident,"RESIDENT_READ");request({"op":"start","spec":continued})
-        assert collect(continued["id"])[1]["status"]=="completed"
+        continued=message(resident,"RESIDENT_READ");request(continued)
+        assert collect(continued["activation_id"])[1]["status"]=="completed"
         print("PASS malformed resident state is isolated with a durable incident; original evidence and healthy residents remain available")
         print("PASS resident catalog and history remain independently discoverable through the daemon API")
     finally:

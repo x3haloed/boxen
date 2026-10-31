@@ -181,7 +181,7 @@ impl State {
         key(public)?;
         let peer: Peer = serde_json::from_slice(
             &fs::read(self.directory.join("peers").join(format!("{public}.json"))).map_err(
-                |_| "peer is not trusted; exchange identity keys and run trust on both machines",
+                |_| "peer is not trusted; pairing requires exchanged identity keys and reciprocal trust records",
             )?,
         )?;
         if peer.key != public {

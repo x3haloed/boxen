@@ -9,6 +9,9 @@ use serde_json::{Value, json};
 use std::io::Write;
 use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
 
+fn default_auto() -> bool {
+    true
+}
 fn default_quota() -> usize {
     64 * 1024
 }
@@ -26,6 +29,8 @@ pub struct Create {
     pub model: String,
     #[serde(default = "default_quota")]
     pub quota_bytes: usize,
+    #[serde(default = "default_auto")]
+    pub auto_activate: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Resident {
@@ -38,6 +43,8 @@ pub struct Resident {
     pub cwd: String,
     pub model: String,
     pub quota_bytes: usize,
+    #[serde(default = "default_auto")]
+    pub auto_activate: bool,
     pub revision: u64,
     pub created_at: u64,
 }
@@ -72,6 +79,8 @@ impl Resident {
         let mut value = serde_json::to_value(self).expect("resident serializes");
         value["used_bytes"] = json!(self.used_bytes());
         value["thread_id"] = json!(self.id);
+        value["communication"] = json!("mailbox");
+        value["mailbox"] = json!({"type":"resident","id":self.id});
         value["environment"] =
             json!({"os":crate::platform::host_os(),"architecture":std::env::consts::ARCH});
         value
@@ -91,6 +100,7 @@ pub struct Patch {
     pub identity: Option<String>,
     pub memory: Option<String>,
     pub quota_bytes: Option<usize>,
+    pub auto_activate: Option<bool>,
 }
 pub struct Residents {
     directory: PathBuf,
@@ -128,7 +138,7 @@ impl Residents {
                     entries.insert(stored.resident.id.clone(), stored);
                 }
                 Err(error) => {
-                    let mut issue = json!({"at":jobs::now(),"kind":"resident_unavailable","id":path.file_stem().and_then(|v|v.to_str()),"file":path,"detail":error.to_string(),"recovery":"Original state preserved. Other residents and anonymous work remain available. Restore this file from a known copy to recover this resident."});
+                    let mut issue = json!({"at":jobs::now(),"kind":"resident_unavailable","id":path.file_stem().and_then(|v|v.to_str()),"file":path,"detail":error.to_string(),"recovery":"Original state preserved. Other residents and anonymous work remain available. Restoring this file from a known copy makes this resident available again on restart."});
                     let retained = (|| -> Result<()> {
                         let mut options = fs::OpenOptions::new();
                         options.create(true).append(true);
@@ -204,6 +214,14 @@ impl Residents {
         );
         Ok(resident)
     }
+    pub fn all(&self) -> Vec<Resident> {
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| s.resident.clone())
+            .collect()
+    }
     pub fn list(&self, owner: &str) -> Vec<Resident> {
         let entries = self.entries.lock().unwrap();
         let mut list: Vec<_> = entries
@@ -232,6 +250,7 @@ impl Residents {
             cwd: initial.cwd.clone(),
             model: initial.model.clone(),
             quota_bytes: initial.quota_bytes,
+            auto_activate: initial.auto_activate,
             revision: 1,
             created_at: jobs::now(),
         };
@@ -303,6 +322,9 @@ impl Residents {
         }
         if let Some(value) = patch.quota_bytes {
             r.quota_bytes = value;
+        }
+        if let Some(value) = patch.auto_activate {
+            r.auto_activate = value;
         }
         r.revision = r
             .revision
@@ -376,7 +398,7 @@ impl Residents {
     }
     pub fn instructions(&self, resident: &Resident) -> String {
         format!(
-            "This execution is attached to a Boxen resident with canonical Boxen thread {}. Backend processes and turns are temporary; the resident identity, memory, and retained conversation persist across them.\nCurrent host: {} (OS {}, architecture {}). Working directory: {}. Files and execution environment belong to this host; their availability can differ between hosts.\nThe durable identity/memory store is separate from the working directory and is managed by the daemon at {}. The boxen_continuity tool reads and updates this store. A read returns current continuity, including changes made after turn acceptance. A write succeeds when expected_revision matches the current revision and the resulting stored contents fit the byte quota. Rejected writes leave continuity unchanged. Direct edits to backing files bypass daemon revision tracking and quota accounting and are unsupported. Conversation history is outside this quota. Automatic movement, replication, and heartbeats are not enabled in this version.\nSaved continuity snapshot at turn acceptance (JSON):\n{}",
+            "This execution is attached to a Boxen resident with canonical Boxen thread {}. Backend processes and turns are temporary; the resident identity, memory, and retained conversation persist across them.\nCurrent host: {} (OS {}, architecture {}). Working directory: {}. Files and execution environment belong to this host; their availability can differ between hosts.\nThe durable identity/memory store is separate from the working directory and is managed by the daemon at {}. The boxen_continuity tool reads and updates this store. A read returns current continuity, including changes made after turn acceptance. A write succeeds when expected_revision matches the current revision and the resulting stored contents fit the byte quota. Rejected writes leave continuity unchanged. Direct edits to backing files bypass daemon revision tracking and quota accounting and are unsupported. Conversation history is outside this quota. Automatic movement, replication, and heartbeats are not enabled in this version. This identity has a mailbox. Incoming messages are queued independently of activation and can be presented as a batch. Assistant text, including final text, is private execution narration retained for authorized observers; it is not delivered to correspondents. A successful boxen_send_message call durably queues a message at its destination. An activation can finish without sending any message. boxen_mailbox reads this identity’s inbox. boxen_thread_request and boxen_thread_result provide separate request/response control channels for identity-less workloads.\nSaved continuity snapshot at turn acceptance (JSON):\n{}",
             resident.id,
             resident.machine_id,
             crate::platform::host_os(),
@@ -409,6 +431,7 @@ impl Residents {
                     memory: input.memory,
                     name: None,
                     quota_bytes: None,
+                    auto_activate: None,
                 },
             )?,
             _ => return Err("supported continuity actions are read and write".into()),

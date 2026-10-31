@@ -2,6 +2,7 @@
 """Deterministic app-server fixture. Never used by Boxen outside tests."""
 import json
 import pathlib
+import secrets
 import sys
 import threading
 import time
@@ -14,17 +15,20 @@ responses = {}
 response_ready = threading.Condition()
 resident_context = None
 
-def continuity(arguments, number):
-    request_id = "continuity-"+str(number)
-    item_id = "continuity-item-"+str(number)
-    notification("item/started", {"item":{"id":item_id,"type":"dynamicToolCall","tool":"boxen_continuity","arguments":arguments,"status":"inProgress"}})
-    emit({"id":request_id,"method":"item/tool/call","params":{"threadId":thread,"turnId":"fixture-turn","callId":item_id,"tool":"boxen_continuity","arguments":arguments}})
+def invoke(tool, arguments, number):
+    request_id = "tool-"+str(number)
+    item_id = "tool-item-"+str(number)
+    notification("item/started", {"item":{"id":item_id,"type":"dynamicToolCall","tool":tool,"arguments":arguments,"status":"inProgress"}})
+    emit({"id":request_id,"method":"item/tool/call","params":{"threadId":thread,"turnId":"fixture-turn","callId":item_id,"tool":tool,"arguments":arguments}})
     with response_ready:
-        assert response_ready.wait_for(lambda:request_id in responses,timeout=10), "continuity tool was not answered by daemon"
+        assert response_ready.wait_for(lambda:request_id in responses,timeout=10), "resident tool was not answered by daemon"
         response = responses.pop(request_id)
-    notification("item/completed", {"item":{"id":item_id,"type":"dynamicToolCall","tool":"boxen_continuity","status":"completed","contentItems":response["contentItems"],"success":response["success"]}})
+    notification("item/completed", {"item":{"id":item_id,"type":"dynamicToolCall","tool":tool,"status":"completed","contentItems":response["contentItems"],"success":response["success"]}})
     return response, json.loads(response["contentItems"][0]["text"])
 
+
+def continuity(arguments,number):
+    return invoke("boxen_continuity",arguments,number)
 
 
 def emit(message):
@@ -62,6 +66,38 @@ def work(prompt):
             response, result = continuity({"action":"write","expected_revision":state["revision"]-1,"memory":"stale overwrite"},2)
             assert not response["success"] and "revision conflict" in result["error"]
         answer = json.dumps(state)
+    if resident_context is not None and prompt.startswith("Mailbox activation."):
+        activation = json.loads(prompt.rsplit("\n",1)[1])
+        response, inbox = invoke("boxen_mailbox",{},10)
+        assert response["success"] and len(inbox["messages"]) >= len(activation["messages"])
+        for incoming in activation["messages"]:
+            assert any(m["id"]==incoming["id"] and m["delivery"]=="presented" for m in inbox["messages"])
+        eligible = [m for m in activation["messages"] if m["body"].startswith("REPLY")]
+        if eligible:
+            incoming=eligible[0]
+            send={"id":secrets.token_hex(32),"to":incoming["reply_to"],"subject":"Re: "+incoming["subject"],"body":"DELIVERED_EXPLICIT_REPLY","in_reply_to":incoming["id"]}
+            response, sent=invoke("boxen_send_message",send,11)
+            assert response["success"]
+            response, retried=invoke("boxen_send_message",send,12)
+            assert response["success"] and retried["id"]==sent["id"]
+        relays=[m for m in activation["messages"] if m["body"].startswith("RELAY:")]
+        if relays:
+            response,result=invoke("boxen_send_message",{"to":{"type":"resident","id":relays[0]["body"].split(":",1)[1]},"subject":"Resident relay","body":"SILENT resident relay"},14)
+            assert response["success"]
+        if "MAIL_BAD_SEND" in prompt:
+            response,result=invoke("boxen_send_message",{"to":{"type":"resident","id":resident_context["id"]},"subject":"","body":"invalid"},13)
+            assert not response["success"] and "subject" in result["error"]
+        if "MAIL_THREAD" in prompt:
+            request_id=secrets.token_hex(32)
+            response,worker=invoke("boxen_thread_request",{"request_id":request_id,"prompt":"ordinary worker"},20)
+            assert response["success"] and "resident_id" not in worker["record"]["spec"]
+            for attempt in range(100):
+                response,result=invoke("boxen_thread_result",{"request_id":request_id},21+attempt)
+                assert response["success"]
+                if result["done"]:break
+                time.sleep(.05)
+            assert result["response"]=="Fixture result"
+        if not "RESIDENT_" in prompt: answer = "PRIVATE_NARRATION_ONLY"
     for number in range(30 if "SLOW" in prompt else 5):
         if cancel.wait(0.1):
             break

@@ -4,6 +4,7 @@ extern crate cosmo_compat as _;
 mod codex;
 mod jobs;
 mod logging;
+mod mailbox;
 mod platform;
 mod protocol;
 mod residents;
@@ -55,15 +56,19 @@ boxen [--data-dir PATH] log-file HOST:PORT PUBLIC_KEY /absolute/daemon/path.json
 boxen [--data-dir PATH] log-status HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] log-off HOST:PORT PUBLIC_KEY\n\n\
 boxen residents HOST:PORT PUBLIC_KEY\n\
-boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES]\n\
+boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-get HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
-boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES]\n\
-boxen resident-message HOST:PORT PUBLIC_KEY RESIDENT_ID MESSAGE [--id RUN_ID]\n\
+boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
+boxen resident-message HOST:PORT PUBLIC_KEY RESIDENT_ID BODY [--id MESSAGE_ID] [--subject SUBJECT] [--client-id ID]\n\
+boxen mailbox HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
+boxen inbox HOST:PORT PUBLIC_KEY [--client-id ID] [--after SEQUENCE]\n\
+boxen resident-activate HOST:PORT PUBLIC_KEY RESIDENT_ID [--id RUN_ID] [--directions TEXT]\n\
+boxen thread-result HOST:PORT PUBLIC_KEY RUN_ID\n\n\
 boxen platform-check\n\n\
 Pair by exchanging identity public keys through a trusted channel and\n\
 running trust on BOTH machines. --ui must bind to IPv4 loopback.\n\
 Default data: ~/.boxen (or BOXEN_HOME). Default peer port: 42424.\n\
-Use MODEL '-' for the executing machine's configured default.\n\
+MODEL '-' selects the executing machine's configured default.\n\
 Workloads run through Codex app-server with Full access on the destination."
         );
         return Ok(());
@@ -121,6 +126,7 @@ Workloads run through Codex app-server with Full access on the destination."
                 codex,
                 state.public_key().into(),
             )?;
+            jobs.start_dispatcher();
             logging::record(
                 Level::Info,
                 Target::Daemon,
@@ -163,6 +169,10 @@ Workloads run through Codex app-server with Full access on the destination."
             );
         }
         "resident-create" => {
+            let auto = take_option(&mut args, "--auto-activate")?
+                .map(|v| v.parse::<bool>())
+                .transpose()?
+                .unwrap_or(true);
             let id = take_option(&mut args, "--id")?.unwrap_or(state::random_hex()?);
             let identity = take_option(&mut args, "--identity-file")?
                 .map(std::fs::read_to_string)
@@ -184,7 +194,7 @@ Workloads run through Codex app-server with Full access on the destination."
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"resident_create","spec":{"id":id,"name":args[2],"cwd":args[3],"model":if args[4]=="-" {""}else{&args[4]},"identity":identity,"memory":memory,"quota_bytes":quota}})
+                    serde_json::json!({"op":"resident_create","spec":{"id":id,"name":args[2],"cwd":args[3],"model":if args[4]=="-" {""}else{&args[4]},"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
                 )?
             );
         }
@@ -196,6 +206,9 @@ Workloads run through Codex app-server with Full access on the destination."
                 .map(std::fs::read_to_string)
                 .transpose()?;
             let name = take_option(&mut args, "--name")?;
+            let auto = take_option(&mut args, "--auto-activate")?
+                .map(|v| v.parse::<bool>())
+                .transpose()?;
             let quota = take_option(&mut args, "--quota")?
                 .map(|v| v.parse::<usize>())
                 .transpose()?;
@@ -209,30 +222,84 @@ Workloads run through Codex app-server with Full access on the destination."
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"resident_update","id":args[2],"patch":{"expected_revision":revision,"name":name,"identity":identity,"memory":memory,"quota_bytes":quota}})
+                    serde_json::json!({"op":"resident_update","id":args[2],"patch":{"expected_revision":revision,"name":name,"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
                 )?
             );
         }
         "resident-message" => {
             let id = take_option(&mut args, "--id")?.unwrap_or(state::random_hex()?);
+            let client =
+                take_option(&mut args, "--client-id")?.unwrap_or_else(|| state.public_key().into());
+            let subject = take_option(&mut args, "--subject")?.unwrap_or_else(|| "Message".into());
             if args.len() != 4 {
                 return Err(
-                    "resident-message requires HOST:PORT PUBLIC_KEY RESIDENT_ID MESSAGE".into(),
+                    "resident-message requires HOST:PORT PUBLIC_KEY RESIDENT_ID BODY".into(),
                 );
             }
-            let resident = protocol::request(
-                &state,
-                &args[0],
-                &args[1],
-                serde_json::json!({"op":"resident_get","id":args[2]}),
-            )?;
             println!(
                 "{}",
                 protocol::request(
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"start","spec":{"id":id,"thread_id":args[2],"resident_id":args[2],"backend":"codex","cwd":resident["cwd"],"model":resident["model"],"prompt":args[3]}})
+                    serde_json::json!({"op":"mailbox_send","client_id":client,"message":{"id":id,"to":{"type":"resident","id":args[2]},"subject":subject,"body":args[3]}})
+                )?
+            );
+        }
+        "mailbox" if args.len() == 3 => {
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"resident_inbox","id":args[2]})
+                )?
+            );
+        }
+        "inbox" => {
+            let client =
+                take_option(&mut args, "--client-id")?.unwrap_or_else(|| state.public_key().into());
+            let after = take_option(&mut args, "--after")?
+                .unwrap_or_else(|| "0".into())
+                .parse::<u64>()?;
+            if args.len() != 2 {
+                return Err("inbox requires HOST:PORT PUBLIC_KEY".into());
+            }
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"client_inbox","client_id":client,"after":after})
+                )?
+            );
+        }
+        "resident-activate" => {
+            let activation = take_option(&mut args, "--id")?.unwrap_or(state::random_hex()?);
+            let directions = take_option(&mut args, "--directions")?.unwrap_or_default();
+            if args.len() != 3 {
+                return Err("resident-activate requires HOST:PORT PUBLIC_KEY RESIDENT_ID".into());
+            }
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"resident_activate","id":args[2],"activation_id":activation,"directions":directions})
+                )?
+            );
+        }
+        "thread-result" if args.len() == 3 => {
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"thread_result","id":args[2]})
                 )?
             );
         }

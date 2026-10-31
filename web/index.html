@@ -56,13 +56,23 @@
   <label>Backend<select id="backend"><option value="codex">Codex app-server</option></select></label>
   <label>Model<input id="model" placeholder="Executing machine’s configured default"></label>
   <p class="meta">Full access · files and tools belong to the executing machine.</p>
+  <label id="subjectLabel" hidden>Subject<input id="mailSubject" value="Message" maxlength="256"></label>
   <label>Message<textarea id="prompt" rows="3" required></textarea></label>
   <button id="send">Start thread</button><button id="cancel" type="button" disabled>Cancel run</button>
   <button id="detach" type="button" disabled>Detach viewer</button>
 </form>
 <p id="runStatus" role="status" aria-live="polite"></p>
 <p class="meta" id="location"></p>
-<section id="transcript" aria-label="Conversation"></section>
+<section id="messagesView" hidden aria-label="Mailbox messages">
+  <h2>Messages</h2>
+  <p id="mailStatus" role="status"></p>
+  <button id="activateResident" type="button">Activate without a message</button>
+  <label><input id="autoActivate" type="checkbox" style="display:inline;width:auto"> Activate automatically on new mail</label>
+  <section id="mailMessages"></section>
+</section>
+<details id="activityView" open><summary id="activityTitle">Thread activity and response</summary>
+<section id="transcript" aria-label="Execution activity"></section>
+</details>
 <details><summary>Connection test</summary>
   <button id="ping" type="button">Send test message</button><pre id="pingResult"></pre>
 </details>
@@ -73,6 +83,11 @@ if (token) { sessionStorage.setItem('boxen-token', token); history.replaceState(
 const headers = {Authorization: 'Bearer ' + (token || sessionStorage.getItem('boxen-token') || ''), 'Content-Type':'application/json'};
 let identity, target, records = [], selectedThread = '', currentRun = null, watcher, generation = 0, connected = false, submitting = false;
 let items = new Map(), pending = new Map(), cursors = new Map();
+const clientId=localStorage.getItem('boxen-client-id')||id();localStorage.setItem('boxen-client-id',clientId);
+let mailMessages=new Map(),residentCursor=0,clientCursor=0,mailFetching=false;
+let pendingMails={};try{pendingMails=JSON.parse(localStorage.getItem('boxen-pending-mails')||'{}');}catch{}
+const mailKey=(destination,resident)=>destination.peer+':'+resident;
+const savePendingMails=()=>localStorage.setItem('boxen-pending-mails',JSON.stringify(pendingMails));
 let residents=[], editorRevision=0, residentBusy=false;
 let pendingResident;try{pendingResident=JSON.parse(localStorage.getItem('boxen-pending-resident')||'null');}catch{}
 let pendingStart = null, syncing = false, observing = false;
@@ -94,8 +109,15 @@ async function operation(request, destination=target) {
 function controls() {
   const active = currentRun && !terminal(currentRun.status);
   const resident=residents.find(r=>r.id===selectedThread);
+  const pendingMail=target?pendingMails[mailKey(target,selectedThread)]:null;
+  const submissionPending=!resident&&!!pendingStart;
   $('send').textContent = active ? 'Send to active run' : selectedThread ? 'Send follow-up' : 'Start thread';
-  if(resident&&!active)$('send').textContent='Talk to '+resident.name;
+  if(resident)$('send').textContent='Send message to '+resident.name;
+  if(pendingMail?.resident===selectedThread)$('send').textContent='Retry original message';
+  $('subjectLabel').hidden=!resident;
+  $('activateResident').disabled=!connected||syncing||submitting||!!active;
+  $('autoActivate').disabled=!connected||syncing||residentBusy;
+  if(resident)$('autoActivate').checked=resident.auto_activate;
   $('send').disabled = !connected || syncing || submitting || residentBusy;
   $('model').disabled=!!resident;
   $('createResidentButton').disabled=!connected||residentBusy||submitting;
@@ -104,8 +126,9 @@ function controls() {
   for(const input of $('editResident').querySelectorAll('input,textarea,button'))input.disabled=!connected||syncing||residentBusy;
   if(resident)$('residentInfo').textContent='Resident '+resident.id+' · machine '+resident.machine_id+' · stored revision '+resident.revision+' · '+resident.used_bytes+' / '+resident.quota_bytes+' bytes · editor based on revision '+editorRevision;
   $('peer').disabled=submitting||residentBusy;$('address').disabled=submitting||residentBusy;$('threads').disabled=!connected||submitting||residentBusy;$('connectButton').disabled=submitting||residentBusy;
-  $('prompt').disabled = !!pendingStart;
-  if(pendingStart)$('send').textContent='Retry original submission';
+  $('prompt').disabled = submissionPending||pendingMail?.resident===selectedThread;
+  $('mailSubject').disabled=pendingMail?.resident===selectedThread;
+  if(submissionPending)$('send').textContent='Retry original submission';
   $('cancel').disabled = !active || !connected || syncing;
   $('cwd').disabled = !!selectedThread || !!pendingStart; $('model').disabled = !!resident || !!active || !!pendingStart;
   $('detach').disabled = !observing;
@@ -168,7 +191,7 @@ function resolveRequest(run,requestId) {
 }
 function render(run,event) {
   if(event.kind==='status') {
-    $('runStatus').textContent=event.data.status + (event.data.detail && event.data.detail!=='null' ? ' · '+event.data.detail:'');
+    $('runStatus').textContent=(records.find(r=>r.record.spec.id===run)?.record.resident?'Activation ':'')+event.data.status + (event.data.detail && event.data.detail!=='null' ? ' · '+event.data.detail:'');
     if(terminal(event.data.status)) {
       for(const [key,panel] of pending)if(key.startsWith(run+':')){panel.remove();pending.delete(key);}
       if(event.data.status!=='completed')for(const [key,row] of items)if(key.startsWith(run+':')&&!row.completed)row.title.textContent=row.title.textContent.replace(' · inProgress','')+' · interrupted with turn';
@@ -177,6 +200,7 @@ function render(run,event) {
   }
   if(event.kind==='resident_context'){add('Resident continuity','Revision '+event.data.revision+' · host '+event.data.machine_id);return;}
   if(event.kind==='resident_tool_result'){
+    if(event.data.tool&&event.data.tool!=='boxen_continuity'){add(event.data.tool+' · '+(event.data.success?'completed':'rejected'),JSON.stringify(event.data.result,null,2));refreshMailbox(generation,{...target});return;}
     const result=event.data.result,row=itemFor(run,event.data.call_id||event.data.request_id,'Continuity');
     row.title.textContent=event.data.success?(event.data.action==='write'?'Continuity saved':'Continuity read'):'Continuity update rejected';
     row.content.textContent=event.data.success?'Revision '+result.revision+' · '+result.used_bytes+' / '+result.quota_bytes+' bytes\nIdentity: '+result.identity+'\nMemory: '+result.memory:result.error;
@@ -185,26 +209,28 @@ function render(run,event) {
   }
   if(event.kind==='recovery_notice'){add('Recovery notice',event.data.detail);return;}
   if(event.kind==='backend_session_rebuilt'){add('Backend session rebuilt',event.data.detail);return;}
+  if(event.kind==='activation_input'){add('Activation input · private',event.data.text);return;}
   if(event.kind==='user_message') { add('You',event.data.text);return; }
   if(event.kind==='request_answered'){resolveRequest(run,event.data.request_id);return;}
   if(event.kind==='control'){if(event.data.text)add('You · steering',event.data.text);else add('Control',event.data.type);return;}
   if(event.kind==='control_error'){add('Control error',event.data.message);return;}
   if(event.kind!=='backend')return;
   const message=event.data, method=message.method, params=message.params||{};
-  if(message.id!==undefined){if(method==='item/tool/call'&&params.tool==='boxen_continuity'&&records.find(r=>r.record.spec.id===run)?.record.spec.resident_id)return;answerPanel(run,message);return;}
+  if(message.id!==undefined){if(method==='item/tool/call'&&['boxen_continuity','boxen_mailbox','boxen_send_message','boxen_thread_request','boxen_thread_result'].includes(params.tool)&&records.find(r=>r.record.spec.id===run)?.record.spec.resident_id)return;answerPanel(run,message);return;}
   if(method==='serverRequest/resolved'){resolveRequest(run,params.requestId);return;}
   if(method==='item/started'||method==='item/completed') {
     const item=params.item||{};
-    if(item.type==='userMessage'||(item.type==='dynamicToolCall'&&item.tool==='boxen_continuity'))return;
-    const row=itemFor(run,item.id,labels[item.type]||item.type||'Activity');
-    row.title.textContent=(labels[item.type]||item.type||'Activity')+(item.status?' · '+item.status:'');
+    const label=item.type==='agentMessage'&&records.find(r=>r.record.spec.id===run)?.record.resident?'Private narration':labels[item.type]||item.type||'Activity';
+    if(item.type==='userMessage'||(item.type==='dynamicToolCall'&&['boxen_continuity','boxen_mailbox','boxen_send_message','boxen_thread_request','boxen_thread_result'].includes(item.tool)))return;
+    const row=itemFor(run,item.id,label);
+    row.title.textContent=label+(item.status?' · '+item.status:'');
     row.completed=method==='item/completed';
     const text=itemText(item);
     if(text || method==='item/completed')row.content.textContent=text;
     return;
   }
   if(method?.endsWith('Delta')||method?.endsWith('/delta')) {
-    const label=method.includes('reasoning')?'Thinking':method.includes('agentMessage')?'Agent':method.includes('commandExecution')?'Command':'Activity';
+    const label=method.includes('reasoning')?'Thinking':method.includes('agentMessage')?(records.find(r=>r.record.spec.id===run)?.record.resident?'Private narration':'Agent'):method.includes('commandExecution')?'Command':'Activity';
     const row=itemFor(run,params.itemId,label);
     if(method.includes('outputDelta')&&!row.hasOutput){row.content.append(document.createTextNode('\n\n'));row.hasOutput=true;}
     row.content.append(document.createTextNode(params.delta||''));return;
@@ -217,10 +243,34 @@ function render(run,event) {
     summary.textContent=method;pre.textContent=JSON.stringify(params,null,2);details.append(summary,pre);$('transcript').append(details);
   }
 }
+function displayMessages() {
+  const presented=new Map();for(const run of records)for(const message of run.record.mailbox?.message_ids||[])presented.set(message,run.record.spec.id);
+  const resident=residents.find(r=>r.id===selectedThread);$('mailMessages').replaceChildren();
+  for(const message of [...mailMessages.values()].sort((a,b)=>a.seq-b.seq)){
+    const article=document.createElement('article'),title=document.createElement('strong'),body=document.createElement('pre'),status=document.createElement('div');
+    const outgoing=message.sender.type==='client';
+    title.textContent=(outgoing?'You → '+(resident?.name||'Resident'):(resident?.name||'Resident')+' → You')+' · '+message.subject;
+    body.textContent=message.body;status.className='meta';status.textContent=(outgoing?(presented.has(message.id)?'Presented in activation '+presented.get(message.id).slice(0,12):'Queued in resident mailbox'):'Queued in your inbox')+(message.in_reply_to?' · Reply to '+message.in_reply_to.slice(0,12):'');
+    article.append(title,body,status);$('mailMessages').append(article);
+  }
+}
+async function refreshMailbox(gen,destination) {
+  const resident=selectedThread;if(!residents.some(r=>r.id===resident)||mailFetching)return;
+  mailFetching=true;
+  try{
+    const [incoming,outgoing]=await Promise.all([operation({op:'resident_inbox',id:resident,after:residentCursor},destination),operation({op:'client_inbox',client_id:clientId,after:clientCursor},destination)]);
+    if(gen!==generation||selectedThread!==resident)return;
+    residentCursor=incoming.next_after;clientCursor=outgoing.next_after;
+    for(const message of incoming.messages)if(message.sender.type==='client'&&message.sender.id===clientId){mailMessages.set(message.id,message);const key=mailKey(destination,resident),unconfirmed=pendingMails[key];if(unconfirmed?.message.id===message.id){delete pendingMails[key];savePendingMails();if($('prompt').value===unconfirmed.message.body)$('prompt').value='';controls();}}
+    for(const message of outgoing.messages)if(message.sender.type==='resident'&&message.sender.id===resident)mailMessages.set(message.id,message);
+    displayMessages();$('mailStatus').textContent='Messages are separate from private execution activity. A finished activation does not imply a reply.';
+  }catch(error){if(gen===generation)$('mailStatus').textContent='Mailbox connection unavailable · '+error.message;}
+  finally{mailFetching=false;}
+}
 function updateThreads() {
   const latest=new Map(), titles=new Map();for(const record of records){const thread=record.record.spec.thread_id;latest.set(thread,record);if(!titles.has(thread))titles.set(thread,record.record.spec.prompt);}
   $('threads').replaceChildren(new Option('New anonymous thread',''));
-  for(const resident of residents)$('threads').append(new Option('Resident: '+resident.name+' · '+(latest.get(resident.id)?.status||'at home'),resident.id));
+  for(const resident of residents){const status=latest.get(resident.id)?.status;const home=!status||status==='completed'?'at home':terminal(status)?'at home · last activation '+status:status;$('threads').append(new Option('Resident: '+resident.name+' · '+home,resident.id));}
   for(const [thread,record] of [...latest].reverse())if(!residents.some(r=>r.id===thread))$('threads').append(new Option(titles.get(thread).slice(0,55)+' · '+record.status,thread));
   $('threads').value=selectedThread;
 }
@@ -265,7 +315,7 @@ async function watch(run, gen, destination) {
           $('connection').textContent=syncing?'Connected · replaying retained events':'Connected · live events';
           $('location').textContent='Executing machine: '+$('peer').selectedOptions[0].textContent+' · '+currentRun.record.spec.cwd+' · run '+run.slice(0,12)+' · event '+after;
           const index=records.findIndex(r=>r.record.spec.id===run);if(index>=0)records[index]=currentRun;
-          updateThreads();controls();
+          updateThreads();controls();refreshMailbox(gen,destination);
           if(batch.done){done=true;break;}
         }
         if(done)break;
@@ -288,10 +338,13 @@ async function watch(run, gen, destination) {
 function detach() { observing=false;generation++;watcher?.abort();watcher=null;syncing=false;controls(); }
 function restorePending(destination) {
   let savedPending;try{savedPending=JSON.parse(localStorage.getItem('boxen-pending-start')||'null');}catch{}
-  pendingStart=savedPending?.target.peer===destination.peer?savedPending.spec:null;
+  const candidate=savedPending?.target.peer===destination.peer?savedPending.spec:null;
+  const residentView=residents.some(r=>r.id===selectedThread);
+  pendingStart=candidate&&(candidate.resident_id?selectedThread===candidate.resident_id:!residentView&&(!selectedThread||selectedThread===candidate.thread_id))?candidate:null;
   if(!pendingStart)return;
   const accepted=records.find(r=>r.record.spec.id===pendingStart.id);
   if(accepted){selectedThread=accepted.record.spec.thread_id;pendingStart=null;rememberSubmission();}
+  else if(pendingStart.resident_id){$('prompt').value=pendingStart.prompt;pendingStart=null;rememberSubmission();$('runStatus').textContent='The earlier direct resident submission has no retained run. Its text is restored; sending now queues a new mailbox message.';}
   else{$('cwd').value=pendingStart.cwd;$('model').value=pendingStart.model;$('prompt').value=pendingStart.prompt;$('runStatus').textContent='Prior submission is unconfirmed. Retry sends its original input and ID.';}
 }
 async function refreshRecords(gen,destination) {
@@ -301,12 +354,13 @@ async function refreshRecords(gen,destination) {
   $('residentIssues').textContent=issues.length?'Resident recovery incidents: '+issues.map(i=>i.id+' · '+i.detail+' · '+i.recovery).join(' | '):'';
   let recoveredResident=false;
   if(pendingResident?.target.peer===destination.peer&&residents.some(r=>r.id===pendingResident.spec.id)){selectedThread=pendingResident.spec.id;recoveredResident=true;pendingResident=null;localStorage.removeItem('boxen-pending-resident');$('createResidentStatus').textContent='Resident created.';}
-  restorePending(destination);updateThreads();save();
+  restorePending(destination);updateThreads();save();await refreshMailbox(gen,destination);
   if(recoveredResident){showThread(selectedThread);return false;}
   return true;
 }
 async function showThread(thread, refresh=false) {
   detach();selectedThread=thread;currentRun=null;items=new Map();pending=new Map();cursors=new Map();$('transcript').replaceChildren();$('runStatus').textContent='';$('location').textContent='';save();
+  mailMessages=new Map();residentCursor=0;clientCursor=0;const residentView=residents.some(r=>r.id===thread);$('messagesView').hidden=!residentView;$('activityTitle').textContent=residentView?'Private execution activity (not sent messages)':'Thread activity and response';$('activityView').open=!residentView;$('mailMessages').replaceChildren();const unsent=target?pendingMails[mailKey(target,thread)]:null;if(unsent){$('prompt').value=unsent.message.body;$('mailSubject').value=unsent.message.subject;}
   observing=true;syncing=true;loadResidentEditor();controls();const gen=generation,destination={...target};let attempt=0;
   // Refresh the catalog after each terminal run and while idle. Progress itself
   // always comes from the ordered stream, never from snapshot polling.
@@ -355,14 +409,23 @@ async function connect() {
 }
 $('connect').onsubmit=event=>{event.preventDefault();connect();};
 $('threads').onchange=()=>showThread($('threads').value,true);
-$('peer').onchange=()=>{detach();connected=false;selectedThread='';currentRun=null;pendingStart=null;records=[];residents=[];updateThreads();$('transcript').replaceChildren();$('residentDetails').hidden=true;target={peer:$('peer').value,address:$('address').value};$('addressLabel').hidden=$('peer').value===identity;controls();};
+$('peer').onchange=()=>{detach();connected=false;selectedThread='';currentRun=null;pendingStart=null;records=[];residents=[];mailMessages.clear();$('messagesView').hidden=true;$('mailMessages').replaceChildren();updateThreads();$('transcript').replaceChildren();$('residentDetails').hidden=true;target={peer:$('peer').value,address:$('address').value};$('addressLabel').hidden=$('peer').value===identity;controls();};
 $('work').onsubmit=async event=>{
   event.preventDefault();if(!connected||syncing)return;
   const gen=generation,destination={...target};
-  const steering=currentRun&&!terminal(currentRun.status);
+  const resident=residents.find(r=>r.id===selectedThread);
+  const steering=!resident&&currentRun&&!terminal(currentRun.status);
   submitting=true;controls();
   try {
     const text=$('prompt').value;
+    if(resident){
+      const key=mailKey(destination,resident.id);let pendingMail=pendingMails[key];
+      if(!pendingMail){pendingMail={target:destination,resident:resident.id,message:{id:id(),to:{type:'resident',id:resident.id},subject:$('mailSubject').value,body:text}};pendingMails[key]=pendingMail;savePendingMails();controls();}
+      if(pendingMail.target.peer!==destination.peer||pendingMail.resident!==resident.id)throw new Error('An earlier message is unconfirmed at another destination. Its original ID remains available there.');
+      const message=await operation({op:'mailbox_send',client_id:clientId,message:pendingMail.message},destination);
+      delete pendingMails[key];savePendingMails();if(gen!==generation)return;
+      mailMessages.set(message.id,message);displayMessages();$('prompt').value='';$('mailStatus').textContent='Saved in the resident mailbox; a reply is optional.';return;
+    }
     if(steering) {
       await operation({op:'control',id:currentRun.record.spec.id,action:{type:'steer',text}});$('prompt').value='';return;
     }
@@ -371,7 +434,7 @@ $('work').onsubmit=async event=>{
     const snapshot=await operation({op:'start',spec:pendingStart},destination);if(gen!==generation)return;pendingStart=null;rememberSubmission();
     if(!records.some(r=>r.record.spec.id===snapshot.record.spec.id))records.push(snapshot);selectedThread=snapshot.record.spec.thread_id;$('prompt').value='';
     updateThreads();save();showThread(selectedThread);
-  }catch(error){if(error.definitive){pendingStart=null;rememberSubmission();$('runStatus').textContent='Request rejected: '+error.message;}else{$('runStatus').textContent=steering?'Steering delivery unconfirmed: '+error.message+'. Inspect retained events before sending again.':'Submission not confirmed: '+error.message+'. Retrying submits the same run ID.';}}
+  }catch(error){if(resident){if(error.definitive){delete pendingMails[mailKey(destination,resident.id)];savePendingMails();}$('mailStatus').textContent=error.definitive?'Message rejected: '+error.message:'Message acceptance unconfirmed: '+error.message+'. Retry retains its original ID.';}else if(error.definitive){pendingStart=null;rememberSubmission();$('runStatus').textContent='Request rejected: '+error.message;}else{$('runStatus').textContent=steering?'Steering delivery unconfirmed: '+error.message+'. Inspect retained events before sending again.':'Submission not confirmed: '+error.message+'. Retrying submits the same run ID.';}}
   finally{submitting=false;controls();}
 };
 $('createResident').onsubmit=async event=>{
@@ -402,6 +465,13 @@ $('editResident').onsubmit=async event=>{
 $('reloadResident').onclick=async()=>{
   const residentId=selectedThread,destination={...target};
   try{const resident=await operation({op:'resident_get',id:residentId},destination);if(selectedThread!==residentId||target.peer!==destination.peer)return;residents=residents.map(r=>r.id===residentId?resident:r);loadResidentEditor();controls();}catch(error){$('residentEditStatus').textContent=error.message;}
+};
+$('activateResident').onclick=async()=>{
+  const activation=id();try{await operation({op:'resident_activate',id:selectedThread,activation_id:activation});$('mailStatus').textContent='Independent activation accepted; no reply is required.';}catch(error){$('mailStatus').textContent=error.message;}
+};
+$('autoActivate').onchange=async()=>{
+  const resident=residents.find(r=>r.id===selectedThread);if(!resident)return;
+  try{const updated=await operation({op:'resident_update',id:resident.id,patch:{expected_revision:resident.revision,auto_activate:$('autoActivate').checked}});residents=residents.map(r=>r.id===updated.id?updated:r);if(editorRevision===resident.revision)editorRevision=updated.revision;controls();}catch(error){$('mailStatus').textContent=error.message;controls();}
 };
 $('cancel').onclick=async()=>{try{await operation({op:'control',id:currentRun.record.spec.id,action:{type:'cancel'}});$('runStatus').textContent='Cancellation requested; waiting for backend confirmation';}catch(error){$('runStatus').textContent=error.message;}};
 $('detach').onclick=()=>{detach();connected=false;controls();$('connection').textContent='Viewer detached. Execution continues; connect to reattach.';};

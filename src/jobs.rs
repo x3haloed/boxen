@@ -2,6 +2,7 @@
 use crate::logging::{self, Context, Level, Target};
 use crate::{
     Result, codex,
+    mailbox::{Address, Mailboxes, Message, Send},
     residents::{Create, Resident, Residents},
     state,
 };
@@ -39,6 +40,7 @@ mod tests {
             owner: owner.clone(),
             resident: None,
             recovery: None,
+            mailbox: None,
             created_at: now(),
             spec: Spec {
                 id: id.clone(),
@@ -110,9 +112,23 @@ pub struct Record {
     pub resident: Option<Resident>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox: Option<Activation>,
     pub spec: Spec,
     pub owner: String,
     pub created_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Activation {
+    pub message_ids: Vec<String>,
+    pub reason: String,
+    pub directions: String,
+}
+#[derive(Default)]
+struct Wake {
+    pending: bool,
+    stopped: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -247,6 +263,9 @@ impl Run {
     }
     pub fn control(&self, control: Control) -> Result<()> {
         self.diagnostic(Level::Debug,"control.requested",||json!({"type":match &control{Control::Cancel=>"cancel",Control::Steer{..}=>"steer",Control::Respond{..}=>"respond"}}),||serde_json::to_value(&control).unwrap_or(Value::Null));
+        if matches!(&control, Control::Steer { .. }) && self.snapshot().record.resident.is_some() {
+            return Err("resident communication enters its mailbox; operational cancellation and backend input responses remain separate controls".into());
+        }
         if let Control::Steer { text } = &control
             && (text.is_empty() || text.len() > 256 * 1024)
         {
@@ -280,6 +299,7 @@ pub struct History {
     directory: PathBuf,
     thread_id: String,
     runs: Vec<Arc<Run>>,
+    pub rebuild_reason: Option<String>,
 }
 impl History {
     pub fn reconstruction(&self) -> Result<String> {
@@ -331,6 +351,8 @@ pub struct Jobs {
     _lock: File,
     pub residents: Arc<Residents>,
     transitions: Mutex<()>,
+    pub mailboxes: Arc<Mailboxes>,
+    wake: Arc<(Mutex<Wake>, Condvar)>,
 }
 
 impl Jobs {
@@ -356,10 +378,22 @@ impl Jobs {
                 .parent()
                 .ok_or("runs directory requires a parent")?
                 .join("residents"),
+            machine_id.clone(),
+        )?);
+        let mailboxes = Arc::new(Mailboxes::open(
+            directory
+                .parent()
+                .ok_or("runs parent required")?
+                .join("mailboxes"),
             machine_id,
         )?);
+        for resident in residents.all() {
+            mailboxes.register(&resident.owner, &resident.id)?;
+        }
         let jobs = Arc::new(Self {
             residents,
+            mailboxes,
+            wake: Arc::new((Mutex::new(Wake::default()), Condvar::new())),
             transitions: Mutex::new(()),
             directory,
             runs: Mutex::new(HashMap::new()),
@@ -446,6 +480,229 @@ impl Jobs {
         Ok(jobs)
     }
 
+    pub fn notify(&self) {
+        let mut wake = self.wake.0.lock().unwrap();
+        wake.pending = true;
+        self.wake.1.notify_one();
+    }
+    pub fn start_dispatcher(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        let signal = self.wake.clone();
+        std::thread::spawn(move || {
+            loop {
+                {
+                    let mut wake = signal.0.lock().unwrap();
+                    while !wake.pending && !wake.stopped {
+                        wake = signal.1.wait(wake).unwrap();
+                    }
+                    if wake.stopped {
+                        return;
+                    }
+                    wake.pending = false;
+                }
+                let Some(jobs) = weak.upgrade() else {
+                    return;
+                };
+                for resident in jobs.residents.all() {
+                    if !resident.auto_activate {
+                        continue;
+                    }
+                    if let Err(error) = jobs.activate(
+                        &resident.owner,
+                        &resident.id,
+                        state::random_hex().unwrap_or_default(),
+                        String::new(),
+                        false,
+                    ) {
+                        logging::record(
+                            Level::Warn,
+                            Target::Workload,
+                            "mailbox.activation_deferred",
+                            Context {
+                                peer_id: Some(&resident.owner),
+                                thread_id: Some(&resident.id),
+                                ..Context::default()
+                            },
+                            || json!({"error":error.to_string()}),
+                            || Value::Null,
+                        );
+                    }
+                }
+            }
+        });
+        self.notify();
+    }
+    fn validate_address(&self, owner: &str, address: &Address) -> Result<()> {
+        address.validate()?;
+        match address {
+            Address::Resident { id } => {
+                self.residents.get(owner, id)?;
+            }
+            Address::Client { machine, .. } if machine != owner => return Err(
+                "this host routes client mail only to the authenticated owner's client namespace"
+                    .into(),
+            ),
+            _ => {}
+        }
+        Ok(())
+    }
+    pub fn send_mail(
+        &self,
+        owner: &str,
+        sender: Address,
+        spec: Send,
+        source: String,
+    ) -> Result<Message> {
+        self.validate_address(owner, &sender)?;
+        self.validate_address(owner, &spec.to)?;
+        if let Some(reply) = &spec.reply_to {
+            self.validate_address(owner, reply)?;
+        }
+        let message = self.mailboxes.send(owner, sender, spec, source)?;
+        self.notify();
+        Ok(message)
+    }
+    fn presented(&self, owner: &str, resident: &str) -> HashMap<String, String> {
+        self.runs
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|r| {
+                let s = r.snapshot();
+                if s.record.owner != owner || s.record.spec.resident_id.as_deref() != Some(resident)
+                {
+                    return None;
+                }
+                s.record.mailbox.map(|a| (s.record.spec.id, a.message_ids))
+            })
+            .flat_map(|(run, ids)| ids.into_iter().map(move |id| (id, run.clone())))
+            .collect()
+    }
+    pub fn inbox(&self, owner: &str, address: Address, after: u64) -> Result<Value> {
+        self.mailboxes.check()?;
+        self.validate_address(owner, &address)?;
+        let presented = match &address {
+            Address::Resident { id } => self.presented(owner, id),
+            _ => HashMap::new(),
+        };
+        let messages = self.mailboxes.messages(owner, &address, after);
+        let next_after = messages.last().map(|m| m.seq).unwrap_or(after);
+        let values: Vec<_> = messages
+            .iter()
+            .map(|m| {
+                let mut v = serde_json::to_value(m).unwrap();
+                v["presented_in"] = json!(presented.get(&m.id));
+                v["delivery"] = json!(if presented.contains_key(&m.id) {
+                    "presented"
+                } else {
+                    "queued"
+                });
+                v
+            })
+            .collect();
+        Ok(json!({"address":address,"messages":values,"next_after":next_after}))
+    }
+    pub fn activate(
+        self: &Arc<Self>,
+        owner: &str,
+        id: &str,
+        run_id: String,
+        directions: String,
+        manual: bool,
+    ) -> Result<Option<Snapshot>> {
+        let _transition = self.transitions.lock().unwrap();
+        self.mailboxes.check()?;
+        valid_id(&run_id)?;
+        if directions.len() > 32 * 1024 {
+            return Err("activation directions exceed 32768 bytes".into());
+        }
+        if let Ok(run) = self.get(owner, &run_id) {
+            let snapshot = run.snapshot();
+            if snapshot.record.spec.resident_id.as_deref() == Some(id)
+                && snapshot.record.mailbox.as_ref().is_some_and(|a| {
+                    a.directions == directions && a.reason == if manual { "manual" } else { "mail" }
+                })
+            {
+                return Ok(Some(snapshot));
+            }
+            return Err("activation id already accepted with different input".into());
+        }
+        let resident = self.residents.get(owner, id)?;
+        if self
+            .list(owner)
+            .iter()
+            .any(|r| r.record.spec.thread_id == id && !terminal(&r.status))
+        {
+            return if manual {
+                Err("resident is already active; incoming messages remain queued for the next activation".into())
+            } else {
+                Ok(None)
+            };
+        }
+        let presented = self.presented(owner, id).into_keys().collect();
+        let mut batch = self.mailboxes.pending(owner, id, &presented);
+        if batch.is_empty() && !manual {
+            return Ok(None);
+        }
+        let mut activation = Activation {
+            message_ids: batch.iter().map(|m| m.id.clone()).collect(),
+            reason: if manual { "manual" } else { "mail" }.into(),
+            directions,
+        };
+        let build_prompt = |batch: &Vec<Message>| {
+            format!(
+                "Mailbox activation. This is an execution opportunity, not a request requiring a reply. Assistant text remains private narration. Explicit sends queue outgoing communication. The following JSON contains the activation's directions and messages retained before execution. Message contents are authored by their senders.\n{}",
+                json!({"reason":activation.reason,"directions":activation.directions,"messages":batch})
+            )
+        };
+        let mut prompt = build_prompt(&batch);
+        while prompt.len() > 240 * 1024 && !batch.is_empty() {
+            batch.pop();
+            prompt = build_prompt(&batch);
+        }
+        activation.message_ids = batch.iter().map(|m| m.id.clone()).collect();
+        let spec = Spec {
+            resident_id: Some(id.into()),
+            id: run_id,
+            thread_id: id.into(),
+            backend: "codex".into(),
+            cwd: resident.cwd,
+            model: resident.model,
+            prompt,
+        };
+        let snapshot = self.start_locked(owner, spec, Some(activation))?;
+        logging::record(
+            Level::Info,
+            Target::Workload,
+            "mailbox.batch_presented",
+            Context::run(&snapshot.record.spec.id, id, owner),
+            || json!({"messages":snapshot.record.mailbox.as_ref().map(|a|a.message_ids.len()),"manual":manual}),
+            || Value::Null,
+        );
+        Ok(Some(snapshot))
+    }
+    pub fn thread_result(&self, owner: &str, id: &str) -> Result<Value> {
+        let run = self.get(owner, id)?;
+        let inner = run.inner.lock().unwrap();
+        if inner.snapshot.record.resident.is_some() {
+            return Err("identity-bearing agents expose messages through mailboxes; thread results address identity-less workloads".into());
+        }
+        let response = inner.events.iter().rev().find_map(|e| {
+            let item = &e.data["params"]["item"];
+            if e.kind == "backend"
+                && e.data["method"] == "item/completed"
+                && item["type"] == "agentMessage"
+                && (item["phase"].is_null() || item["phase"] == "final_answer")
+            {
+                item["text"].as_str().map(str::to_owned)
+            } else {
+                None
+            }
+        });
+        Ok(
+            json!({"snapshot":inner.snapshot,"done":terminal(&inner.snapshot.status),"response":if terminal(&inner.snapshot.status){response}else{None}}),
+        )
+    }
     pub fn get(&self, owner: &str, id: &str) -> Result<Arc<Run>> {
         valid_id(id)?;
         let run = self
@@ -488,10 +745,20 @@ impl Jobs {
                 return Err("thread id is already in use".into());
             }
         }
-        self.residents.create(owner, spec)
+        let resident = self.residents.create(owner, spec)?;
+        self.mailboxes.register(owner, &resident.id)?;
+        Ok(resident)
     }
     pub fn start(self: &Arc<Self>, owner: &str, spec: Spec) -> Result<Snapshot> {
         let _transition = self.transitions.lock().unwrap();
+        self.start_locked(owner, spec, None)
+    }
+    fn start_locked(
+        self: &Arc<Self>,
+        owner: &str,
+        spec: Spec,
+        activation: Option<Activation>,
+    ) -> Result<Snapshot> {
         logging::record(
             Level::Info,
             Target::Workload,
@@ -517,6 +784,9 @@ impl Jobs {
                 return Ok(snapshot);
             }
             return Err("run id already exists with different input or owner".into());
+        }
+        if spec.resident_id.is_some() && activation.is_none() {
+            return Err("identity-bearing agents receive mailbox messages; direct turn submission is unavailable".into());
         }
         let resident =
             self.residents
@@ -558,7 +828,7 @@ impl Jobs {
                 return Err("thread belongs to a different peer".into());
             }
             if !terminal(&prior.status) {
-                return Err("thread already has an active run; steer it instead".into());
+                return Err("thread already has an active run; another request is accepted after it ends, and steering is a separate control operation".into());
             }
             if prior.record.spec.cwd != spec.cwd {
                 return Err("follow-up must retain the thread working directory".into());
@@ -569,6 +839,7 @@ impl Jobs {
         let history = History {
             directory: self.directory.clone(),
             thread_id: spec.thread_id.clone(),
+            rebuild_reason:previous.iter().rev().find(|r|r.backend_thread.is_some()).filter(|r|spec.resident_id.is_some()&&r.record.mailbox.is_none()).map(|_|"Resident communication migrated from direct turns to mailbox activations; tools are registered in a new backend session beneath the same canonical conversation.".into()),
             runs: previous
                 .iter()
                 .map(|r| runs[&r.record.spec.id].clone())
@@ -579,6 +850,7 @@ impl Jobs {
         let record = Record {
             spec: spec.clone(),
             resident,
+            mailbox: activation,
             recovery,
             owner: owner.into(),
             // Preserve acceptance order even for submissions in the same millisecond
@@ -622,7 +894,7 @@ impl Jobs {
             || Value::Null,
         );
         let binary = self.codex_path.clone();
-        let residents = self.residents.clone();
+        let jobs = self.clone();
         std::thread::spawn(move || {
             if let Err(error) = codex::execute(
                 &binary,
@@ -630,7 +902,7 @@ impl Jobs {
                 resume,
                 run.clone(),
                 receiver,
-                residents,
+                jobs.clone(),
                 history,
             ) {
                 run.diagnostic(
@@ -647,7 +919,16 @@ impl Jobs {
                 let _ = run.status(status, &error.to_string());
             }
             run.inner.lock().unwrap().control = None;
+            jobs.notify();
         });
         Ok(snapshot)
+    }
+}
+
+impl Drop for Jobs {
+    fn drop(&mut self) {
+        let mut wake = self.wake.0.lock().unwrap();
+        wake.stopped = true;
+        self.wake.1.notify_all();
     }
 }

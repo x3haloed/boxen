@@ -344,6 +344,56 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 owner,
                 serde_json::from_value::<Spec>(request["spec"].clone())?,
             )?)?),
+            "mailbox_status" => Ok(jobs.mailboxes.status()),
+            "mailbox_send" => {
+                let client = request["client_id"].as_str().ok_or("client_id required")?;
+                crate::jobs::valid_id(client)?;
+                let spec: crate::mailbox::Send =
+                    serde_json::from_value(request["message"].clone())?;
+                let source = format!("client:{owner}:{client}:{}", spec.id);
+                Ok(serde_json::to_value(jobs.send_mail(
+                    owner,
+                    crate::mailbox::Address::Client {
+                        machine: owner.into(),
+                        id: client.into(),
+                    },
+                    spec,
+                    source,
+                )?)?)
+            }
+            "resident_inbox" => jobs.inbox(
+                owner,
+                crate::mailbox::Address::Resident {
+                    id: request["id"].as_str().ok_or("resident id required")?.into(),
+                },
+                request["after"].as_u64().unwrap_or(0),
+            ),
+            "client_inbox" => jobs.inbox(
+                owner,
+                crate::mailbox::Address::Client {
+                    machine: owner.into(),
+                    id: request["client_id"]
+                        .as_str()
+                        .ok_or("client id required")?
+                        .into(),
+                },
+                request["after"].as_u64().unwrap_or(0),
+            ),
+            "resident_activate" => Ok(serde_json::to_value(
+                jobs.activate(
+                    owner,
+                    request["id"].as_str().ok_or("resident id required")?,
+                    request["activation_id"]
+                        .as_str()
+                        .ok_or("activation_id required")?
+                        .into(),
+                    request["directions"].as_str().unwrap_or("").into(),
+                    true,
+                )?,
+            )?),
+            "thread_result" => {
+                jobs.thread_result(owner, request["id"].as_str().ok_or("run id required")?)
+            }
             "resident_issues" => Ok(json!(jobs.residents.issues())),
             "resident_create" => Ok(jobs
                 .create_resident(owner, serde_json::from_value(request["spec"].clone())?)?
@@ -359,14 +409,15 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 .residents
                 .get(owner, request["id"].as_str().ok_or("resident id required")?)?
                 .value()),
-            "resident_update" => Ok(jobs
-                .residents
-                .update(
+            "resident_update" => {
+                let resident = jobs.residents.update(
                     owner,
                     request["id"].as_str().ok_or("resident id required")?,
                     serde_json::from_value(request["patch"].clone())?,
-                )?
-                .value()),
+                )?;
+                jobs.notify();
+                Ok(resident.value())
+            }
             "list" => Ok(serde_json::to_value(jobs.list(owner))?),
             "get" => Ok(serde_json::to_value(
                 jobs.get(owner, request["id"].as_str().ok_or("run id required")?)?

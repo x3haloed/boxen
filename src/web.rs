@@ -153,7 +153,7 @@ fn handle(
             stream,
             403,
             "text/plain",
-            b"Use the localhost control URL printed by Boxen",
+            b"This endpoint accepts the localhost control URL printed by Boxen",
         );
     }
     if request == "GET / HTTP/1.1" {
@@ -164,11 +164,11 @@ fn handle(
             stream,
             401,
             "text/plain",
-            b"Open the control URL printed by Boxen, including its fragment",
+            b"Local API authorization is the bearer capability in the daemon's printed control URL fragment",
         );
     }
     if request == "GET /api/status HTTP/1.1" {
-        let status = json!({"api_version":1,"identity":state.public_key(),"peers":state.peers()?});
+        let status = json!({"api_version":2,"communication":{"resident":"mailbox","anonymous_thread":"request_response"},"identity":state.public_key(),"peers":state.peers()?});
         return respond(
             stream,
             200,

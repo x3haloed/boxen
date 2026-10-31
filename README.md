@@ -48,9 +48,9 @@ See [remote workloads and live streaming](docs/workloads.md) for ownership, reco
 
 ## Residents
 
-Create a named resident without assigning a job. It has one canonical conversation and a separate revisioned identity/memory store with an enforced configurable quota. It can maintain its own continuity through a daemon-serviced tool. Interrupted work leaves a visible incident while the resident stays available for its next message.
+Create a named resident without assigning a job. It has one canonical conversation and a separate revisioned identity/memory store with an enforced configurable quota. It can maintain its own continuity through a daemon-serviced tool. Each resident has a durable mailbox with default automatic activation, batched input, and explicit sending. Final assistant text remains private activity; anonymous threads retain ordinary request/response. Interrupted work leaves a visible incident while the resident stays available for its next message.
 
-See [the first resident](docs/residents.md) for UI, CLI, API, recovery, storage, and current limits. This first implementation stays on one selected host; synchronization and movement come later.
+See [the first resident](docs/residents.md) for continuity and [mailboxes](docs/mailboxes.md) for communication, activation, tools, CLI/API, and current limits. This first implementation stays on one selected host; synchronization and movement come later.
 
 ## Live daemon diagnostics
 
@@ -76,6 +76,7 @@ python3 scripts/smoke.py
 python3 scripts/workload-smoke.py
 python3 scripts/recovery-smoke.py
 python3 scripts/resident-smoke.py
+python3 scripts/mailbox-smoke.py
 python3 scripts/logging-smoke.py
 python3 scripts/platform-smoke.py
 # After building the portable artifact:
@@ -83,6 +84,7 @@ python3 scripts/smoke.py target/cosmo/release/boxen.com
 python3 scripts/workload-smoke.py target/cosmo/release/boxen.com
 python3 scripts/recovery-smoke.py target/cosmo/release/boxen.com
 python3 scripts/resident-smoke.py target/cosmo/release/boxen.com
+python3 scripts/mailbox-smoke.py target/cosmo/release/boxen.com
 python3 scripts/logging-smoke.py target/cosmo/release/boxen.com
 python3 scripts/platform-smoke.py target/cosmo/release/boxen.com
 ```

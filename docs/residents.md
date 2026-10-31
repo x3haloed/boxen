@@ -2,15 +2,13 @@
 
 A resident can have a name and a home without having a job. Creating one saves its identity and memory; it does not start inference or require a task description. This first slice hosts each resident on one explicitly selected machine, with one canonical Boxen thread and Codex as the runtime. Heartbeats, movement, replication, branches, clones, and built-in inference remain later work, not abandoned beta requirements.
 
-## Agreed communication contract and current gap
+## Mailbox communication
 
-Every identity-bearing agent has its own mailbox by default in the intended design. Inbox receipt, activation, and outgoing communication are independent; assistant output is private narration, and sending to correspondents or rooms is an explicit operation. Identity-less ephemeral threads remain request/response workload control channels, addressable by thread ID through separate agent-facing tools. This split follows identity attachment, not a configurable communication mode.
-
-The current first-resident implementation still submits direct turns and shows assistant output to authorized observers. Mailbox allocation, batching, explicit sending, independent activation, and inter-agent thread requests are not implemented yet. The CLI `resident-message` command is provisional direct turn submission, not durable queued delivery. Runtime context describes these current mechanics and does not claim that a nonexistent send tool is required. See [agreed decisions](decisions.md) for the target contract and general scheduler/heartbeat pattern.
+Every resident has its own durable mailbox. Incoming messages, activation, and explicit sending are separate; assistant output is private narration. Automatic activation on new mail is enabled by default. Anonymous threads retain their distinct request/response behavior. [Mailboxes](mailboxes.md) documents the implemented delivery, batching, API, tool, and migration contracts.
 
 ## Use it
 
-Connect to a machine in the provisional controls, expand **Create a resident**, and enter a name, destination-local working directory, optional model, identity, memory, and continuity quota. The resident appears in the thread selector even before its first conversation. Select it and send a message. Subsequent messages use the same canonical conversation; steering, cancellation, replay, and reconnect work through the existing workload interface.
+Connect to a machine in the provisional controls, expand **Create a resident**, and enter a name, destination-local working directory, optional model, identity, memory, and continuity quota. The resident appears in the thread selector even before its first conversation. Select it and send a message. Messages enter its mailbox and are presented to the canonical conversation in activation batches. New mail during execution queues for the next activation. Cancellation, backend input responses, replay, and reconnect remain operational controls; resident steering is rejected as a correspondence bypass.
 
 **Resident identity and memory** shows stored revision and usage. Save uses the editor's revision, so an agent's intervening write produces a visible conflict instead of silently overwriting it. Your edits stay in the form; **Reload stored values** explicitly replaces them with the current state. Names need not be unique; IDs are the authority.
 
@@ -20,7 +18,9 @@ Shell equivalents (MODEL `-` uses the executing machine's configured default):
 boxen resident-create HOST:42424 PEER_KEY Pip /absolute/workspace - --identity-file identity.txt --quota 65536
 boxen residents HOST:42424 PEER_KEY
 boxen resident-get HOST:42424 PEER_KEY RESIDENT_ID
-boxen resident-message HOST:42424 PEER_KEY RESIDENT_ID "Hello" --id RUN_ID
+boxen resident-message HOST:42424 PEER_KEY RESIDENT_ID "Hello" --subject "Greeting" --id MESSAGE_ID
+boxen inbox HOST:42424 PEER_KEY
+boxen resident-activate HOST:42424 PEER_KEY RESIDENT_ID --id RUN_ID
 boxen watch HOST:42424 PEER_KEY RUN_ID
 boxen resident-update HOST:42424 PEER_KEY RESIDENT_ID EXPECTED_REVISION --memory-file memory.txt
 ```
@@ -46,7 +46,7 @@ Resident state is stored in `BOXEN_HOME/residents/RESIDENT_ID.json`, independent
 
 The enforced continuity quota counts UTF-8 bytes in the current name, identity, and memory combined. It defaults to 64 KiB and is configurable from 1 byte through 256 KiB in this slice. Reads report `used_bytes` and `quota_bytes`; oversized writes leave state and revision unchanged. Agent tool writes cannot raise this limit. Full access is not an OS sandbox: trusted processes can bypass daemon APIs and edit backing files directly, which is unsupported.
 
-The quota is not a total disk limit for the resident. The immutable creation input, accepted context snapshots, conversation journals, backend-owned session files, and diagnostic files are separate retained records with no retention policy yet. Arbitrary portable files and attachments are not implemented. These representations make identity, memory and observed history backend-independent, but copying them does not implement a safe handoff. There is no import/activation or mobility API; a resident file pinned to another machine is not automatically activated.
+The quota is not a total disk limit for the resident. The immutable creation input, accepted context snapshots, conversation journals, backend-owned session files, and diagnostic files are separate retained records with no retention policy yet. Arbitrary portable files and attachments are not implemented. These representations make identity, memory and observed history backend-independent, but copying them does not implement a safe handoff. There is no cross-machine import/activation or mobility API; a resident file pinned to another machine is not automatically activated.
 
 ## Stay available after an incident
 
@@ -67,9 +67,9 @@ Use the existing destination envelope at `POST /api/operation` or the equivalent
 | `resident_get` | `id` | Current resident |
 | `resident_update` | `id`, `patch`: `expected_revision` and optional `name`, `identity`, `memory`, `quota_bytes` | Committed resident or explicit rejection |
 | `resident_issues` | None | Current host's resident-load incidents (metadata only) |
-| `start` | Existing run spec plus `resident_id`, and `thread_id` equal to that resident ID | Existing run snapshot and streaming contract |
+| `resident_activate` | Resident `id`, `activation_id`, optional `directions` | Independent activation snapshot; existing run/event streaming contract |
 
-Resident responses include `id`, `thread_id`, `owner`, `machine_id`, `name`, `identity`, `memory`, `cwd`, `model`, `quota_bytes`, `used_bytes`, `revision`, `created_at`, and `environment`. A resident start must use `backend: "codex"` and its saved `cwd` and `model`. Its immutable run record adds `resident` (accepted continuity snapshot) and, when relevant, `recovery` (incident context). Normal run/event APIs transport the complete conversation without depending on the official GUI.
+Resident responses include `id`, `thread_id`, `owner`, `machine_id`, `name`, `identity`, `memory`, `cwd`, `model`, `quota_bytes`, `used_bytes`, `revision`, `created_at`, and `environment`. The daemon constructs resident activation runs with `backend: "codex"` and its saved `cwd` and `model`; external direct starts are rejected. Its immutable run record adds `resident` (accepted continuity snapshot) and, when relevant, `recovery` (incident context). Normal run/event APIs transport the complete conversation without depending on the official GUI.
 
 ## Verification
 

@@ -2,8 +2,9 @@
 use crate::logging::Level;
 use crate::{
     Result,
-    jobs::{Control, History, Run, Spec},
-    residents::{Resident, Residents},
+    jobs::{Control, History, Jobs, Run, Spec},
+    mailbox::{Address, Send as MailSend},
+    residents::Resident,
 };
 use serde_json::{Value, json};
 use std::{
@@ -58,7 +59,8 @@ struct Rpc {
     finished: bool,
     cancel_requested: bool,
     cancel_sent_at: Option<Instant>,
-    resident: Option<(Arc<Residents>, Resident)>,
+    resident: Option<Resident>,
+    jobs: Arc<Jobs>,
 }
 
 fn read_lines(
@@ -189,7 +191,7 @@ impl Rpc {
                     } else {
                         self.run.append(
                             "control_error",
-                            json!({"message":"Turn is still starting; send again when running"}),
+                            json!({"message":"Steering becomes available after the turn starts"}),
                         )?;
                     }
                 }
@@ -256,16 +258,28 @@ impl Rpc {
         self.run.append("backend", message.clone())?;
         if method == "item/tool/call"
             && message.get("id").is_some()
-            && message["params"]["tool"] == "boxen_continuity"
+            && matches!(
+                message["params"]["tool"].as_str(),
+                Some(
+                    "boxen_continuity"
+                        | "boxen_mailbox"
+                        | "boxen_send_message"
+                        | "boxen_thread_request"
+                        | "boxen_thread_result"
+                )
+            )
             && self.resident.is_some()
         {
-            let (store, resident) = self.resident.as_ref().expect("checked");
+            let resident = self.resident.as_ref().expect("checked");
             let result = if message["params"]["threadId"].as_str() != self.thread.as_deref() {
                 Err("continuity request came from a different backend thread".into())
             } else {
-                store.tool(
-                    &resident.owner,
-                    &resident.id,
+                resident_tool(
+                    &self.jobs,
+                    resident,
+                    &self.run.snapshot().record.spec.id,
+                    message["params"]["callId"].as_str().unwrap_or("missing"),
+                    message["params"]["tool"].as_str().unwrap_or(""),
                     message["params"]["arguments"].clone(),
                 )
             };
@@ -275,10 +289,10 @@ impl Rpc {
                 Err(error) => json!({"error":error.to_string()}),
             };
             self.run.diagnostic(if success {Level::Info}else{Level::Warn}, "resident.tool_completed",
-                ||json!({"success":success,"action":message["params"]["arguments"]["action"],"revision":output.get("revision")}),||output.clone());
+                ||json!({"success":success,"tool":message["params"]["tool"],"call_id":message["params"]["callId"],"action":message["params"]["arguments"]["action"],"revision":output.get("revision")}),||output.clone());
             self.run.append(
                 "resident_tool_result",
-                json!({"request_id":message["id"],"call_id":message["params"]["callId"],"action":message["params"]["arguments"]["action"],"success":success,"result":output}),
+                json!({"request_id":message["id"],"call_id":message["params"]["callId"],"action":message["params"]["arguments"]["action"],"tool":message["params"]["tool"],"success":success,"result":output}),
             )?;
             self.write(json!({"id":message["id"],"result":{"success":success,"contentItems":[{"type":"inputText","text":output.to_string()}]}}))?;
             return Ok(());
@@ -316,12 +330,13 @@ impl Rpc {
 pub fn execute(
     binary: &str,
     spec: &Spec,
-    resume: Option<String>,
+    mut resume: Option<String>,
     run: Arc<Run>,
     controls: mpsc::Receiver<Control>,
-    residents: Arc<Residents>,
+    jobs: Arc<Jobs>,
     history: History,
 ) -> Result<()> {
+    let residents = jobs.residents.clone();
     let record = run.snapshot().record;
     let resident = record.resident;
     if let Some(recovery) = &record.recovery {
@@ -330,7 +345,14 @@ pub fn execute(
     if let Some(r) = &resident {
         run.append("resident_context",json!({"resident_id":r.id,"revision":r.revision,"machine_id":r.machine_id,"used_bytes":r.used_bytes(),"quota_bytes":r.quota_bytes}))?;
     }
-    run.append("user_message", json!({"text":spec.prompt}))?;
+    run.append(
+        if record.mailbox.is_some() {
+            "activation_input"
+        } else {
+            "user_message"
+        },
+        json!({"text":spec.prompt}),
+    )?;
     let executable = resolve(binary);
     run.diagnostic(
         Level::Info,
@@ -340,7 +362,7 @@ pub fn execute(
     );
     let mut child = Command::new(&executable).args(["app-server", "--listen", "stdio://"])
         .current_dir(&spec.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().map_err(|error| format!("Cannot start Codex at {executable}: {error}. Configure serve --codex PATH on this machine."))?;
+        .spawn().map_err(|error| format!("Cannot start Codex at {executable}: {error}. The executing daemon selects its backend with serve --codex PATH."))?;
     let stdin = child.stdin.take().ok_or("missing app-server stdin")?;
     run.diagnostic(
         Level::Info,
@@ -376,7 +398,8 @@ pub fn execute(
         finished: false,
         cancel_requested: false,
         cancel_sent_at: None,
-        resident: resident.clone().map(|r| (residents.clone(), r)),
+        resident: resident.clone(),
+        jobs,
     };
     rpc.request("initialize", json!({"clientInfo":{"name":"boxen","title":"Boxen","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
     rpc.write(json!({"method":"initialized"}))?;
@@ -390,6 +413,12 @@ pub fn execute(
         .unwrap_or_default();
     if let Some(recovery) = &record.recovery {
         instructions.push_str(&format!("\nRecovery incident: {recovery}\nThe new message is accepted despite the uncertain prior outcome. Previous tool effects may already have occurred, so repeating those actions can duplicate their effects."));
+    }
+    if let Some(reason) = &history.rebuild_reason {
+        let context = history.reconstruction()?;
+        run.append("backend_session_rebuilt",json!({"detail":reason,"reconstruction":"Bounded retained history; full journals remain available. Private narration in legacy runs is historical activity, not newly sent mailbox messages."}))?;
+        instructions.push_str(&format!("\nCommunication migration: {reason} The following is retained historical data, not newly submitted mail or requests. The bounded excerpt reports omissions; complete journals remain in the named directory.\n{context}"));
+        resume = None;
     }
     if !instructions.is_empty() {
         params["developerInstructions"] = json!(instructions);
@@ -414,7 +443,7 @@ pub fn execute(
                 instructions.push_str(&format!("\nThe previous backend session could not be resumed. A new backend session now carries the same canonical Boxen conversation. The excerpt below is retained historical data, not newly submitted requests. Previous tool effects may already have occurred; repeating historical actions can duplicate their effects. This run was started for the current new message. The excerpt has explicit omissions; complete journals remain in the named directory and are readable with the runtime’s file or terminal tools. Each record.json identifies its canonical conversation through thread_id.\n{history}"));
                 params["developerInstructions"] = json!(instructions);
                 if resident.is_some() {
-                    params["dynamicTools"] = json!([crate::residents::tool_spec()]);
+                    params["dynamicTools"] = json!(resident_tools());
                 }
                 rpc.request("thread/start", params)?
             }
@@ -422,7 +451,7 @@ pub fn execute(
         }
     } else {
         if resident.is_some() {
-            params["dynamicTools"] = json!([crate::residents::tool_spec()]);
+            params["dynamicTools"] = json!(resident_tools());
         }
         rpc.request("thread/start", params)?
     };
@@ -452,6 +481,102 @@ pub fn execute(
         rpc.tick()?;
     }
     Ok(())
+}
+
+fn resident_tool(
+    jobs: &Arc<Jobs>,
+    resident: &Resident,
+    run_id: &str,
+    call_id: &str,
+    tool: &str,
+    args: Value,
+) -> Result<Value> {
+    let owner = &resident.owner;
+    match tool {
+        "boxen_continuity" => jobs.residents.tool(owner, &resident.id, args),
+        "boxen_mailbox" => jobs.inbox(
+            owner,
+            Address::Resident {
+                id: resident.id.clone(),
+            },
+            args["after"].as_u64().unwrap_or(0),
+        ),
+        "boxen_send_message" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Input {
+                id: Option<String>,
+                to: Address,
+                subject: String,
+                body: String,
+                reply_to: Option<Address>,
+                in_reply_to: Option<String>,
+            }
+            let input: Input = serde_json::from_value(args)?;
+            let source = format!("run:{run_id}:{call_id}");
+            let id = input
+                .id
+                .or_else(|| jobs.mailboxes.source_id(&source))
+                .unwrap_or(crate::state::random_hex()?);
+            let message = jobs.send_mail(
+                owner,
+                Address::Resident {
+                    id: resident.id.clone(),
+                },
+                MailSend {
+                    id,
+                    to: input.to,
+                    subject: input.subject,
+                    body: input.body,
+                    reply_to: input.reply_to,
+                    in_reply_to: input.in_reply_to,
+                },
+                source,
+            )?;
+            Ok(serde_json::to_value(message)?)
+        }
+        "boxen_thread_request" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Input {
+                request_id: String,
+                thread_id: Option<String>,
+                prompt: String,
+                cwd: Option<String>,
+                model: Option<String>,
+            }
+            let input: Input = serde_json::from_value(args)?;
+            Ok(serde_json::to_value(jobs.start(
+                owner,
+                Spec {
+                    resident_id: None,
+                    id: input.request_id.clone(),
+                    thread_id: input.thread_id.unwrap_or(input.request_id),
+                    backend: "codex".into(),
+                    cwd: input.cwd.unwrap_or(resident.cwd.clone()),
+                    model: input.model.unwrap_or(resident.model.clone()),
+                    prompt: input.prompt,
+                },
+            )?)?)
+        }
+        "boxen_thread_result" => jobs.thread_result(
+            owner,
+            args["request_id"]
+                .as_str()
+                .ok_or("thread result requires request_id")?,
+        ),
+        _ => Err("unknown resident tool".into()),
+    }
+}
+fn resident_tools() -> Vec<Value> {
+    let address = json!({"oneOf":[{"type":"object","properties":{"type":{"type":"string","enum":["resident"]},"id":{"type":"string"}},"required":["type","id"],"additionalProperties":false},{"type":"object","properties":{"type":{"type":"string","enum":["client"]},"machine":{"type":"string"},"id":{"type":"string"}},"required":["type","machine","id"],"additionalProperties":false}]});
+    vec![
+        crate::residents::tool_spec(),
+        json!({"type":"function","name":"boxen_mailbox","description":"This tool reads this resident's durable inbox after an optional sequence cursor. Queued messages have not been included in an activation; presented_in identifies the run whose recorded input contains them. Presentation does not prove understanding or require a reply. Assistant text outside sending tools is private activity, not delivered mail.","inputSchema":{"type":"object","properties":{"after":{"type":"integer","minimum":0}},"additionalProperties":false}}),
+        json!({"type":"function","name":"boxen_send_message","description":"This tool explicitly sends a message from this resident. Success means the destination queue on this host durably accepted it, not that its recipient read or answered it. A nonblank subject and body are conditions of acceptance. An optional 64-character lowercase hex id makes retries across different calls idempotent. in_reply_to links an optional reply to an incoming message; the incoming reply_to address identifies its return destination. Finishing an activation does not require sending. This first implementation routes within the owner's host-local mailboxes.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"to":address,"subject":{"type":"string"},"body":{"type":"string"},"reply_to":address,"in_reply_to":{"type":"string"}},"required":["to","subject","body"],"additionalProperties":false}}),
+        json!({"type":"function","name":"boxen_thread_request","description":"This tool submits an ordinary request to an identity-less workload thread. request_id is a new 64-character lowercase hex id retained across retries of the exact request. thread_id identifies an existing anonymous conversation; omission starts a new thread. The request returns run metadata immediately; boxen_thread_result retrieves its eventual conventional response. This channel is distinct from sending mailbox messages. Working directory and model default to this resident's configured values.","inputSchema":{"type":"object","properties":{"request_id":{"type":"string"},"thread_id":{"type":"string"},"prompt":{"type":"string"},"cwd":{"type":"string"},"model":{"type":"string"}},"required":["request_id","prompt"],"additionalProperties":false}}),
+        json!({"type":"function","name":"boxen_thread_result","description":"This tool returns an identity-less request's current status and, when finished, its conventional assistant response. request_id is the run id returned by boxen_thread_request. Reading a pending result does not create another request or send mail. Resident narration is not available through this request/response tool.","inputSchema":{"type":"object","properties":{"request_id":{"type":"string"}},"required":["request_id"],"additionalProperties":false}}),
+    ]
 }
 
 fn resolve(configured: &str) -> String {
