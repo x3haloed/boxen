@@ -1,0 +1,33 @@
+[package]
+name = "boxen"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A hospitable home for agents, across your machines"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+snow = { version = "0.10", default-features = false, features = ["default-resolver", "use-chacha20poly1305", "use-blake2", "use-curve25519", "use-getrandom"] }
+
+[features]
+ape = ["dep:cosmo-build"]
+
+[build-dependencies]
+cosmo-build = { version = "=6.0.2", optional = true }
+
+[target.'cfg(cosmo)'.dependencies]
+cosmo-compat = "=6.0.7"
+
+[package.metadata.cosmo]
+bin = "boxen"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+# APE fusion requires the intermediate symbol tables.
+strip = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(cosmo)'] }

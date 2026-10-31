@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boxen</title>
+<style>
+  body { font: 16px system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1rem; }
+  label { display: block; margin-top: 1rem; }
+  input, select, button { font: inherit; box-sizing: border-box; padding: .5rem; }
+  input, select { display: block; width: 100%; margin-top: .3rem; }
+  button { margin-top: 1rem; cursor: pointer; }
+  code { overflow-wrap: anywhere; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem; background: #f2f2f2; }
+</style>
+<h1>Boxen</h1>
+<p>LAN pairing prototype</p>
+<p>This machine: <code id="identity">Loading…</code></p>
+<form id="ping">
+  <label>Trusted peer<select id="peer" required></select></label>
+  <label>Peer address<input id="address" placeholder="machine.lan:42424" required></label>
+  <label>Message<input id="message" value="hello from Boxen" required></label>
+  <button id="send">Send test message</button>
+</form>
+<pre id="result" role="status" aria-live="polite">Loading trusted peers…</pre>
+<script>
+  const token = location.hash.slice(1);
+  // Keep the capability out of subsequent URLs and referers; retain for this tab's refresh.
+  if (token) { sessionStorage.setItem('boxen-token', token); history.replaceState(null, '', '/'); }
+  const headers = { Authorization: 'Bearer ' + (token || sessionStorage.getItem('boxen-token') || '') };
+  const result = document.getElementById('result');
+  const peer = document.getElementById('peer');
+  const button = document.getElementById('send');
+  async function load() {
+    try {
+      const response = await fetch('/api/status', {headers});
+      if (!response.ok) throw new Error(await response.text());
+      const state = await response.json();
+      document.getElementById('identity').textContent = state.identity;
+      for (const entry of state.peers) {
+        const option = document.createElement('option');
+        option.value = entry.key; option.textContent = entry.label + ' · ' + entry.key.slice(0, 12);
+        peer.append(option);
+      }
+      button.disabled = !state.peers.length;
+      result.textContent = state.peers.length ? 'Ready. Choose a peer and enter its LAN address.' : 'No trusted peers. Exchange public keys and run boxen trust on both machines.';
+    } catch (error) { result.textContent = error.message; button.disabled = true; }
+  }
+  document.getElementById('ping').addEventListener('submit', async event => {
+    event.preventDefault(); button.disabled = true; result.textContent = 'Connecting…';
+    try {
+      const response = await fetch('/api/ping', {method: 'POST', headers: {...headers, 'Content-Type': 'application/json'}, body: JSON.stringify({
+        address: document.getElementById('address').value, peer: peer.value, message: document.getElementById('message').value
+      })});
+      const text = await response.text();
+      if (!response.ok) throw new Error(text);
+      const reply = JSON.parse(text);
+      result.textContent = 'Authenticated reply from ' + reply.from + '\n\n' + reply.message;
+    } catch (error) { result.textContent = 'Exchange failed: ' + error.message; }
+    finally { button.disabled = false; }
+  });
+  load();
+</script>
+</html>

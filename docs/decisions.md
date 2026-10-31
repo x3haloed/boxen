@@ -1,6 +1,14 @@
 # Agreed design decisions
 
-These decisions describe the intended product and the first implementation slice. Later beta requirements remain binding even when early implementations support only simpler cases. Storage, transport, implementation language, and scheduling topology remain undecided.
+These decisions describe the intended product and the first implementation slice. Later beta requirements remain binding even when early implementations support only simpler cases. Agent storage and scheduling topology remain undecided. The initial LAN implementation uses Rust and direct TCP with Noise authentication and encryption; this does not settle discovery or wide-area connectivity.
+
+## Packaging and GUI ownership
+
+Prefer one portable executable with no installed application runtime or complicated setup. The initial implementation follows the Cosmopolitan APE approach: one file containing ARM64 and x86-64 builds. A launchable GUI and daemon may eventually use separate binaries if that improves the experience. Native platform builds remain available from the same source.
+
+The user will primarily direct GUI design. Early controls should provide simple clickable access to capabilities without establishing a detailed product layout. The first control surface is plain HTML embedded in the daemon and served only on loopback.
+
+Commit and push coherent, verified implementation slices as part of the development workflow.
 
 ## Resident identity and conversations
 
@@ -73,4 +81,4 @@ Use destination-local files and explicit placement initially. Resident identity,
 
 Next, add the built-in inference runtime to verify that the common execution contract supports both runtime kinds. Resident continuity and movement between machines follow; parallel conversations, clones, and reintegration remain part of the beta requirements.
 
-The immediate design task is the smallest daemon-to-daemon execution contract needed to support this slice. Daemon restart recovery semantics, enrollment, authentication, storage, transport, and scheduling topology have not yet been selected.
+The first implemented prerequisite is [LAN pairing and authenticated message exchange](p2p.md). The next design task is the smallest daemon-to-daemon execution contract needed for remote workloads. Workload recovery semantics, storage, scheduling topology, production enrollment UX, and wide-area connectivity remain open.

@@ -6,7 +6,42 @@ Boxen brings agent runtimes, inference providers, and granted compute together s
 
 The spirit: **All your box are belong to us.**
 
-Boxen is in early design. There is no implementation yet.
+Boxen is in early development. The first runnable slice pairs two machines on a LAN and exchanges authenticated, encrypted test messages. Agent workload execution is not implemented yet.
+
+## Try the LAN prototype
+
+```sh
+cargo build --release
+./target/release/boxen identity
+./target/release/boxen serve
+```
+
+The daemon prints its public identity, LAN listener, and local control-page URL. The plain HTML control page is embedded in the binary; no Node, browser framework, or separate asset installation is required. Open the printed URL to use it. The UI is deliberately minimal while the product experience is being designed.
+
+On each machine, trust the other machine's public key, obtained through a trusted channel:
+
+```sh
+./target/release/boxen trust OTHER_PUBLIC_KEY "Other box"
+./target/release/boxen ping other-machine.lan:42424 OTHER_PUBLIC_KEY "Hello, other box"
+```
+
+For the identical-file portable build, run `bash scripts/build-ape.sh`, then use `bash target/cosmo/release/boxen.com` in place of `./target/release/boxen`. End users only need the resulting executable. The first developer build downloads a pinned Rust toolchain and Cosmopolitan compiler.
+
+See [LAN setup, protocol, and verification](docs/p2p.md), including the SSH development deployment helper and the current portability limits.
+
+## Development checks
+
+```sh
+cargo fmt --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo build --release
+python3 scripts/smoke.py
+# After building the portable artifact:
+python3 scripts/smoke.py target/cosmo/release/boxen.com
+```
+
+## Design
 
 - [Product principles](docs/vision.md)
 - [Agreed design decisions and first implementation slice](docs/decisions.md)

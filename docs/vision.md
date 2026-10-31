@@ -12,7 +12,7 @@ Conversation structure is configurable per agent: one canonical conversation con
 
 Coordinate agentic activity across authorized machines. Remote operation should work out of the box. A durable service or daemon owns execution; a GUI attaches and detaches without owning its lifetime.
 
-Target macOS, Windows, and Linux, with room for other platforms. Keep resource use tiny and interactions fast. The implementation language and measurable performance budgets remain open.
+Target macOS, Windows, and Linux, with room for other platforms. Keep resource use tiny and interactions fast. The initial daemon uses Rust with a Cosmopolitan APE build path for an identical-file portable executable. Measurable performance budgets and broader platform verification remain open.
 
 Home and work agents must be segregable. A unified experience must respect the boundaries of granted access.
 
