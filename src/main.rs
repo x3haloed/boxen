@@ -6,6 +6,7 @@ mod jobs;
 mod logging;
 mod platform;
 mod protocol;
+mod residents;
 mod state;
 mod web;
 
@@ -53,6 +54,11 @@ boxen [--data-dir PATH] logs HOST:PORT PUBLIC_KEY [--level trace|debug|info|warn
 boxen [--data-dir PATH] log-file HOST:PORT PUBLIC_KEY /absolute/daemon/path.jsonl [FILTER OPTIONS]\n\
 boxen [--data-dir PATH] log-status HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] log-off HOST:PORT PUBLIC_KEY\n\n\
+boxen residents HOST:PORT PUBLIC_KEY\n\
+boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES]\n\
+boxen resident-get HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
+boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES]\n\
+boxen resident-message HOST:PORT PUBLIC_KEY RESIDENT_ID MESSAGE [--id RUN_ID]\n\
 boxen platform-check\n\n\
 Pair by exchanging identity public keys through a trusted channel and\n\
 running trust on BOTH machines. --ui must bind to IPv4 loopback.\n\
@@ -110,7 +116,11 @@ Workloads run through Codex app-server with Full access on the destination."
             let ui_listener = TcpListener::bind(ui_addr)?;
             let token = state.control_token()?;
             logging::install(state.public_key())?;
-            let jobs = jobs::Jobs::open(state.directory().join("runs"), codex)?;
+            let jobs = jobs::Jobs::open(
+                state.directory().join("runs"),
+                codex,
+                state.public_key().into(),
+            )?;
             logging::record(
                 Level::Info,
                 Target::Daemon,
@@ -130,6 +140,102 @@ Workloads run through Codex app-server with Full access on the destination."
             std::thread::spawn(move || web::serve(ui_listener, web_state, web_jobs, token));
             protocol::serve(peer_listener, state, jobs);
         }
+        "residents" if args.len() == 2 => {
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"resident_list"})
+                )?
+            );
+        }
+        "resident-get" if args.len() == 3 => {
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"resident_get","id":args[2]})
+                )?
+            );
+        }
+        "resident-create" => {
+            let id = take_option(&mut args, "--id")?.unwrap_or(state::random_hex()?);
+            let identity = take_option(&mut args, "--identity-file")?
+                .map(std::fs::read_to_string)
+                .transpose()?
+                .unwrap_or_default();
+            let memory = take_option(&mut args, "--memory-file")?
+                .map(std::fs::read_to_string)
+                .transpose()?
+                .unwrap_or_default();
+            let quota = take_option(&mut args, "--quota")?
+                .unwrap_or_else(|| "65536".into())
+                .parse::<usize>()?;
+            if args.len() != 5 {
+                return Err("resident-create requires HOST:PORT PUBLIC_KEY NAME CWD MODEL".into());
+            }
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"resident_create","spec":{"id":id,"name":args[2],"cwd":args[3],"model":if args[4]=="-" {""}else{&args[4]},"identity":identity,"memory":memory,"quota_bytes":quota}})
+                )?
+            );
+        }
+        "resident-update" => {
+            let identity = take_option(&mut args, "--identity-file")?
+                .map(std::fs::read_to_string)
+                .transpose()?;
+            let memory = take_option(&mut args, "--memory-file")?
+                .map(std::fs::read_to_string)
+                .transpose()?;
+            let name = take_option(&mut args, "--name")?;
+            let quota = take_option(&mut args, "--quota")?
+                .map(|v| v.parse::<usize>())
+                .transpose()?;
+            if args.len() != 4 {
+                return Err("resident-update requires HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION and update options".into());
+            }
+            let revision = args[3].parse::<u64>()?;
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"resident_update","id":args[2],"patch":{"expected_revision":revision,"name":name,"identity":identity,"memory":memory,"quota_bytes":quota}})
+                )?
+            );
+        }
+        "resident-message" => {
+            let id = take_option(&mut args, "--id")?.unwrap_or(state::random_hex()?);
+            if args.len() != 4 {
+                return Err(
+                    "resident-message requires HOST:PORT PUBLIC_KEY RESIDENT_ID MESSAGE".into(),
+                );
+            }
+            let resident = protocol::request(
+                &state,
+                &args[0],
+                &args[1],
+                serde_json::json!({"op":"resident_get","id":args[2]}),
+            )?;
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"start","spec":{"id":id,"thread_id":args[2],"resident_id":args[2],"backend":"codex","cwd":resident["cwd"],"model":resident["model"],"prompt":args[3]}})
+                )?
+            );
+        }
         "start" => {
             let thread = take_option(&mut args, "--thread")?;
             let id = take_option(&mut args, "--id")?.unwrap_or(state::random_hex()?);
@@ -137,6 +243,7 @@ Workloads run through Codex app-server with Full access on the destination."
                 return Err("start requires HOST:PORT PUBLIC_KEY CWD MODEL PROMPT".into());
             }
             let spec = jobs::Spec {
+                resident_id: None,
                 id: id.clone(),
                 thread_id: thread.unwrap_or(id),
                 backend: "codex".into(),

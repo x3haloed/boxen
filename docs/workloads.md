@@ -40,7 +40,7 @@ Executing-machine state lives under `BOXEN_HOME/runs/RUN_ID/`: immutable `record
 
 Watchers request events after a sequence cursor. The daemon replays the backlog and then waits for new events. A reconnecting viewer discards already-applied events and detects sequence gaps. Transport fragmentation preserves large JSON events and Unicode content across Noise frames. Authoritative completed backend items replace their interim rendered text.
 
-Closing a viewer or losing the client connection leaves the executing daemon and runtime active. Completed results remain available across daemon restart. On restart, a previously unfinished run becomes `interrupted` with an explicitly uncertain outcome; it is not retried. An incomplete final journal write is discarded; interior corruption is rejected. Threads with uncertain prior execution cannot silently start a follow-up. Previously issued tool side effects may have occurred even when a result was not observed.
+Closing a viewer or losing the client connection leaves the executing daemon and runtime active. Completed results remain available across daemon restart. On restart, a previously unfinished run becomes `interrupted` with an explicitly uncertain outcome; it is not retried. An incomplete final journal write is discarded; interior corruption is rejected. A follow-up after interrupted execution retains the old uncertain outcome and records a recovery notice. It accepts the new message without requiring manual acknowledgment or retrying the old work. Previously issued tool side effects may have occurred even when a result was not observed.
 
 A confirmed backend `interrupted` turn after a cancellation request becomes `cancelled`. If cancellation is not confirmed within 15 seconds, the run becomes uncertain and the app-server process is stopped. Stopping an app-server is not a general rollback or guarantee that every external side effect can be stopped. Runtime transport failure during execution also produces an uncertain outcome.
 
@@ -54,7 +54,7 @@ The daemon starts one app-server per active run and stops it when the run ends. 
 
 This slice supports explicitly placed text workloads, destination-local files, Codex, and a trusted LAN. Prompts/steering are bounded at 256 KiB, backend event lines at 4 MiB, peer JSON messages at 8 MiB, and active runs at eight per machine. The local UI and peer handlers are bounded independently. A bounded backend-reader queue applies backpressure rather than dropping events.
 
-Journals and in-memory history have no retention policy yet. There is no workspace transfer, attachment transport, scheduler, automatic failover, resident identity, shared memory, or built-in inference runtime. Event retention is local to the executing machine; the viewer does not provide an offline replica. Power-loss durability and migration of backend-owned sessions are outside the verification envelope.
+Journals and in-memory history have no retention policy yet. Named residents now layer a canonical conversation and separate durable continuity over this run contract; see [residents](residents.md). There is no workspace transfer, attachment transport, scheduler, automatic failover, shared memory synchronization, or built-in inference runtime. Event retention is local to the executing machine; the viewer does not provide an offline replica. Power-loss durability and migration of backend-owned sessions are outside the verification envelope.
 
 ## Verification
 

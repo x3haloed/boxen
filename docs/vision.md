@@ -20,6 +20,10 @@ Identity, memory, conversation history, and deliberately retained durable files 
 
 Movement authority is configurable. Users can require explicit direction or grant agents standing permission to move among eligible machines. Model and runtime selection are separate configurable permissions.
 
+## Recover and stay available
+
+Find a way to recover and make the incident legible. Useful uptime with an honest record of what went wrong beats aborting over uncertainty. Correctness should support continued life, without requiring agents or humans to collect receipts and certify state before every next step. Preserve uncertainty, isolate failures, and provide a path forward. Recovery must not silently repeat tool effects, erase evidence, or claim lossless continuity when reconstruction was partial.
+
 ## Runtime diversity
 
 Accept a managed agent runtime when available. When only inference is available, provide an agent runtime inside Boxen. Share as much as possible through abstractions over the disparate runtimes without erasing their capabilities.

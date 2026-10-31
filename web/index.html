@@ -25,7 +25,32 @@
   <button id="connectButton">Connect / refresh threads</button>
 </form>
 <p id="connection" role="status" aria-live="polite">Loading…</p>
+<p id="residentIssues" role="status"></p>
 <label>Thread<select id="threads"><option value="">New anonymous thread</option></select></label>
+<details><summary>Create a resident</summary>
+<form id="createResident">
+  <label>Name<input id="residentName" required maxlength="100"></label>
+  <label>Resident working directory<input id="residentCwd" placeholder="/absolute/path/on/that/machine" required></label>
+  <label>Resident model<input id="residentModel" placeholder="Executing machine’s configured default"></label>
+  <label>Initial identity<textarea id="residentIdentity" rows="3"></textarea></label>
+  <label>Initial memory<textarea id="residentMemory" rows="3"></textarea></label>
+  <label>Continuity quota (bytes)<input id="residentQuota" type="number" min="1" max="262144" value="65536" required></label>
+  <button id="createResidentButton">Create resident</button>
+  <p id="createResidentStatus" role="status"></p>
+</form>
+</details>
+<details id="residentDetails" hidden><summary>Resident identity and memory</summary>
+  <p id="residentInfo" class="meta"></p>
+  <form id="editResident">
+    <label>Saved name<input id="editName" required maxlength="100"></label>
+    <label>Saved identity<textarea id="editIdentity" rows="3"></textarea></label>
+    <label>Saved memory<textarea id="editMemory" rows="4"></textarea></label>
+    <label>Saved quota (bytes)<input id="editQuota" type="number" min="1" max="262144" required></label>
+    <button id="saveResident">Save identity and memory</button>
+    <button id="reloadResident" type="button">Reload stored values</button>
+    <p id="residentEditStatus" role="status"></p>
+  </form>
+</details>
 <form id="work">
   <label>Working directory on executing machine<input id="cwd" placeholder="/absolute/path/on/that/machine" required></label>
   <label>Backend<select id="backend"><option value="codex">Codex app-server</option></select></label>
@@ -48,6 +73,8 @@ if (token) { sessionStorage.setItem('boxen-token', token); history.replaceState(
 const headers = {Authorization: 'Bearer ' + (token || sessionStorage.getItem('boxen-token') || ''), 'Content-Type':'application/json'};
 let identity, target, records = [], selectedThread = '', currentRun = null, watcher, generation = 0, connected = false, submitting = false;
 let items = new Map(), pending = new Map(), cursors = new Map();
+let residents=[], editorRevision=0, residentBusy=false;
+let pendingResident;try{pendingResident=JSON.parse(localStorage.getItem('boxen-pending-resident')||'null');}catch{}
 let pendingStart = null, syncing = false, observing = false;
 const pause = ms => new Promise(resolve=>setTimeout(resolve,ms));
 function unauthorized(response) { if(response.status===401) { const error=new Error("Local authorization changed. Open the control URL printed by the daemon.");error.authorization=true;throw error; } }
@@ -66,13 +93,21 @@ async function operation(request, destination=target) {
 }
 function controls() {
   const active = currentRun && !terminal(currentRun.status);
+  const resident=residents.find(r=>r.id===selectedThread);
   $('send').textContent = active ? 'Send to active run' : selectedThread ? 'Send follow-up' : 'Start thread';
-  $('send').disabled = !connected || syncing || submitting;
-  $('peer').disabled=submitting;$('address').disabled=submitting;$('threads').disabled=submitting;$('connectButton').disabled=submitting;
+  if(resident&&!active)$('send').textContent='Talk to '+resident.name;
+  $('send').disabled = !connected || syncing || submitting || residentBusy;
+  $('model').disabled=!!resident;
+  $('createResidentButton').disabled=!connected||residentBusy||submitting;
+  $('createResidentButton').textContent=pendingResident?'Retry original resident creation':'Create resident';
+  for(const input of $('createResident').querySelectorAll('input,textarea'))input.disabled=residentBusy||!!pendingResident;
+  for(const input of $('editResident').querySelectorAll('input,textarea,button'))input.disabled=!connected||syncing||residentBusy;
+  if(resident)$('residentInfo').textContent='Resident '+resident.id+' · machine '+resident.machine_id+' · stored revision '+resident.revision+' · '+resident.used_bytes+' / '+resident.quota_bytes+' bytes · editor based on revision '+editorRevision;
+  $('peer').disabled=submitting||residentBusy;$('address').disabled=submitting||residentBusy;$('threads').disabled=!connected||submitting||residentBusy;$('connectButton').disabled=submitting||residentBusy;
   $('prompt').disabled = !!pendingStart;
   if(pendingStart)$('send').textContent='Retry original submission';
   $('cancel').disabled = !active || !connected || syncing;
-  $('cwd').disabled = !!selectedThread || !!pendingStart; $('model').disabled = !!active || !!pendingStart;
+  $('cwd').disabled = !!selectedThread || !!pendingStart; $('model').disabled = !!resident || !!active || !!pendingStart;
   $('detach').disabled = !observing;
   for(const panel of pending.values())for(const input of panel.querySelectorAll('button,input,textarea'))input.disabled=!connected||syncing;
 }
@@ -140,17 +175,27 @@ function render(run,event) {
     }
     return;
   }
+  if(event.kind==='resident_context'){add('Resident continuity','Revision '+event.data.revision+' · host '+event.data.machine_id);return;}
+  if(event.kind==='resident_tool_result'){
+    const result=event.data.result,row=itemFor(run,event.data.call_id||event.data.request_id,'Continuity');
+    row.title.textContent=event.data.success?(event.data.action==='write'?'Continuity saved':'Continuity read'):'Continuity update rejected';
+    row.content.textContent=event.data.success?'Revision '+result.revision+' · '+result.used_bytes+' / '+result.quota_bytes+' bytes\nIdentity: '+result.identity+'\nMemory: '+result.memory:result.error;
+    if(event.data.success)residents=residents.map(r=>r.id===result.id&&r.revision<=result.revision?result:r);
+    return;
+  }
+  if(event.kind==='recovery_notice'){add('Recovery notice',event.data.detail);return;}
+  if(event.kind==='backend_session_rebuilt'){add('Backend session rebuilt',event.data.detail);return;}
   if(event.kind==='user_message') { add('You',event.data.text);return; }
   if(event.kind==='request_answered'){resolveRequest(run,event.data.request_id);return;}
   if(event.kind==='control'){if(event.data.text)add('You · steering',event.data.text);else add('Control',event.data.type);return;}
   if(event.kind==='control_error'){add('Control error',event.data.message);return;}
   if(event.kind!=='backend')return;
   const message=event.data, method=message.method, params=message.params||{};
-  if(message.id!==undefined){answerPanel(run,message);return;}
+  if(message.id!==undefined){if(method==='item/tool/call'&&params.tool==='boxen_continuity'&&records.find(r=>r.record.spec.id===run)?.record.spec.resident_id)return;answerPanel(run,message);return;}
   if(method==='serverRequest/resolved'){resolveRequest(run,params.requestId);return;}
   if(method==='item/started'||method==='item/completed') {
     const item=params.item||{};
-    if(item.type==='userMessage')return;
+    if(item.type==='userMessage'||(item.type==='dynamicToolCall'&&item.tool==='boxen_continuity'))return;
     const row=itemFor(run,item.id,labels[item.type]||item.type||'Activity');
     row.title.textContent=(labels[item.type]||item.type||'Activity')+(item.status?' · '+item.status:'');
     row.completed=method==='item/completed';
@@ -175,8 +220,17 @@ function render(run,event) {
 function updateThreads() {
   const latest=new Map(), titles=new Map();for(const record of records){const thread=record.record.spec.thread_id;latest.set(thread,record);if(!titles.has(thread))titles.set(thread,record.record.spec.prompt);}
   $('threads').replaceChildren(new Option('New anonymous thread',''));
-  for(const [thread,record] of [...latest].reverse()) $('threads').append(new Option(titles.get(thread).slice(0,55)+' · '+record.status,thread));
+  for(const resident of residents)$('threads').append(new Option('Resident: '+resident.name+' · '+(latest.get(resident.id)?.status||'at home'),resident.id));
+  for(const [thread,record] of [...latest].reverse())if(!residents.some(r=>r.id===thread))$('threads').append(new Option(titles.get(thread).slice(0,55)+' · '+record.status,thread));
   $('threads').value=selectedThread;
+}
+function loadResidentEditor() {
+  const resident=residents.find(r=>r.id===selectedThread);
+  $('residentDetails').hidden=!resident;
+  if(!resident)return;
+  editorRevision=resident.revision;
+  $('editName').value=resident.name;$('editIdentity').value=resident.identity;$('editMemory').value=resident.memory;$('editQuota').value=resident.quota_bytes;
+  $('residentEditStatus').textContent='';
 }
 // The executing daemon owns the history. Cursors belong to this rendered view:
 // reopening rebuilds from zero; reconnecting continues after the last applied event.
@@ -241,13 +295,19 @@ function restorePending(destination) {
   else{$('cwd').value=pendingStart.cwd;$('model').value=pendingStart.model;$('prompt').value=pendingStart.prompt;$('runStatus').textContent='Prior submission is unconfirmed. Retry sends its original input and ID.';}
 }
 async function refreshRecords(gen,destination) {
-  const incoming=await operation({op:'list'},destination);
+  const [incoming,homes,issues]=await Promise.all([operation({op:'list'},destination),operation({op:'resident_list'},destination),operation({op:'resident_issues'},destination)]);
   if(gen!==generation)return false;
-  records=incoming;restorePending(destination);updateThreads();save();return true;
+  records=incoming;residents=homes;
+  $('residentIssues').textContent=issues.length?'Resident recovery incidents: '+issues.map(i=>i.id+' · '+i.detail+' · '+i.recovery).join(' | '):'';
+  let recoveredResident=false;
+  if(pendingResident?.target.peer===destination.peer&&residents.some(r=>r.id===pendingResident.spec.id)){selectedThread=pendingResident.spec.id;recoveredResident=true;pendingResident=null;localStorage.removeItem('boxen-pending-resident');$('createResidentStatus').textContent='Resident created.';}
+  restorePending(destination);updateThreads();save();
+  if(recoveredResident){showThread(selectedThread);return false;}
+  return true;
 }
 async function showThread(thread, refresh=false) {
   detach();selectedThread=thread;currentRun=null;items=new Map();pending=new Map();cursors=new Map();$('transcript').replaceChildren();$('runStatus').textContent='';$('location').textContent='';save();
-  observing=true;syncing=true;controls();const gen=generation,destination={...target};let attempt=0;
+  observing=true;syncing=true;loadResidentEditor();controls();const gen=generation,destination={...target};let attempt=0;
   // Refresh the catalog after each terminal run and while idle. Progress itself
   // always comes from the ordered stream, never from snapshot polling.
   while(gen===generation) {
@@ -255,6 +315,8 @@ async function showThread(thread, refresh=false) {
       if(refresh && !await refreshRecords(gen,destination))return;
       refresh=true;
       const related=records.filter(r=>r.record.spec.thread_id===selectedThread);
+      const resident=residents.find(r=>r.id===selectedThread);
+      if(resident){$('cwd').value=resident.cwd;$('model').value=resident.model;}
       if(related.length){$('cwd').value=related[0].record.spec.cwd;$('model').value=related.at(-1).record.spec.model;}
       syncing=true;controls();
       for(const record of related){
@@ -281,7 +343,7 @@ async function connect() {
   while(gen===generation){
     try {
       if(!await refreshRecords(gen,destination))return;
-      if(!records.some(r=>r.record.spec.thread_id===selectedThread))selectedThread='';
+      if(!records.some(r=>r.record.spec.thread_id===selectedThread)&&!residents.some(r=>r.id===selectedThread))selectedThread='';
       connected=true;updateThreads();save();showThread(selectedThread);return;
     }catch(error){
       if(gen!==generation)return;
@@ -293,7 +355,7 @@ async function connect() {
 }
 $('connect').onsubmit=event=>{event.preventDefault();connect();};
 $('threads').onchange=()=>showThread($('threads').value,true);
-$('peer').onchange=()=>{detach();connected=false;selectedThread='';currentRun=null;pendingStart=null;$('addressLabel').hidden=$('peer').value===identity;controls();};
+$('peer').onchange=()=>{detach();connected=false;selectedThread='';currentRun=null;pendingStart=null;records=[];residents=[];updateThreads();$('transcript').replaceChildren();$('residentDetails').hidden=true;target={peer:$('peer').value,address:$('address').value};$('addressLabel').hidden=$('peer').value===identity;controls();};
 $('work').onsubmit=async event=>{
   event.preventDefault();if(!connected||syncing)return;
   const gen=generation,destination={...target};
@@ -305,12 +367,41 @@ $('work').onsubmit=async event=>{
       await operation({op:'control',id:currentRun.record.spec.id,action:{type:'steer',text}});$('prompt').value='';return;
     }
     // Keep an uncertain submission's id and exact input so retry cannot duplicate it.
-    if(!pendingStart) { const run=id();pendingStart={id:run,thread_id:selectedThread||run,backend:'codex',cwd:$('cwd').value,model:$('model').value,prompt:text}; rememberSubmission(); }
+    if(!pendingStart) { const run=id();pendingStart={id:run,thread_id:selectedThread||run,resident_id:residents.some(r=>r.id===selectedThread)?selectedThread:null,backend:'codex',cwd:$('cwd').value,model:$('model').value,prompt:text}; rememberSubmission(); }
     const snapshot=await operation({op:'start',spec:pendingStart},destination);if(gen!==generation)return;pendingStart=null;rememberSubmission();
     if(!records.some(r=>r.record.spec.id===snapshot.record.spec.id))records.push(snapshot);selectedThread=snapshot.record.spec.thread_id;$('prompt').value='';
     updateThreads();save();showThread(selectedThread);
   }catch(error){if(error.definitive){pendingStart=null;rememberSubmission();$('runStatus').textContent='Request rejected: '+error.message;}else{$('runStatus').textContent=steering?'Steering delivery unconfirmed: '+error.message+'. Inspect retained events before sending again.':'Submission not confirmed: '+error.message+'. Retrying submits the same run ID.';}}
   finally{submitting=false;controls();}
+};
+$('createResident').onsubmit=async event=>{
+  event.preventDefault();if(!connected||residentBusy)return;
+  residentBusy=true;controls();const destination={...target},gen=generation;
+  try {
+    if(pendingResident&&pendingResident.target.peer!==destination.peer)throw new Error('A resident creation is unconfirmed on another machine. Reconnect there to retry its original ID.');
+    if(!pendingResident){pendingResident={target:destination,spec:{id:id(),name:$('residentName').value,cwd:$('residentCwd').value,model:$('residentModel').value,identity:$('residentIdentity').value,memory:$('residentMemory').value,quota_bytes:Number($('residentQuota').value)}};localStorage.setItem('boxen-pending-resident',JSON.stringify(pendingResident));}
+    const resident=await operation({op:'resident_create',spec:pendingResident.spec},destination);
+    pendingResident=null;localStorage.removeItem('boxen-pending-resident');
+    if(gen!==generation)return;
+    if(!residents.some(r=>r.id===resident.id))residents.push(resident);
+    $('createResidentStatus').textContent='Resident created. It is at home; no run was started.';
+    selectedThread=resident.id;updateThreads();showThread(selectedThread);
+  }catch(error){if(error.definitive){pendingResident=null;localStorage.removeItem('boxen-pending-resident');}$('createResidentStatus').textContent=error.message;}
+  finally{residentBusy=false;controls();}
+};
+$('editResident').onsubmit=async event=>{
+  event.preventDefault();if(!connected||residentBusy)return;
+  residentBusy=true;controls();const residentId=selectedThread,destination={...target};
+  try{
+    const updated=await operation({op:'resident_update',id:residentId,patch:{expected_revision:editorRevision,name:$('editName').value,identity:$('editIdentity').value,memory:$('editMemory').value,quota_bytes:Number($('editQuota').value)}},destination);
+    if(selectedThread!==residentId||target.peer!==destination.peer)return;
+    residents=residents.map(r=>r.id===residentId?updated:r);editorRevision=updated.revision;updateThreads();$('residentEditStatus').textContent='Saved revision '+updated.revision;
+  }catch(error){$('residentEditStatus').textContent=error.message+' · Your edits are retained; reload stored values before reconciling and retrying.';}
+  finally{residentBusy=false;controls();}
+};
+$('reloadResident').onclick=async()=>{
+  const residentId=selectedThread,destination={...target};
+  try{const resident=await operation({op:'resident_get',id:residentId},destination);if(selectedThread!==residentId||target.peer!==destination.peer)return;residents=residents.map(r=>r.id===residentId?resident:r);loadResidentEditor();controls();}catch(error){$('residentEditStatus').textContent=error.message;}
 };
 $('cancel').onclick=async()=>{try{await operation({op:'control',id:currentRun.record.spec.id,action:{type:'cancel'}});$('runStatus').textContent='Cancellation requested; waiting for backend confirmation';}catch(error){$('runStatus').textContent=error.message;}};
 $('detach').onclick=()=>{detach();connected=false;controls();$('connection').textContent='Viewer detached. Execution continues; connect to reattach.';};

@@ -2,6 +2,7 @@
 """Check actual blocking primitives and idle CPU in the shipped executable."""
 import json
 import pathlib
+import platform
 import resource
 import subprocess
 import sys
@@ -17,6 +18,7 @@ after = resource.getrusage(resource.RUSAGE_CHILDREN)
 cpu = after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime
 record = json.loads(result.stdout)
 assert record["ok"]
+assert record["os"] == {"Darwin":"macos","Linux":"linux","Windows":"windows"}.get(platform.system(),platform.system().lower())
 assert record["condition_variable_ms"] >= 150
 assert record["channel_timeout_ms"] >= 150
 assert record["condition_variable_wakes"] < 100

@@ -29,3 +29,7 @@ Durable workload journals are authoritative execution records, not opt-in diagno
 - Remote workloads must stream backend-exposed thinking summaries, messages, tool activity, output, and status as they occur. Viewer lifetime must not own execution lifetime. Reconnection must replay missed retained events without duplication.
 - Early execution uses Full access as agreed. Movement authority and credential distribution remain separate concerns. Do not add a sandbox requirement or approval flow contrary to the agreed scope.
 - Verify real behavior before claiming completion. Distinguish backend fixtures from actual model/runtime evidence and preserve explicit uncertain outcomes after interrupted execution.
+
+## Recover and keep incidents legible
+
+Prefer useful uptime with an honest record of what went wrong over aborting on uncertainty. Recover where possible, isolate the affected component, retain incident evidence, and explain the recovered state to both humans and agents. Do not make receipts, verification ceremonies, or manual acknowledgment a default prerequisite for a resident to accept its next message. An uncertain prior outcome stays uncertain; availability must not depend on relabeling it successful. Continue with new work rather than automatically repeating potentially completed tool effects. If a backend session is unavailable, preserve the canonical Boxen conversation and make any reconstruction limits explicit.

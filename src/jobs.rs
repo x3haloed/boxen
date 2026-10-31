@@ -1,6 +1,10 @@
 //! The executing daemon is the sole authority for runs and their ordered events.
 use crate::logging::{self, Context, Level, Target};
-use crate::{Result, codex, state};
+use crate::{
+    Result, codex,
+    residents::{Create, Resident, Residents},
+    state,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -25,16 +29,20 @@ mod tests {
 
     #[test]
     fn crash_tail_recovery_keeps_sequence_and_single_authority() {
-        let path =
+        let root =
             std::env::temp_dir().join(format!("boxen-journal-{}", state::random_hex().unwrap()));
+        let path = root.join("runs");
         let owner = state::random_hex().unwrap();
         let id = state::random_hex().unwrap();
         state::private_dir(&path.join(&id)).unwrap();
         let record = Record {
             owner: owner.clone(),
+            resident: None,
+            recovery: None,
             created_at: now(),
             spec: Spec {
                 id: id.clone(),
+                resident_id: None,
                 thread_id: id.clone(),
                 backend: "codex".into(),
                 cwd: path.to_string_lossy().into(),
@@ -56,8 +64,8 @@ mod tests {
         let mut bytes = serde_json::to_vec(&event).unwrap();
         bytes.extend_from_slice(b"\n{\"seq\":2");
         state::write_new(&path.join(&id).join("events.jsonl"), &bytes).unwrap();
-        let jobs = Jobs::open(path.clone(), "missing-codex".into()).unwrap();
-        assert!(Jobs::open(path.clone(), "missing-codex".into()).is_err());
+        let jobs = Jobs::open(path.clone(), "missing-codex".into(), owner.clone()).unwrap();
+        assert!(Jobs::open(path.clone(), "missing-codex".into(), owner.clone()).is_err());
         let run = jobs.get(&owner, &id).unwrap();
         let (events, snapshot) = run.batch(0, false).unwrap();
         assert_eq!(snapshot.status, "interrupted");
@@ -66,10 +74,10 @@ mod tests {
         assert!(jobs.get(&state::random_hex().unwrap(), &id).is_err());
         drop(run);
         drop(jobs);
-        let reopened = Jobs::open(path.clone(), "missing-codex".into()).unwrap();
+        let reopened = Jobs::open(path.clone(), "missing-codex".into(), owner.clone()).unwrap();
         assert_eq!(reopened.get(&owner, &id).unwrap().snapshot().last_seq, 2);
         drop(reopened);
-        std::fs::remove_dir_all(path).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 pub fn valid_id(id: &str) -> Result<()> {
@@ -78,6 +86,8 @@ pub fn valid_id(id: &str) -> Result<()> {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Spec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident_id: Option<String>,
     pub id: String,
     pub thread_id: String,
     pub backend: String,
@@ -96,6 +106,10 @@ pub struct Event {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Record {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident: Option<Resident>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<Value>,
     pub spec: Spec,
     pub owner: String,
     pub created_at: u64,
@@ -262,15 +276,65 @@ fn project(snapshot: &mut Snapshot, event: &Event) {
     }
 }
 
+pub struct History {
+    directory: PathBuf,
+    thread_id: String,
+    runs: Vec<Arc<Run>>,
+}
+impl History {
+    pub fn reconstruction(&self) -> Result<String> {
+        let mut recent = std::collections::VecDeque::new();
+        let mut bytes = 0usize;
+        let mut total = 0usize;
+        for run in &self.runs {
+            let inner = run.inner.lock().unwrap();
+            let id = &inner.snapshot.record.spec.id;
+            let journal = self.directory.join(id).join("events.jsonl");
+            for event in &inner.events {
+                total += 1;
+                if event.kind == "backend"
+                    && !matches!(
+                        event.data["method"].as_str(),
+                        Some(
+                            "item/completed" | "turn/plan/updated" | "turn/diff/updated" | "error"
+                        )
+                    )
+                {
+                    continue;
+                }
+                let value = json!({"run_id":id,"event":event});
+                let size = serde_json::to_vec(&value)?.len();
+                let value = if size > 16 * 1024 {
+                    json!({"run_id":id,"seq":event.seq,"kind":event.kind,"payload_omitted":true,"bytes":size,"journal":journal})
+                } else {
+                    value
+                };
+                bytes += serde_json::to_vec(&value)?.len();
+                recent.push_back(value);
+                while bytes > 48 * 1024 {
+                    if let Some(old) = recent.pop_front() {
+                        bytes = bytes.saturating_sub(serde_json::to_vec(&old)?.len());
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(json!({"canonical_thread":self.thread_id,"retained_runs_directory":self.directory,"total_prior_events":total,"included_recent_events":recent.len(),"omitted_older_events":total.saturating_sub(recent.len()),"recent_events":recent}).to_string())
+    }
+}
+
 pub struct Jobs {
     directory: PathBuf,
     runs: Mutex<HashMap<String, Arc<Run>>>,
     codex_path: String,
     _lock: File,
+    pub residents: Arc<Residents>,
+    transitions: Mutex<()>,
 }
 
 impl Jobs {
-    pub fn open(directory: PathBuf, codex_path: String) -> Result<Arc<Self>> {
+    pub fn open(directory: PathBuf, codex_path: String, machine_id: String) -> Result<Arc<Self>> {
         logging::record(
             Level::Info,
             Target::State,
@@ -287,7 +351,16 @@ impl Jobs {
         let lock = OpenOptions::new().read(true).write(true).open(lock_path)?;
         fs2::FileExt::try_lock_exclusive(&lock)
             .map_err(|_| "another daemon already owns this data directory")?;
+        let residents = Arc::new(Residents::open(
+            directory
+                .parent()
+                .ok_or("runs directory requires a parent")?
+                .join("residents"),
+            machine_id,
+        )?);
         let jobs = Arc::new(Self {
+            residents,
+            transitions: Mutex::new(()),
             directory,
             runs: Mutex::new(HashMap::new()),
             codex_path,
@@ -401,7 +474,24 @@ impl Jobs {
         records
     }
 
+    pub fn create_resident(&self, owner: &str, spec: Create) -> Result<Resident> {
+        let _transition = self.transitions.lock().unwrap();
+        if self
+            .runs
+            .lock()
+            .unwrap()
+            .values()
+            .any(|r| r.snapshot().record.spec.thread_id == spec.id)
+        {
+            // Retrying creation after the first conversation is still idempotent.
+            if self.residents.get(owner, &spec.id).is_err() {
+                return Err("thread id is already in use".into());
+            }
+        }
+        self.residents.create(owner, spec)
+    }
     pub fn start(self: &Arc<Self>, owner: &str, spec: Spec) -> Result<Snapshot> {
+        let _transition = self.transitions.lock().unwrap();
         logging::record(
             Level::Info,
             Target::Workload,
@@ -427,6 +517,14 @@ impl Jobs {
                 return Ok(snapshot);
             }
             return Err("run id already exists with different input or owner".into());
+        }
+        let resident =
+            self.residents
+                .context(owner, &spec.thread_id, spec.resident_id.as_deref())?;
+        if let Some(r) = &resident
+            && (spec.cwd != r.cwd || spec.model != r.model)
+        {
+            return Err("resident working directory and model are pinned to its definition".into());
         }
         if spec.backend != "codex" {
             return Err("only the codex backend is available".into());
@@ -465,18 +563,23 @@ impl Jobs {
             if prior.record.spec.cwd != spec.cwd {
                 return Err("follow-up must retain the thread working directory".into());
             }
-            if prior.status == "interrupted" {
-                return Err(
-                    "thread has an uncertain prior execution; inspect it and create a new thread"
-                        .into(),
-                );
-            }
         }
         let resume = previous.iter().rev().find_map(|s| s.backend_thread.clone());
+        let recovery = previous.last().filter(|r|r.status=="interrupted").map(|r|json!({"prior_run_id":r.record.spec.id,"detail":"Previous execution and tool effects are uncertain. Continue the canonical conversation with this new message; do not replay the old work automatically."}));
+        let history = History {
+            directory: self.directory.clone(),
+            thread_id: spec.thread_id.clone(),
+            runs: previous
+                .iter()
+                .map(|r| runs[&r.record.spec.id].clone())
+                .collect(),
+        };
         let path = self.directory.join(&spec.id);
         state::private_dir(&path)?;
         let record = Record {
             spec: spec.clone(),
+            resident,
+            recovery,
             owner: owner.into(),
             // Preserve acceptance order even for submissions in the same millisecond
             // or after a wall-clock correction. Follow-ups must resume the latest run.
@@ -519,8 +622,17 @@ impl Jobs {
             || Value::Null,
         );
         let binary = self.codex_path.clone();
+        let residents = self.residents.clone();
         std::thread::spawn(move || {
-            if let Err(error) = codex::execute(&binary, &spec, resume, run.clone(), receiver) {
+            if let Err(error) = codex::execute(
+                &binary,
+                &spec,
+                resume,
+                run.clone(),
+                receiver,
+                residents,
+                history,
+            ) {
                 run.diagnostic(
                     Level::Error,
                     "execution.failed",

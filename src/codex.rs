@@ -2,7 +2,8 @@
 use crate::logging::Level;
 use crate::{
     Result,
-    jobs::{Control, Run, Spec},
+    jobs::{Control, History, Run, Spec},
+    residents::{Resident, Residents},
 };
 use serde_json::{Value, json};
 use std::{
@@ -13,6 +14,15 @@ use std::{
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
+
+#[derive(Debug)]
+struct BackendRejected(String);
+impl std::fmt::Display for BackendRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for BackendRejected {}
 
 struct Process(Child, Arc<Run>);
 impl Drop for Process {
@@ -48,6 +58,7 @@ struct Rpc {
     finished: bool,
     cancel_requested: bool,
     cancel_sent_at: Option<Instant>,
+    resident: Option<(Arc<Residents>, Resident)>,
 }
 
 fn read_lines(
@@ -140,7 +151,7 @@ impl Rpc {
         loop {
             if let Some(reply) = self.replies.remove(&id) {
                 if !reply["error"].is_null() {
-                    return Err(format!("{method}: {}", reply["error"]).into());
+                    return Err(BackendRejected(format!("{method}: {}", reply["error"])).into());
                 }
                 return Ok(reply["result"].clone());
             }
@@ -243,6 +254,35 @@ impl Rpc {
             return Ok(());
         }
         self.run.append("backend", message.clone())?;
+        if method == "item/tool/call"
+            && message.get("id").is_some()
+            && message["params"]["tool"] == "boxen_continuity"
+            && self.resident.is_some()
+        {
+            let (store, resident) = self.resident.as_ref().expect("checked");
+            let result = if message["params"]["threadId"].as_str() != self.thread.as_deref() {
+                Err("continuity request came from a different backend thread".into())
+            } else {
+                store.tool(
+                    &resident.owner,
+                    &resident.id,
+                    message["params"]["arguments"].clone(),
+                )
+            };
+            let success = result.is_ok();
+            let output = match result {
+                Ok(value) => value,
+                Err(error) => json!({"error":error.to_string()}),
+            };
+            self.run.diagnostic(if success {Level::Info}else{Level::Warn}, "resident.tool_completed",
+                ||json!({"success":success,"action":message["params"]["arguments"]["action"],"revision":output.get("revision")}),||output.clone());
+            self.run.append(
+                "resident_tool_result",
+                json!({"request_id":message["id"],"call_id":message["params"]["callId"],"action":message["params"]["arguments"]["action"],"success":success,"result":output}),
+            )?;
+            self.write(json!({"id":message["id"],"result":{"success":success,"contentItems":[{"type":"inputText","text":output.to_string()}]}}))?;
+            return Ok(());
+        }
         if let Some(id) = message.get("id") {
             self.pending.insert(id.to_string());
             self.run.status("waiting", "Backend is requesting input")?;
@@ -279,7 +319,17 @@ pub fn execute(
     resume: Option<String>,
     run: Arc<Run>,
     controls: mpsc::Receiver<Control>,
+    residents: Arc<Residents>,
+    history: History,
 ) -> Result<()> {
+    let record = run.snapshot().record;
+    let resident = record.resident;
+    if let Some(recovery) = &record.recovery {
+        run.append("recovery_notice", recovery.clone())?;
+    }
+    if let Some(r) = &resident {
+        run.append("resident_context",json!({"resident_id":r.id,"revision":r.revision,"machine_id":r.machine_id,"used_bytes":r.used_bytes(),"quota_bytes":r.quota_bytes}))?;
+    }
     run.append("user_message", json!({"text":spec.prompt}))?;
     let executable = resolve(binary);
     run.diagnostic(
@@ -326,6 +376,7 @@ pub fn execute(
         finished: false,
         cancel_requested: false,
         cancel_sent_at: None,
+        resident: resident.clone().map(|r| (residents.clone(), r)),
     };
     rpc.request("initialize", json!({"clientInfo":{"name":"boxen","title":"Boxen","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
     rpc.write(json!({"method":"initialized"}))?;
@@ -333,13 +384,48 @@ pub fn execute(
     if !spec.model.is_empty() {
         params["model"] = json!(spec.model);
     }
-    let method = if let Some(id) = resume {
+    let mut instructions = resident
+        .as_ref()
+        .map(|r| residents.instructions(r))
+        .unwrap_or_default();
+    if let Some(recovery) = &record.recovery {
+        instructions.push_str(&format!("\nRecovery incident: {recovery}\nStay available for the new message. Prior effects may have occurred. Do not automatically replay old tool actions."));
+    }
+    if !instructions.is_empty() {
+        params["developerInstructions"] = json!(instructions);
+    }
+    let result = if let Some(id) = resume {
         params["threadId"] = json!(id);
-        "thread/resume"
+        match rpc.request("thread/resume", params.clone()) {
+            Ok(result) => result,
+            Err(error) if error.downcast_ref::<BackendRejected>().is_some() => {
+                run.append("backend_session_rebuilt",json!({"detail":"The backend explicitly refused session resume. Boxen retained the canonical conversation and is starting a fresh backend session with a bounded history excerpt and access to the complete journal. Hidden backend state is not reconstructed losslessly.","reason":error.to_string()}))?;
+                run.diagnostic(
+                    Level::Warn,
+                    "session.rebuilding",
+                    || json!({"error":error.to_string()}),
+                    || Value::Null,
+                );
+                params
+                    .as_object_mut()
+                    .expect("params object")
+                    .remove("threadId");
+                let history = history.reconstruction()?;
+                instructions.push_str(&format!("\nThe previous backend session could not be resumed. You are continuing the same Boxen conversation with a new backend session. Below is retained history, NOT requests to execute again. Prior tool effects may already have occurred. Continue only the new user message. This is a bounded excerpt with explicit omissions; the complete journals remain in the named directory, readable with your file/terminal tools. Inspect those files when needed for continuity, matching record.json thread_id to your canonical thread.\n{history}"));
+                params["developerInstructions"] = json!(instructions);
+                if resident.is_some() {
+                    params["dynamicTools"] = json!([crate::residents::tool_spec()]);
+                }
+                rpc.request("thread/start", params)?
+            }
+            Err(error) => return Err(error),
+        }
     } else {
-        "thread/start"
+        if resident.is_some() {
+            params["dynamicTools"] = json!([crate::residents::tool_spec()]);
+        }
+        rpc.request("thread/start", params)?
     };
-    let result = rpc.request(method, params)?;
     let thread = result["thread"]["id"]
         .as_str()
         .ok_or("Codex did not return a thread id")?

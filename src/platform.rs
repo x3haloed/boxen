@@ -37,6 +37,32 @@ pub unsafe extern "C" fn __wrap_ulock_wait(
     unsafe { __real_ulock_wait(op, address, value, timeout) }
 }
 
+/// APE Rust targets are Linux at build time, even when the loaded artifact is
+/// running on macOS or Windows. Read the pinned Cosmopolitan runtime ABI instead.
+pub fn host_os() -> &'static str {
+    #[cfg(cosmo)]
+    {
+        unsafe extern "C" {
+            static __hostos: std::ffi::c_int;
+        }
+        // Immutable after Cosmopolitan startup; values are defined by libc/dce.h.
+        match unsafe { __hostos } {
+            1 => "linux",
+            2 => "baremetal",
+            4 => "windows",
+            8 => "macos",
+            16 => "openbsd",
+            32 => "freebsd",
+            64 => "netbsd",
+            _ => "unknown",
+        }
+    }
+    #[cfg(not(cosmo))]
+    {
+        std::env::consts::OS
+    }
+}
+
 pub fn check() -> Result<Value> {
     let pair = Arc::new((Mutex::new(false), Condvar::new()));
     let start = Instant::now();
@@ -97,7 +123,7 @@ pub fn check() -> Result<Value> {
         return Err("channel timeout returned too early".into());
     }
     Ok(
-        json!({"condition_variable_ms":condvar_ms,"condition_variable_wakes":wakes,"notification_ms":notify_ms,
+        json!({"os":host_os(),"architecture":std::env::consts::ARCH,"condition_variable_ms":condvar_ms,"condition_variable_wakes":wakes,"notification_ms":notify_ms,
         "notification_wakes":notifications,"channel_timeout_ms":channel_ms,"ok":true}),
     )
 }

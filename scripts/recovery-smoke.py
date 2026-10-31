@@ -218,12 +218,12 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         recovered = request({"op":"get", "id":crashed["id"]})
         assert [e["seq"] for e in events] == list(range(1,recovered["last_seq"]+1))
         assert request({"op":"start", "spec":crashed})["status"] == "interrupted"
-        try:
-            request({"op":"start", "spec":spec("unsafe resume",crashed["thread_id"])})
-            raise AssertionError("uncertain thread resumed without reconciliation")
-        except urllib.error.HTTPError as error:
-            assert error.code == 422 and b"uncertain" in error.read()
-        assert len(request({"op":"list"})) == 3
+        continuation=spec("continue after incident",crashed["thread_id"])
+        request({"op":"start","spec":continuation})
+        continued_events,continued_snapshot=collect(continuation["id"])
+        assert continued_snapshot["status"]=="completed"
+        assert any(e["kind"]=="recovery_notice" for e in continued_events)
+        assert len(request({"op":"list"})) == 4
         assert collect(run["id"])[1]["status"] == "completed"
         print("PASS executing-daemon crash retains history, shell reconnects to uncertain outcome, no automatic execution retry")
 

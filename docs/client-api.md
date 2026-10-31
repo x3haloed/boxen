@@ -33,7 +33,7 @@ Operations:
 
 Snapshots contain `record` (`spec`, `owner`, `created_at`), `status`, `backend_thread` (nullable), and `last_seq`. `created_at` is a millisecond acceptance timestamp advanced monotonically if wall-clock time ties or moves backwards. Backend thread IDs are runtime references, not Boxen thread IDs. Terminal statuses are `completed`, `failed`, `cancelled`, and `interrupted`; the last denotes uncertain execution, not proof that all external work stopped. Active statuses include `starting`, `running`, and `waiting`.
 
-Control acceptance means delivery to the runtime control queue, not confirmed execution of the action. Observe retained control outcomes and the terminal status. Steering and backend responses are not idempotent submissions; do not blindly resend after losing their response. An uncertain earlier run blocks further execution in that thread; inspect it and explicitly start a new thread in this slice.
+Control acceptance means delivery to the runtime control queue, not confirmed execution of the action. Observe retained control outcomes and the terminal status. Steering and backend responses are not idempotent submissions; do not blindly resend after losing their response. An uncertain earlier run remains `interrupted`; a new message can continue the same thread. The new run records `recovery_notice`, and Boxen passes the uncertainty to the runtime without replaying the earlier work or requiring an acknowledgment ceremony.
 
 ## Live observation and recovery
 
@@ -58,6 +58,6 @@ Events include `status`, `backend_thread`, `user_message`, `backend` (original a
 
 HTTP 200 means an operation returned a result or a stream was established. HTTP 401 means the local capability is missing/revoked; reopen the control URL. HTTP 422 is a confirmed operation rejection. HTTP 502 indicates an upstream transport failure with potentially unknown acceptance. Malformed requests may return 400. A stream can report `{"error":"..."}` after headers were sent; reconnect using the retained cursor. Do not infer workload failure from an HTTP status.
 
-Native clients may also speak the existing peer protocol directly when they have their own paired machine identity. Its `watch` request is `{"op":"watch","id":"RUN_ID","after":0}` and returns the same batches. The CLI is a working client of that interface.
+Native clients may also speak the existing peer protocol directly when they have their own paired machine identity. Its `watch` request is `{"op":"watch","id":"RUN_ID","after":0}` and returns the same batches. The CLI is a working client of that interface. Named residents and continuity operations are described in [residents](residents.md); they use the same routing and ownership contract.
 
 Diagnostic subscriptions and file control are separately documented in [logging](logging.md). Workload events remain retained even when diagnostics are off. This slice offers neither offline history replicas nor automatic reconciliation of unknown tool side effects.

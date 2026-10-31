@@ -344,6 +344,29 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 owner,
                 serde_json::from_value::<Spec>(request["spec"].clone())?,
             )?)?),
+            "resident_issues" => Ok(json!(jobs.residents.issues())),
+            "resident_create" => Ok(jobs
+                .create_resident(owner, serde_json::from_value(request["spec"].clone())?)?
+                .value()),
+            "resident_list" => Ok(json!(
+                jobs.residents
+                    .list(owner)
+                    .iter()
+                    .map(|r| r.value())
+                    .collect::<Vec<_>>()
+            )),
+            "resident_get" => Ok(jobs
+                .residents
+                .get(owner, request["id"].as_str().ok_or("resident id required")?)?
+                .value()),
+            "resident_update" => Ok(jobs
+                .residents
+                .update(
+                    owner,
+                    request["id"].as_str().ok_or("resident id required")?,
+                    serde_json::from_value(request["patch"].clone())?,
+                )?
+                .value()),
             "list" => Ok(serde_json::to_value(jobs.list(owner))?),
             "get" => Ok(serde_json::to_value(
                 jobs.get(owner, request["id"].as_str().ok_or("run id required")?)?

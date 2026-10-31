@@ -85,6 +85,12 @@ Acceptance criteria:
 
 Use destination-local files and explicit placement initially. Resident identity, shared memory, automatic scheduling, and relocation are not prerequisites for this slice. File transfer is not required to prove it.
 
-Next, add the built-in inference runtime to verify that the common execution contract supports both runtime kinds. Resident continuity and movement between machines follow; parallel conversations, clones, and reintegration remain part of the beta requirements.
+The next slice adds the first resident: a named identity, one canonical conversation, and a quota-managed identity/memory store on an explicitly selected host. The built-in inference runtime remains planned to verify both runtime kinds. Movement follows; parallel conversations, clones, and reintegration remain part of the beta requirements.
 
 The initial [LAN pairing prerequisite](p2p.md) now carries [remote Codex workloads with live event streaming](workloads.md). The executing daemon owns each run and its retained event sequence. A client can detach and reconnect; a daemon restart marks unfinished execution uncertain rather than retrying it automatically. Broader recovery, storage retention, scheduling, production enrollment UX, and wide-area connectivity remain open. The built-in inference runtime is the next planned backend, not part of this implemented slice.
+
+## Recovery favors availability
+
+Prefer continued availability with a durable, understandable incident record over stopping simply because a previous outcome is uncertain. Do not require manual acknowledgment, proof collection, or state-certification ceremonies before the next turn. Keep the original interrupted outcome and side-effect uncertainty intact; a new message continues the conversation without automatically repeating old work.
+
+An explicitly unresumable managed-backend session may be replaced beneath the same canonical Boxen conversation. Supply saved identity/memory and retained history with clear reconstruction limits. A malformed resident record is isolated and reported rather than taking healthy residents and anonymous workloads offline. This principle does not authorize new machine access, copying credentials, or silently abandoning history.
