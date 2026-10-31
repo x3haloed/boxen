@@ -6,6 +6,7 @@ This is an inventory of unresolved design work, not a settled architecture or an
 | --- | --- |
 | Identity and ownership | What identifies an agent definition, resident, thread, and run? Who owns their records? How is single execution ownership enforced for a canonical conversation? How are clone inheritance and optional live sharing represented? |
 | Placement and portability | How are state location, execution location, and placement preferences represented? What makes a destination eligible? How is required continuity synchronized before activation, and source execution stopped before handoff? |
+| Managed-session mobility | Can a runtime's complete native session move, with its opaque state and required artifacts, under the selected runtime/provider versions? When does a canonical resident require pinned execution rather than context reconstruction? See [the portability investigation](research/managed-session-portability.md); native fidelity is unverified. |
 | Credentials | Where are secrets stored, unlocked, and scoped? When may they be shared across machines? Can remote work use a credential without copying it? How do rotation and revocation propagate? |
 | Home and work segregation | How are files, memory, credentials, tools, networks, and communication separated? Where are OS accounts or VMs needed? How are crossings granted? |
 | Enrollment and connectivity | How do machines pair, authenticate, discover, and reach each other across NAT, firewalls, changing addresses, and sleep? How are machines removed or recovered? |

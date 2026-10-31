@@ -54,6 +54,8 @@ See [the first resident](docs/residents.md) for continuity and [mailboxes](docs/
 
 The next runtime is being researched in [inference providers and the Boxen runtime](docs/research/inference-runtime.md), including source comparisons, Watch's compatibility cases, proposed ownership boundaries, and verification criteria. Inference-provider support is not implemented yet.
 
+An opt-in [transport and replay experiment](docs/research/inference-transport-experiment.md) now verifies HTTPS streaming and fresh-process replay with OpenRouter in native and portable builds. It is separate from the daemon backend. [Managed-session portability](docs/research/managed-session-portability.md) remains a distinct, unverified capability.
+
 ## Live daemon diagnostics
 
 Diagnostics are off by default and can be enabled, filtered, streamed remotely, redirected to a file, and disabled without restarting the daemon:

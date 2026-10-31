@@ -2,6 +2,8 @@
 extern crate cosmo_compat as _;
 
 mod codex;
+#[cfg(feature = "inference-probe")]
+mod inference_probe;
 mod jobs;
 mod logging;
 mod mailbox;
@@ -71,9 +73,17 @@ Default data: ~/.boxen (or BOXEN_HOME). Default peer port: 42424.\n\
 MODEL '-' selects the executing machine's configured default.\n\
 Workloads run through Codex app-server with Full access on the destination."
         );
+        #[cfg(feature = "inference-probe")]
+        println!(
+            "\nExperimental transport commands (not daemon backends):\nboxen inference-probe --request PATH --journal NEW_PATH --key-file PATH\nboxen inference-replay --journal PATH"
+        );
         return Ok(());
     }
     let command = args.remove(0);
+    #[cfg(feature = "inference-probe")]
+    if command == "inference-probe" || command == "inference-replay" {
+        return inference_probe::run(&command, args);
+    }
     if command == "platform-check" && args.is_empty() {
         println!("{}", platform::check()?);
         return Ok(());
