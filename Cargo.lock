@@ -125,9 +125,9 @@ dependencies = [
 
 [[package]]
 name = "cosmo-build"
-version = "6.0.2"
+version = "10.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bd44afa019fff348784d1369c4688f0433fbfb9894441b5366b408dbb02acb7"
+checksum = "8b384f839a2e6189ffeafa51d27986e728c4fded8360dc81fad4fd34d6232e70"
 dependencies = [
  "ureq",
  "zip",
@@ -135,9 +135,9 @@ dependencies = [
 
 [[package]]
 name = "cosmo-compat"
-version = "6.0.7"
+version = "10.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8811e8843b8a4d258926da2753532ad96e92bb98cad80ed2351c1c68868e90a"
+checksum = "bcffb17621131ca67417501e5e448d9c3b23204afd253c2df4785cd6b0210075"
 dependencies = [
  "libc",
  "rustix",

@@ -1,4 +1,5 @@
 //! One app-server process per active run; completed threads resume on demand.
+use crate::logging::Level;
 use crate::{
     Result,
     jobs::{Control, Run, Spec},
@@ -13,17 +14,23 @@ use std::{
     time::{Duration, Instant},
 };
 
-struct Process(Child);
+struct Process(Child, Arc<Run>);
 impl Drop for Process {
     fn drop(&mut self) {
+        self.1.diagnostic(
+            Level::Info,
+            "process.stopping",
+            || json!({"pid":self.0.id()}),
+            || Value::Null,
+        );
         let _ = self.0.kill();
-        let _ = self.0.wait();
+        let outcome = self.0.wait();
+        self.1.diagnostic(Level::Info,"process.stopped",||json!({"pid":self.0.id(),"status":outcome.as_ref().map(|s|s.to_string()).unwrap_or_else(|e|e.to_string())}),||Value::Null);
     }
 }
 
 enum Incoming {
     Message(Value),
-    Stderr(String),
     Closed(String),
 }
 
@@ -47,11 +54,13 @@ fn read_lines(
     reader: impl Read + Send + 'static,
     sender: mpsc::SyncSender<Incoming>,
     stderr: bool,
+    run: Arc<Run>,
 ) {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
         loop {
-            let mut line = Vec::new();
+            line.clear();
             // Bound a backend line before parsing or retaining it.
             match reader
                 .by_ref()
@@ -70,14 +79,25 @@ fn read_lines(
                     break;
                 }
                 Ok(_) => {
-                    let item = if stderr {
-                        Incoming::Stderr(String::from_utf8_lossy(&line).trim().into())
-                    } else {
-                        match serde_json::from_slice(&line) {
-                            Ok(value) => Incoming::Message(value),
-                            Err(error) => {
-                                Incoming::Closed(format!("Invalid Codex app-server JSON: {error}"))
-                            }
+                    if stderr {
+                        run.diagnostic(
+                            Level::Debug,
+                            "process.stderr",
+                            || json!({"bytes":line.len()}),
+                            || json!({"text":String::from_utf8_lossy(&line).trim()}),
+                        );
+                        continue;
+                    }
+                    let item = match serde_json::from_slice(&line) {
+                        Ok(value) => Incoming::Message(value),
+                        Err(error) => {
+                            run.diagnostic(
+                                Level::Error,
+                                "process.invalid_json",
+                                || json!({"error":error.to_string(),"bytes":line.len()}),
+                                || json!({"text":String::from_utf8_lossy(&line)}),
+                            );
+                            Incoming::Closed(format!("Invalid Codex app-server JSON: {error}"))
                         }
                     };
                     if sender.send(item).is_err() {
@@ -99,6 +119,12 @@ impl Rpc {
         bytes.push(b'\n');
         self.stdin.write_all(&bytes)?;
         self.stdin.flush()?;
+        self.run.diagnostic(
+            Level::Trace,
+            "rpc.sent",
+            || json!({"method":value["method"],"id":value["id"],"bytes":bytes.len()}),
+            || value.clone(),
+        );
         Ok(())
     }
     fn send(&mut self, method: &str, params: Value) -> Result<u64> {
@@ -119,6 +145,12 @@ impl Rpc {
                 return Ok(reply["result"].clone());
             }
             if Instant::now() > deadline {
+                self.run.diagnostic(
+                    Level::Error,
+                    "rpc.timeout",
+                    || json!({"method":method,"id":id}),
+                    || Value::Null,
+                );
                 return Err(format!("Codex {method} timed out").into());
             }
             self.tick()?;
@@ -185,11 +217,6 @@ impl Rpc {
         }
         match self.incoming.recv_timeout(Duration::from_millis(20)) {
             Ok(Incoming::Message(message)) => self.ingest(message)?,
-            Ok(Incoming::Stderr(text)) => {
-                if !text.is_empty() {
-                    self.run.append("diagnostic", json!({"text":text}))?;
-                }
-            }
             Ok(Incoming::Closed(error)) => return Err(error.into()),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err("Codex app-server disconnected".into());
@@ -199,6 +226,7 @@ impl Rpc {
         Ok(())
     }
     fn ingest(&mut self, message: Value) -> Result<()> {
+        self.run.diagnostic(Level::Trace,"rpc.received",||json!({"method":message["method"],"id":message["id"],"error":!message["error"].is_null()}),||message.clone());
         if message.get("method").is_none() {
             if let Some(id) = message["id"].as_u64() {
                 if self.awaiting.remove(&id) {
@@ -254,18 +282,36 @@ pub fn execute(
 ) -> Result<()> {
     run.append("user_message", json!({"text":spec.prompt}))?;
     let executable = resolve(binary);
+    run.diagnostic(
+        Level::Info,
+        "process.starting",
+        || json!({"executable":executable,"cwd":spec.cwd}),
+        || Value::Null,
+    );
     let mut child = Command::new(&executable).args(["app-server", "--listen", "stdio://"])
         .current_dir(&spec.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn().map_err(|error| format!("Cannot start Codex at {executable}: {error}. Configure serve --codex PATH on this machine."))?;
     let stdin = child.stdin.take().ok_or("missing app-server stdin")?;
+    run.diagnostic(
+        Level::Info,
+        "process.started",
+        || json!({"pid":child.id()}),
+        || Value::Null,
+    );
     let (sender, incoming) = mpsc::sync_channel(256);
     read_lines(
         child.stdout.take().ok_or("missing stdout")?,
         sender.clone(),
         false,
+        run.clone(),
     );
-    read_lines(child.stderr.take().ok_or("missing stderr")?, sender, true);
-    let _process = Process(child);
+    read_lines(
+        child.stderr.take().ok_or("missing stderr")?,
+        sender,
+        true,
+        run.clone(),
+    );
+    let _process = Process(child, run.clone());
     let mut rpc = Rpc {
         stdin,
         incoming,

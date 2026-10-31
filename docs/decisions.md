@@ -10,6 +10,10 @@ The user will primarily direct GUI design. Early controls should provide simple 
 
 Commit and push coherent, verified implementation slices as part of the development workflow.
 
+## Daemon diagnostics
+
+Instrument the daemon throughout development, as required by [AGENTS.md](../AGENTS.md). Structured diagnostic logging is off by default, with runtime enable/disable, authenticated remote shell subscriptions, file sinks, and producer-side filters. Keep the disabled path cheap and log fields lazy. Bound consumer queues and report loss rather than blocking workloads behind log I/O. Diagnostic controls must not require a restart or affect authoritative workload journals. See [logging](logging.md) for the implemented contract.
+
 ## Resident identity and conversations
 
 A resident can use a single canonical conversation that continues indefinitely. Runtime sessions and context windows may change without creating a different resident or ending that conversation.

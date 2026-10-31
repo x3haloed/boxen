@@ -1,3 +1,4 @@
+use crate::logging::{self, Context, Delivery, Filter, Level, Target};
 use crate::{Result, jobs::Jobs, protocol, state::State};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -27,6 +28,14 @@ pub fn serve(listener: TcpListener, state: Arc<State>, jobs: Arc<Jobs>, token: S
         match stream {
             Ok(mut stream) => {
                 if active.fetch_add(1, Ordering::SeqCst) >= 64 {
+                    logging::record(
+                        Level::Warn,
+                        Target::Http,
+                        "connection.limit_reached",
+                        Context::default(),
+                        || json!({"limit":64}),
+                        || Value::Null,
+                    );
                     active.fetch_sub(1, Ordering::SeqCst);
                     continue;
                 }
@@ -34,13 +43,28 @@ pub fn serve(listener: TcpListener, state: Arc<State>, jobs: Arc<Jobs>, token: S
                     (state.clone(), jobs.clone(), token.clone(), active.clone());
                 std::thread::spawn(move || {
                     if let Err(error) = handle(&mut stream, &state, &jobs, &token, port) {
+                        logging::record(
+                            Level::Warn,
+                            Target::Http,
+                            "request.failed",
+                            Context::default(),
+                            || json!({"error":error.to_string()}),
+                            || Value::Null,
+                        );
                         let _ =
                             respond(&mut stream, 400, "text/plain", error.to_string().as_bytes());
                     }
                     active.fetch_sub(1, Ordering::SeqCst);
                 });
             }
-            Err(error) => eprintln!("local UI: {error}"),
+            Err(error) => logging::record(
+                Level::Error,
+                Target::Http,
+                "accept.failed",
+                Context::default(),
+                || json!({"error":error.to_string()}),
+                || Value::Null,
+            ),
         }
     }
 }
@@ -53,6 +77,14 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
         body.len()
     )?;
     stream.write_all(body)?;
+    logging::record(
+        Level::Debug,
+        Target::Http,
+        "response.sent",
+        Context::default(),
+        || json!({"status":status,"content_type":content_type,"bytes":body.len()}),
+        || Value::Null,
+    );
     Ok(())
 }
 
@@ -78,6 +110,15 @@ fn handle(
     let header = std::str::from_utf8(&bytes)?;
     let mut lines = header.split("\r\n");
     let request = lines.next().ok_or("missing request line")?;
+    // Deliberately log only method/path; never headers, authorization, or raw URLs.
+    logging::record(
+        Level::Debug,
+        Target::Http,
+        "request.received",
+        Context::default(),
+        || json!({"method":request.split_whitespace().next(),"path":request.split_whitespace().nth(1).unwrap_or("").split('?').next()}),
+        || Value::Null,
+    );
     let mut host = None;
     let mut authorization = None;
     let mut length = None;
@@ -158,6 +199,70 @@ fn handle(
     let address = target["address"].as_str().unwrap_or("");
     let operation = &target["request"];
     let local = peer == state.public_key();
+    logging::record(
+        Level::Debug,
+        Target::Http,
+        "operation.routed",
+        Context {
+            peer_id: Some(peer),
+            run_id: operation["id"]
+                .as_str()
+                .or_else(|| operation["spec"]["id"].as_str()),
+            thread_id: operation["spec"]["thread_id"].as_str(),
+            connection_id: None,
+        },
+        || json!({"local":local,"op":operation["op"]}),
+        || operation.clone(),
+    );
+    if request == "POST /api/logs HTTP/1.1" {
+        let filter = serde_json::from_value::<Filter>(
+            operation.get("filter").cloned().unwrap_or(json!({})),
+        )?;
+        let local_subscription = if local {
+            Some(logging::global()?.subscribe(filter.clone())?)
+        } else {
+            None
+        };
+        let mut remote = if local {
+            None
+        } else {
+            let mut session = protocol::connect(state, address, peer)?;
+            session.diagnostics(false);
+            session.send(&json!({"op":"logs","filter":filter}))?;
+            Some(session)
+        };
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n"
+        )?;
+        loop {
+            let batch = if let Some(session) = &mut remote {
+                match session.receive() {
+                    Ok(batch) => batch,
+                    Err(error) => json!({"error":error.to_string()}),
+                }
+            } else {
+                let (records, done) = match local_subscription
+                    .as_ref()
+                    .ok_or("missing log subscription")?
+                    .read(Duration::from_secs(1))
+                {
+                    Delivery::Record(record) => (vec![record], false),
+                    Delivery::Idle => (vec![], false),
+                    Delivery::End => (vec![], true),
+                };
+                json!({"records":records,"done":done})
+            };
+            let mut bytes = serde_json::to_vec(&batch)?;
+            bytes.push(b'\n');
+            stream.write_all(&bytes)?;
+            stream.flush()?;
+            if batch["done"] == true || batch.get("error").is_some() {
+                break;
+            }
+        }
+        return Ok(());
+    }
     if request == "POST /api/operation HTTP/1.1" {
         let result = if local {
             protocol::operation(jobs, peer, operation)

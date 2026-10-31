@@ -1,6 +1,7 @@
 use crate::{
     Result,
     jobs::{Control, Jobs, Spec},
+    logging::{self, Context, Delivery, Filter, Level, Target},
     state::{self, State},
 };
 use serde::{Deserialize, Serialize};
@@ -74,8 +75,32 @@ fn configure(stream: &TcpStream) -> Result<()> {
 pub struct Session {
     stream: TcpStream,
     transport: TransportState,
+    connection_id: u64,
+    peer: String,
+    diagnostics: bool,
+}
+impl Drop for Session {
+    fn drop(&mut self) {
+        if self.diagnostics {
+            logging::record(
+                Level::Debug,
+                Target::Peer,
+                "session.closed",
+                Context {
+                    peer_id: Some(&self.peer),
+                    connection_id: Some(self.connection_id),
+                    ..Context::default()
+                },
+                || json!({}),
+                || Value::Null,
+            );
+        }
+    }
 }
 impl Session {
+    pub fn diagnostics(&mut self, enabled: bool) {
+        self.diagnostics = enabled;
+    }
     pub fn send(&mut self, value: &Value) -> Result<()> {
         let bytes = serde_json::to_vec(value)?;
         if bytes.len() > 8 * 1024 * 1024 {
@@ -89,6 +114,28 @@ impl Session {
             frame.extend_from_slice(chunk);
             encrypt(&mut self.stream, &mut self.transport, &frame)?;
         }
+        if self.diagnostics {
+            logging::record(
+                Level::Trace,
+                Target::Peer,
+                "message.sent",
+                Context {
+                    peer_id: Some(&self.peer),
+                    connection_id: Some(self.connection_id),
+                    run_id: value["id"]
+                        .as_str()
+                        .or_else(|| value["spec"]["id"].as_str())
+                        .or_else(|| value["snapshot"]["record"]["spec"]["id"].as_str())
+                        .or_else(|| value["record"]["spec"]["id"].as_str()),
+                    thread_id: value["spec"]["thread_id"]
+                        .as_str()
+                        .or_else(|| value["snapshot"]["record"]["spec"]["thread_id"].as_str())
+                        .or_else(|| value["record"]["spec"]["thread_id"].as_str()),
+                },
+                || json!({"bytes":bytes.len(),"op":value["op"],"done":value["done"]}),
+                || value.clone(),
+            );
+        }
         Ok(())
     }
     pub fn receive(&mut self) -> Result<Value> {
@@ -101,18 +148,92 @@ impl Session {
             }
             bytes.extend_from_slice(payload);
             if more == 0 {
-                return Ok(serde_json::from_slice(&bytes)?);
+                let value: Value = serde_json::from_slice(&bytes)?;
+                if value["op"] == "logs" {
+                    self.diagnostics = false;
+                }
+                if self.diagnostics {
+                    logging::record(
+                        Level::Trace,
+                        Target::Peer,
+                        "message.received",
+                        Context {
+                            peer_id: Some(&self.peer),
+                            connection_id: Some(self.connection_id),
+                            run_id: value["id"]
+                                .as_str()
+                                .or_else(|| value["spec"]["id"].as_str())
+                                .or_else(|| value["snapshot"]["record"]["spec"]["id"].as_str())
+                                .or_else(|| value["record"]["spec"]["id"].as_str()),
+                            thread_id: value["spec"]["thread_id"]
+                                .as_str()
+                                .or_else(|| {
+                                    value["snapshot"]["record"]["spec"]["thread_id"].as_str()
+                                })
+                                .or_else(|| value["record"]["spec"]["thread_id"].as_str()),
+                        },
+                        || json!({"bytes":bytes.len(),"op":value["op"]}),
+                        || value.clone(),
+                    );
+                }
+                return Ok(value);
             }
         }
     }
 }
 pub fn connect(state: &State, address: &str, expected: &str) -> Result<Session> {
+    let connection_id = next_connection();
+    logging::record(
+        Level::Debug,
+        Target::Peer,
+        "connect.requested",
+        Context {
+            peer_id: Some(expected),
+            connection_id: Some(connection_id),
+            ..Context::default()
+        },
+        || json!({"address":address}),
+        || Value::Null,
+    );
+    let outcome = connect_inner(state, address, expected, connection_id);
+    if let Err(error) = &outcome {
+        logging::record(
+            Level::Warn,
+            Target::Peer,
+            "connect.failed",
+            Context {
+                peer_id: Some(expected),
+                connection_id: Some(connection_id),
+                ..Context::default()
+            },
+            || json!({"address":address,"error":error.to_string()}),
+            || Value::Null,
+        );
+    }
+    outcome
+}
+fn connect_inner(
+    state: &State,
+    address: &str,
+    expected: &str,
+    connection_id: u64,
+) -> Result<Session> {
     state.require_trust(expected)?;
     let mut connected = None;
     for address in address.to_socket_addrs()? {
-        if let Ok(stream) = TcpStream::connect_timeout(&address, Duration::from_secs(3)) {
-            connected = Some(stream);
-            break;
+        match TcpStream::connect_timeout(&address, Duration::from_secs(3)) {
+            Ok(stream) => {
+                connected = Some(stream);
+                break;
+            }
+            Err(error) => logging::record(
+                Level::Debug,
+                Target::Peer,
+                "connect.address_failed",
+                Context::connection(connection_id),
+                || json!({"address":address.to_string(),"error":error.to_string()}),
+                || Value::Null,
+            ),
         }
     }
     let mut stream = connected.ok_or("peer unreachable; delivery is not confirmed")?;
@@ -128,9 +249,24 @@ pub fn connect(state: &State, address: &str, expected: &str) -> Result<Session> 
         return Err("remote identity differs from the selected peer; no message sent".into());
     }
     handshake_send(&mut stream, &mut noise)?;
+    logging::record(
+        Level::Info,
+        Target::Peer,
+        "connect.authenticated",
+        Context {
+            peer_id: Some(expected),
+            connection_id: Some(connection_id),
+            ..Context::default()
+        },
+        || json!({"address":address}),
+        || Value::Null,
+    );
     Ok(Session {
         stream,
         transport: noise.into_transport_mode()?,
+        connection_id,
+        peer: expected.into(),
+        diagnostics: true,
     })
 }
 pub fn request(state: &State, address: &str, expected: &str, request: Value) -> Result<Value> {
@@ -171,23 +307,113 @@ pub fn ping(state: &State, address: &str, expected: &str, message: &str) -> Resu
     Ok(reply)
 }
 pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value> {
-    match request["op"].as_str().unwrap_or("") {
-        "start" => Ok(serde_json::to_value(jobs.start(
-            owner,
-            serde_json::from_value::<Spec>(request["spec"].clone())?,
-        )?)?),
-        "list" => Ok(serde_json::to_value(jobs.list(owner))?),
-        "control" => {
-            let run = jobs.get(owner, request["id"].as_str().ok_or("run id required")?)?;
-            run.control(serde_json::from_value::<Control>(
-                request["action"].clone(),
-            )?)?;
-            Ok(json!({"accepted":true}))
+    logging::record(
+        Level::Debug,
+        Target::Daemon,
+        "operation.requested",
+        Context::peer(owner),
+        || json!({"op":request["op"]}),
+        || Value::Null,
+    );
+    let outcome = (|| -> Result<Value> {
+        match request["op"].as_str().unwrap_or("") {
+            "log_status" => Ok(logging::global()?.status()),
+            "log_off" => {
+                logging::global()?.off();
+                Ok(logging::global()?.status())
+            }
+            "log_file" => {
+                let logger = logging::global()?;
+                logger.file(
+                    request["path"].as_str().ok_or("log path required")?,
+                    serde_json::from_value::<Filter>(
+                        request.get("filter").cloned().unwrap_or(json!({})),
+                    )?,
+                )?;
+                logging::record(
+                    Level::Info,
+                    Target::Daemon,
+                    "logging.file_enabled",
+                    Context::peer(owner),
+                    || json!({"path":request["path"]}),
+                    || Value::Null,
+                );
+                Ok(logger.status())
+            }
+            "start" => Ok(serde_json::to_value(jobs.start(
+                owner,
+                serde_json::from_value::<Spec>(request["spec"].clone())?,
+            )?)?),
+            "list" => Ok(serde_json::to_value(jobs.list(owner))?),
+            "control" => {
+                let run = jobs.get(owner, request["id"].as_str().ok_or("run id required")?)?;
+                run.control(serde_json::from_value::<Control>(
+                    request["action"].clone(),
+                )?)?;
+                Ok(json!({"accepted":true}))
+            }
+            _ => Err("unknown peer operation".into()),
         }
-        _ => Err("unknown peer operation".into()),
-    }
+    })();
+    logging::record(
+        if outcome.is_ok() {
+            Level::Debug
+        } else {
+            Level::Warn
+        },
+        Target::Daemon,
+        if outcome.is_ok() {
+            "operation.completed"
+        } else {
+            "operation.rejected"
+        },
+        Context {
+            peer_id: Some(owner),
+            run_id: request["id"]
+                .as_str()
+                .or_else(|| request["spec"]["id"].as_str()),
+            ..Context::default()
+        },
+        || json!({"op":request["op"],"error":outcome.as_ref().err().map(|e|e.to_string())}),
+        || Value::Null,
+    );
+    outcome
 }
-fn handle(mut stream: TcpStream, state: &State, jobs: Option<&Arc<Jobs>>) -> Result<()> {
+fn handle(stream: TcpStream, state: &State, jobs: Option<&Arc<Jobs>>) -> Result<()> {
+    let connection_id = next_connection();
+    let outcome = handle_inner(stream, state, jobs, connection_id);
+    logging::record(
+        if outcome.is_ok() {
+            Level::Debug
+        } else {
+            Level::Warn
+        },
+        Target::Peer,
+        if outcome.is_ok() {
+            "connection.closed"
+        } else {
+            "connection.failed"
+        },
+        Context::connection(connection_id),
+        || json!({"error":outcome.as_ref().err().map(|e|e.to_string())}),
+        || Value::Null,
+    );
+    outcome
+}
+fn handle_inner(
+    mut stream: TcpStream,
+    state: &State,
+    jobs: Option<&Arc<Jobs>>,
+    connection_id: u64,
+) -> Result<()> {
+    logging::record(
+        Level::Debug,
+        Target::Peer,
+        "handshake.started",
+        Context::connection(connection_id),
+        || json!({}),
+        || Value::Null,
+    );
     configure(&stream)?;
     let private = state.private_key()?;
     let mut noise = snow::Builder::new(params())
@@ -199,14 +425,48 @@ fn handle(mut stream: TcpStream, state: &State, jobs: Option<&Arc<Jobs>>) -> Res
     handshake_receive(&mut stream, &mut noise)?;
     let remote = state::hex(noise.get_remote_static().ok_or("missing peer identity")?);
     state.require_trust(&remote)?;
+    logging::record(
+        Level::Info,
+        Target::Peer,
+        "handshake.authenticated",
+        Context {
+            peer_id: Some(&remote),
+            connection_id: Some(connection_id),
+            ..Context::default()
+        },
+        || json!({}),
+        || Value::Null,
+    );
     let mut session = Session {
         stream,
         transport: noise.into_transport_mode()?,
+        connection_id,
+        peer: remote.clone(),
+        diagnostics: true,
     };
     let request = session.receive()?;
     state.require_trust(&remote)?;
     let outcome = (|| -> Result<()> {
-        if request["op"] == "ping" {
+        if request["op"] == "logs" {
+            session.diagnostics(false);
+            let filter = serde_json::from_value::<Filter>(
+                request.get("filter").cloned().unwrap_or(json!({})),
+            )?;
+            let subscription = logging::global()?.subscribe(filter)?;
+            session.send(&json!({"records":[],"done":false,"session":logging::global()?.status()["session_id"]}))?;
+            loop {
+                state.require_trust(&remote)?;
+                let (records, done) = match subscription.read(Duration::from_secs(1)) {
+                    Delivery::Record(record) => (vec![record], false),
+                    Delivery::Idle => (vec![], false),
+                    Delivery::End => (vec![], true),
+                };
+                session.send(&json!({"records":records,"done":done}))?;
+                if done {
+                    break;
+                }
+            }
+        } else if request["op"] == "ping" {
             let message = request["message"].as_str().ok_or("message required")?;
             if message.len() > MAX_TEXT {
                 return Err("message exceeds 4096 bytes".into());
@@ -248,11 +508,26 @@ pub fn serve(listener: TcpListener, state: Arc<State>, jobs: Arc<Jobs>) {
         let stream = match stream {
             Ok(stream) => stream,
             Err(error) => {
-                eprintln!("accept: {error}");
+                logging::record(
+                    Level::Error,
+                    Target::Peer,
+                    "accept.failed",
+                    Context::default(),
+                    || json!({"error":error.to_string()}),
+                    || Value::Null,
+                );
                 continue;
             }
         };
         if active.fetch_add(1, Ordering::SeqCst) >= 32 {
+            logging::record(
+                Level::Warn,
+                Target::Peer,
+                "connection.limit_reached",
+                Context::default(),
+                || json!({"limit":32}),
+                || Value::Null,
+            );
             active.fetch_sub(1, Ordering::SeqCst);
             continue;
         }
@@ -261,11 +536,23 @@ pub fn serve(listener: TcpListener, state: Arc<State>, jobs: Arc<Jobs>) {
         let jobs = jobs.clone();
         std::thread::spawn(move || {
             if let Err(error) = handle(stream, &state, Some(&jobs)) {
-                eprintln!("Peer exchange rejected: {error}");
+                logging::record(
+                    Level::Warn,
+                    Target::Peer,
+                    "exchange.failed",
+                    Context::default(),
+                    || json!({"error":error.to_string()}),
+                    || Value::Null,
+                );
             }
             active.fetch_sub(1, Ordering::SeqCst);
         });
     }
+}
+
+fn next_connection() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]

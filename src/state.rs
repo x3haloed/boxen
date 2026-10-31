@@ -68,6 +68,14 @@ pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = options.open(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    crate::logging::record(
+        crate::logging::Level::Trace,
+        crate::logging::Target::State,
+        "file.created",
+        crate::logging::Context::default(),
+        || serde_json::json!({"path":path,"bytes":bytes.len()}),
+        || serde_json::Value::Null,
+    );
     Ok(())
 }
 

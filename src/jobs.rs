@@ -1,4 +1,5 @@
 //! The executing daemon is the sole authority for runs and their ordered events.
+use crate::logging::{self, Context, Level, Target};
 use crate::{Result, codex, state};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -133,6 +134,27 @@ pub struct Run {
 }
 
 impl Run {
+    pub fn diagnostic(
+        &self,
+        level: Level,
+        event: &str,
+        fields: impl FnOnce() -> Value,
+        payload: impl FnOnce() -> Value,
+    ) {
+        if !logging::enabled(level, Target::Runtime) {
+            return;
+        }
+        let inner = self.inner.lock().unwrap();
+        let record = &inner.snapshot.record;
+        logging::record(
+            level,
+            Target::Runtime,
+            event,
+            Context::run(&record.spec.id, &record.spec.thread_id, &record.owner),
+            fields,
+            payload,
+        );
+    }
     pub fn snapshot(&self) -> Snapshot {
         self.inner.lock().unwrap().snapshot.clone()
     }
@@ -155,6 +177,19 @@ impl Run {
         project(&mut inner.snapshot, &event);
         inner.events.push(event.clone());
         self.changed.notify_all();
+        let record = &inner.snapshot.record;
+        logging::record(
+            if kind == "status" {
+                Level::Info
+            } else {
+                Level::Trace
+            },
+            Target::Workload,
+            "event.retained",
+            Context::run(&record.spec.id, &record.spec.thread_id, &record.owner),
+            || json!({"sequence":event.seq,"kind":kind,"bytes":bytes.len(),"status":inner.snapshot.status,"method":event.data.get("method")}),
+            || serde_json::to_value(&event).unwrap_or(Value::Null),
+        );
         Ok(event)
     }
     pub fn status(&self, status: &str, detail: &str) -> Result<()> {
@@ -185,9 +220,19 @@ impl Run {
             })
             .cloned()
             .collect();
+        let record = &inner.snapshot.record;
+        logging::record(
+            Level::Trace,
+            Target::Workload,
+            "events.read",
+            Context::run(&record.spec.id, &record.spec.thread_id, &record.owner),
+            || json!({"after":after,"last_sequence":inner.snapshot.last_seq,"status":inner.snapshot.status}),
+            || Value::Null,
+        );
         Ok((events, inner.snapshot.clone()))
     }
     pub fn control(&self, control: Control) -> Result<()> {
+        self.diagnostic(Level::Debug,"control.requested",||json!({"type":match &control{Control::Cancel=>"cancel",Control::Steer{..}=>"steer",Control::Respond{..}=>"respond"}}),||serde_json::to_value(&control).unwrap_or(Value::Null));
         if let Control::Steer { text } = &control
             && (text.is_empty() || text.len() > 256 * 1024)
         {
@@ -226,6 +271,14 @@ pub struct Jobs {
 
 impl Jobs {
     pub fn open(directory: PathBuf, codex_path: String) -> Result<Arc<Self>> {
+        logging::record(
+            Level::Info,
+            Target::State,
+            "journal.opening",
+            Context::default(),
+            || json!({"directory":directory}),
+            || Value::Null,
+        );
         state::private_dir(&directory)?;
         let lock_path = directory.join("authority.lock");
         if !lock_path.exists() {
@@ -302,6 +355,14 @@ impl Jobs {
                 changed: Condvar::new(),
             });
             if !terminal(&run.snapshot().status) {
+                logging::record(
+                    Level::Warn,
+                    Target::State,
+                    "run.recovery_uncertain",
+                    Context::default(),
+                    || json!({"run_id":id}),
+                    || Value::Null,
+                );
                 run.status(
                     "interrupted",
                     "Daemon restarted. Prior execution outcome is uncertain; it was not retried.",
@@ -341,12 +402,28 @@ impl Jobs {
     }
 
     pub fn start(self: &Arc<Self>, owner: &str, spec: Spec) -> Result<Snapshot> {
+        logging::record(
+            Level::Info,
+            Target::Workload,
+            "submission.received",
+            Context::run(&spec.id, &spec.thread_id, owner),
+            || json!({"backend":spec.backend,"cwd":spec.cwd,"model":spec.model,"prompt_bytes":spec.prompt.len()}),
+            || json!({"prompt":spec.prompt}),
+        );
         valid_id(&spec.id)?;
         valid_id(&spec.thread_id)?;
         let mut runs = self.runs.lock().unwrap();
         if let Some(existing) = runs.get(&spec.id) {
             let snapshot = existing.snapshot();
             if snapshot.record.owner == owner && snapshot.record.spec == spec {
+                logging::record(
+                    Level::Info,
+                    Target::Workload,
+                    "submission.reused",
+                    Context::run(&spec.id, &spec.thread_id, owner),
+                    || json!({"status":snapshot.status}),
+                    || Value::Null,
+                );
                 return Ok(snapshot);
             }
             return Err("run id already exists with different input or owner".into());
@@ -425,9 +502,23 @@ impl Jobs {
         run.status("starting", "Accepted by executing machine")?;
         runs.insert(spec.id.clone(), run.clone());
         let snapshot = run.snapshot();
+        logging::record(
+            Level::Info,
+            Target::Workload,
+            "submission.accepted",
+            Context::run(&spec.id, &spec.thread_id, owner),
+            || json!({"backend":spec.backend,"cwd":spec.cwd}),
+            || Value::Null,
+        );
         let binary = self.codex_path.clone();
         std::thread::spawn(move || {
             if let Err(error) = codex::execute(&binary, &spec, resume, run.clone(), receiver) {
+                run.diagnostic(
+                    Level::Error,
+                    "execution.failed",
+                    || json!({"error":error.to_string()}),
+                    || Value::Null,
+                );
                 let status = if matches!(run.snapshot().status.as_str(), "running" | "waiting") {
                     "interrupted"
                 } else {

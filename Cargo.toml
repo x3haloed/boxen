@@ -15,10 +15,10 @@ fs2 = "0.4"
 ape = ["dep:cosmo-build"]
 
 [build-dependencies]
-cosmo-build = { version = "=6.0.2", optional = true }
+cosmo-build = { version = "=10.0.0", optional = true }
 
 [target.'cfg(cosmo)'.dependencies]
-cosmo-compat = "=6.0.7"
+cosmo-compat = "=10.0.0"
 
 [package.metadata.cosmo]
 bin = "boxen"

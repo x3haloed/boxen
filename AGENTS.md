@@ -1,0 +1,30 @@
+# Working on Boxen
+
+Read `docs/vision.md`, `docs/decisions.md`, and the documentation relevant to the current slice. Preserve agreed beta requirements even when implementing a simpler early case. Commit and push coherent, verified slices unless the user directs otherwise.
+
+## Daemon diagnostic logging is a maintained capability
+
+Instrument every new or changed daemon execution path. Logging is part of completing a feature, not a later cleanup task. Cover lifecycle transitions, decisions and their outcomes, network and runtime boundaries, accepted/rejected operations, errors, recovery, and relevant state changes. Correlate records with machine, peer, thread, run, request, or connection identifiers where applicable.
+
+- Diagnostic logging is **off by default**. Enabling, disabling, redirecting, and changing filters must work on the running daemon without a restart.
+- Keep the disabled path cheap: avoid constructing payloads, formatting strings, serializing JSON, allocating log records, or performing log I/O when no enabled sink needs the event. Use lazy fields and an inexpensive enabled/filter check rather than preparing records for a no-op sink.
+- Logs are a configurable stream. Maintain both an authenticated remote subscription usable from a shell command and daemon-side file output. A shell consumer must be able to pipe structured records into ordinary tools.
+- Emit structured records with stable event names, severity, category/target, timestamps, and correlation fields. Put variable values in fields rather than making consumers parse prose or invent regular expressions.
+- Support producer-side filtering sufficient to narrow high-volume sources before serialization and transmission. Keep richer queries and presentation on the consumer side.
+- Logging must not block workload execution behind a slow or disconnected consumer. Bound buffering and make any dropped diagnostic records observable through structured loss notices and counters; never silently claim a complete stream after loss.
+- Instrument logging transport carefully so streaming logs does not recursively generate an unbounded stream of logs about itself.
+- Do not re-enter the logger from its synchronization primitives or record serialization. Instrument the owning boundary instead; failed sinks must be removed before reporting their errors to other sinks.
+- Never log private machine keys, authentication capabilities, authorization headers, or credential values. Content-rich diagnostic payloads must be an explicit option; preserve useful metadata when payload capture is off. Redact recognized secret fields before output.
+- Verify runtime changes, filtering, file output, remote streaming, and consumer failure behavior with appropriate tests. Exercise the real daemon/transport path when claiming remote logging works.
+
+Durable workload journals are authoritative execution records, not opt-in diagnostics. Turning diagnostic logging off must not disable event retention, viewer replay, idempotency, or recovery. Do not duplicate an authority or weaken its guarantees to implement diagnostics.
+
+## Product and implementation constraints
+
+- Agents are welcome whether or not they have a job. Preserve residents, anonymous threads, and the configurable conversation structures described in the design documents.
+- Keep Boxen self-contained and resource use small. Preserve the single portable executable build path; label platform verification gaps honestly.
+- When changing concurrency, timers, or portability dependencies, run `platform-check` and `scripts/platform-smoke.py` against the actual APE as well as the native binary. Verify blocking timeouts, notification wakeups, and idle CPU; functional success alone can hide a spinning portability shim.
+- Keep early GUI controls simple. The user primarily directs product UX design; avoid turning provisional controls into an elaborate product layout.
+- Remote workloads must stream backend-exposed thinking summaries, messages, tool activity, output, and status as they occur. Viewer lifetime must not own execution lifetime. Reconnection must replay missed retained events without duplication.
+- Early execution uses Full access as agreed. Movement authority and credential distribution remain separate concerns. Do not add a sandbox requirement or approval flow contrary to the agreed scope.
+- Verify real behavior before claiming completion. Distinguish backend fixtures from actual model/runtime evidence and preserve explicit uncertain outcomes after interrupted execution.

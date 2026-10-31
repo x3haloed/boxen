@@ -3,10 +3,13 @@ extern crate cosmo_compat as _;
 
 mod codex;
 mod jobs;
+mod logging;
+mod platform;
 mod protocol;
 mod state;
 mod web;
 
+use logging::{Context, Level, Target};
 use state::State;
 use std::{env, net::TcpListener, path::PathBuf, sync::Arc};
 
@@ -46,6 +49,11 @@ boxen [--data-dir PATH] watch HOST:PORT PUBLIC_KEY RUN_ID [--after SEQUENCE]\n\
 boxen [--data-dir PATH] cancel HOST:PORT PUBLIC_KEY RUN_ID\n\n\
 boxen [--data-dir PATH] steer HOST:PORT PUBLIC_KEY RUN_ID MESSAGE\n\
 boxen [--data-dir PATH] respond HOST:PORT PUBLIC_KEY RUN_ID REQUEST_ID_JSON RESULT_JSON\n\n\
+boxen [--data-dir PATH] logs HOST:PORT PUBLIC_KEY [--level trace|debug|info|warn|error] [--targets peer,runtime] [--events PREFIX,...] [--run ID] [--thread ID] [--peer ID] [--payloads]\n\
+boxen [--data-dir PATH] log-file HOST:PORT PUBLIC_KEY /absolute/daemon/path.jsonl [FILTER OPTIONS]\n\
+boxen [--data-dir PATH] log-status HOST:PORT PUBLIC_KEY\n\
+boxen [--data-dir PATH] log-off HOST:PORT PUBLIC_KEY\n\n\
+boxen platform-check\n\n\
 Pair by exchanging identity public keys through a trusted channel and\n\
 running trust on BOTH machines. --ui must bind to IPv4 loopback.\n\
 Default data: ~/.boxen (or BOXEN_HOME). Default peer port: 42424.\n\
@@ -55,6 +63,10 @@ Workloads run through Codex app-server with Full access on the destination."
         return Ok(());
     }
     let command = args.remove(0);
+    if command == "platform-check" && args.is_empty() {
+        println!("{}", platform::check()?);
+        return Ok(());
+    }
     let state = Arc::new(State::open(directory)?);
     match command.as_str() {
         "identity" if args.is_empty() => println!("{}", state.public_key()),
@@ -97,7 +109,16 @@ Workloads run through Codex app-server with Full access on the destination."
             let peer_listener = TcpListener::bind(&listen)?;
             let ui_listener = TcpListener::bind(ui_addr)?;
             let token = state::random_hex()?;
+            logging::install(state.public_key())?;
             let jobs = jobs::Jobs::open(state.directory().join("runs"), codex)?;
+            logging::record(
+                Level::Info,
+                Target::Daemon,
+                "started",
+                Context::default(),
+                || serde_json::json!({"listen":listen,"ui":ui}),
+                || serde_json::Value::Null,
+            );
             println!("Boxen identity: {}", state.public_key());
             println!("Peers listening: {}", peer_listener.local_addr()?);
             println!(
@@ -202,9 +223,94 @@ Workloads run through Codex app-server with Full access on the destination."
                 }
             }
         }
+        "log-status" | "log-off" if args.len() == 2 => {
+            let op = if command == "log-status" {
+                "log_status"
+            } else {
+                "log_off"
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":op})
+                )?)?
+            );
+        }
+        "logs" | "log-file" => {
+            let filter = log_filter(&mut args)?;
+            let expected = if command == "logs" { 2 } else { 3 };
+            if args.len() != expected {
+                return Err("logs requires HOST:PORT PUBLIC_KEY; log-file additionally requires an absolute destination path".into());
+            }
+            if command == "log-file" {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&protocol::request(
+                        &state,
+                        &args[0],
+                        &args[1],
+                        serde_json::json!({"op":"log_file","path":args[2],"filter":filter})
+                    )?)?
+                );
+            } else {
+                use std::io::Write;
+                let mut session = protocol::connect(&state, &args[0], &args[1])?;
+                session.diagnostics(false);
+                session.send(&serde_json::json!({"op":"logs","filter":filter}))?;
+                let mut output = std::io::stdout().lock();
+                loop {
+                    let batch = protocol::result(session.receive()?)?;
+                    if let Some(session) = batch.get("session") {
+                        eprintln!(
+                            "Attached to daemon diagnostics (session {session}); Ctrl-C detaches."
+                        );
+                    }
+                    for record in batch["records"].as_array().ok_or("missing log records")? {
+                        if let Err(error) =
+                            writeln!(output, "{record}").and_then(|_| output.flush())
+                        {
+                            if error.kind() == std::io::ErrorKind::BrokenPipe {
+                                return Ok(());
+                            }
+                            return Err(error.into());
+                        }
+                    }
+                    if batch["done"] == true {
+                        break;
+                    }
+                }
+            }
+        }
         _ => return Err("invalid command or arguments; use boxen --help".into()),
     }
     Ok(())
+}
+
+fn log_filter(args: &mut Vec<String>) -> Result<logging::Filter> {
+    let mut value = serde_json::json!({});
+    for (option, key) in [
+        ("--level", "level"),
+        ("--run", "run_id"),
+        ("--thread", "thread_id"),
+        ("--peer", "peer_id"),
+    ] {
+        if let Some(text) = take_option(args, option)? {
+            value[key] = serde_json::json!(text);
+        }
+    }
+    for (option, key) in [("--targets", "targets"), ("--events", "events")] {
+        if let Some(text) = take_option(args, option)? {
+            value[key] = serde_json::json!(text.split(',').collect::<Vec<_>>());
+        }
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--payloads") {
+        args.remove(index);
+        value["payloads"] = serde_json::json!(true);
+    }
+    Ok(serde_json::from_value(value)?)
 }
 
 fn take_option(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {

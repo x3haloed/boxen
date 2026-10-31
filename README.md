@@ -46,6 +46,19 @@ Use `--thread THREAD_ID` on `start` for a follow-up, `--id RUN_ID` for a retry-s
 
 See [remote workloads and live streaming](docs/workloads.md) for ownership, recovery, and verification.
 
+## Live daemon diagnostics
+
+Diagnostics are off by default and can be enabled, filtered, streamed remotely, redirected to a file, and disabled without restarting the daemon:
+
+```sh
+boxen logs other-machine.lan:42424 OTHER_PUBLIC_KEY --targets runtime,workload | jq .
+boxen log-file other-machine.lan:42424 OTHER_PUBLIC_KEY /absolute/path/diagnostics.jsonl
+boxen log-status other-machine.lan:42424 OTHER_PUBLIC_KEY
+boxen log-off other-machine.lan:42424 OTHER_PUBLIC_KEY
+```
+
+See [structured logging and runtime controls](docs/logging.md). [AGENTS.md](AGENTS.md) makes ongoing daemon instrumentation a development requirement. Diagnostic logging is separate from the durable workload journal.
+
 ## Development checks
 
 ```sh
@@ -55,9 +68,13 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 python3 scripts/smoke.py
 python3 scripts/workload-smoke.py
+python3 scripts/logging-smoke.py
+python3 scripts/platform-smoke.py
 # After building the portable artifact:
 python3 scripts/smoke.py target/cosmo/release/boxen.com
 python3 scripts/workload-smoke.py target/cosmo/release/boxen.com
+python3 scripts/logging-smoke.py target/cosmo/release/boxen.com
+python3 scripts/platform-smoke.py target/cosmo/release/boxen.com
 ```
 
 ## Design
