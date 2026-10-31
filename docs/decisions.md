@@ -94,3 +94,19 @@ The initial [LAN pairing prerequisite](p2p.md) now carries [remote Codex workloa
 Prefer continued availability with a durable, understandable incident record over stopping simply because a previous outcome is uncertain. Do not require manual acknowledgment, proof collection, or state-certification ceremonies before the next turn. Keep the original interrupted outcome and side-effect uncertainty intact; a new message continues the conversation without automatically repeating old work.
 
 An explicitly unresumable managed-backend session may be replaced beneath the same canonical Boxen conversation. Supply saved identity/memory and retained history with clear reconstruction limits. A malformed resident record is isolated and reported rather than taking healthy residents and anonymous workloads offline. This principle does not authorize new machine access, copying credentials, or silently abandoning history.
+
+## Communication follows identity attachment
+
+Identity-bearing agents use mailbox communication and receive their own mailbox by default. This is not a selectable alternative to a conversational resident mode. Receiving information, activation, and sending are independent: an activation can read a batch of incoming messages, occur without an incoming message, or end without sending a reply. Final assistant output is private execution narration, observable by authorized viewers but not implicitly delivered to original senders or rooms. Replies and other outgoing messages are explicit tool operations. Conversation topology (canonical thread, parallel conversations, or branches) remains a separate identity/continuity choice.
+
+Identity-less ephemeral threads use ordinary request/response semantics. They are workload control channels rather than long-lived agents. Agents can address them by thread ID through dedicated thread request/response tools with Codex-like conventions; those tools are distinct from tools that send to agent mailboxes or rooms. The conventional response remains part of the ephemeral request contract, preserving the reliability of ordinary remote Codex work.
+
+These are the agreed target contracts. The first resident implementation currently accepts direct turn submissions and exposes assistant output in the observer transcript; it does not yet implement mailbox allocation, queued message batching, explicit outgoing delivery, independent activation, or inter-agent thread request tools. Existing `resident-message` is a provisional turn-submission interface, not a durable mailbox send API. The language-only revision does not claim or simulate those missing capabilities.
+
+## Scheduling and heartbeat pattern
+
+An ordinary scheduler supports one-time future events and recurring jobs of different kinds. A heartbeat is a typical recurring-job pattern: for example, an hourly system ping to an agent carrying directions crafted and retained when the heartbeat job was defined. The scheduler determines when an event is due; the event handler determines its effect. A separate heartbeat-only scheduling subsystem is not the intended design. The scheduler and independent resident activation remain to be implemented.
+
+## Causal agent-facing language
+
+Boxen-authored runtime context, tool descriptions, errors, and recovery notices describe mechanisms and consequences rather than issuing imperatives. Identity/personality and directions can come from the agent's own notes or its human; Boxen's substrate supplies affordances and accurate operating context. Human- and agent-authored text remains intact. A narrow imperative exception can be considered when observed failures show causal wording is insufficient, with its evidence and scope documented. Messaging conventions do not receive a blanket exception in advance. [AGENTS.md](../AGENTS.md) maintains this requirement during implementation.

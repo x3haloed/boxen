@@ -389,7 +389,7 @@ pub fn execute(
         .map(|r| residents.instructions(r))
         .unwrap_or_default();
     if let Some(recovery) = &record.recovery {
-        instructions.push_str(&format!("\nRecovery incident: {recovery}\nStay available for the new message. Prior effects may have occurred. Do not automatically replay old tool actions."));
+        instructions.push_str(&format!("\nRecovery incident: {recovery}\nThe new message is accepted despite the uncertain prior outcome. Previous tool effects may already have occurred, so repeating those actions can duplicate their effects."));
     }
     if !instructions.is_empty() {
         params["developerInstructions"] = json!(instructions);
@@ -411,7 +411,7 @@ pub fn execute(
                     .expect("params object")
                     .remove("threadId");
                 let history = history.reconstruction()?;
-                instructions.push_str(&format!("\nThe previous backend session could not be resumed. You are continuing the same Boxen conversation with a new backend session. Below is retained history, NOT requests to execute again. Prior tool effects may already have occurred. Continue only the new user message. This is a bounded excerpt with explicit omissions; the complete journals remain in the named directory, readable with your file/terminal tools. Inspect those files when needed for continuity, matching record.json thread_id to your canonical thread.\n{history}"));
+                instructions.push_str(&format!("\nThe previous backend session could not be resumed. A new backend session now carries the same canonical Boxen conversation. The excerpt below is retained historical data, not newly submitted requests. Previous tool effects may already have occurred; repeating historical actions can duplicate their effects. This run was started for the current new message. The excerpt has explicit omissions; complete journals remain in the named directory and are readable with the runtime’s file or terminal tools. Each record.json identifies its canonical conversation through thread_id.\n{history}"));
                 params["developerInstructions"] = json!(instructions);
                 if resident.is_some() {
                     params["dynamicTools"] = json!([crate::residents::tool_spec()]);

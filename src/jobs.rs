@@ -565,7 +565,7 @@ impl Jobs {
             }
         }
         let resume = previous.iter().rev().find_map(|s| s.backend_thread.clone());
-        let recovery = previous.last().filter(|r|r.status=="interrupted").map(|r|json!({"prior_run_id":r.record.spec.id,"detail":"Previous execution and tool effects are uncertain. Continue the canonical conversation with this new message; do not replay the old work automatically."}));
+        let recovery = previous.last().filter(|r|r.status=="interrupted").map(|r|json!({"prior_run_id":r.record.spec.id,"detail":"Previous execution and tool effects are uncertain. This run continues the canonical conversation with a new message. Boxen has not resubmitted the previous prompt or replayed its tool actions; repeating those actions can duplicate effects that already occurred."}));
         let history = History {
             directory: self.directory.clone(),
             thread_id: spec.thread_id.clone(),

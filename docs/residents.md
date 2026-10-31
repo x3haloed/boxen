@@ -2,6 +2,12 @@
 
 A resident can have a name and a home without having a job. Creating one saves its identity and memory; it does not start inference or require a task description. This first slice hosts each resident on one explicitly selected machine, with one canonical Boxen thread and Codex as the runtime. Heartbeats, movement, replication, branches, clones, and built-in inference remain later work, not abandoned beta requirements.
 
+## Agreed communication contract and current gap
+
+Every identity-bearing agent has its own mailbox by default in the intended design. Inbox receipt, activation, and outgoing communication are independent; assistant output is private narration, and sending to correspondents or rooms is an explicit operation. Identity-less ephemeral threads remain request/response workload control channels, addressable by thread ID through separate agent-facing tools. This split follows identity attachment, not a configurable communication mode.
+
+The current first-resident implementation still submits direct turns and shows assistant output to authorized observers. Mailbox allocation, batching, explicit sending, independent activation, and inter-agent thread requests are not implemented yet. The CLI `resident-message` command is provisional direct turn submission, not durable queued delivery. Runtime context describes these current mechanics and does not claim that a nonexistent send tool is required. See [agreed decisions](decisions.md) for the target contract and general scheduler/heartbeat pattern.
+
 ## Use it
 
 Connect to a machine in the provisional controls, expand **Create a resident**, and enter a name, destination-local working directory, optional model, identity, memory, and continuity quota. The resident appears in the thread selector even before its first conversation. Select it and send a message. Subsequent messages use the same canonical conversation; steering, cancellation, replay, and reconnect work through the existing workload interface.

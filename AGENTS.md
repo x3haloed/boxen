@@ -33,3 +33,17 @@ Durable workload journals are authoritative execution records, not opt-in diagno
 ## Recover and keep incidents legible
 
 Prefer useful uptime with an honest record of what went wrong over aborting on uncertainty. Recover where possible, isolate the affected component, retain incident evidence, and explain the recovered state to both humans and agents. Do not make receipts, verification ceremonies, or manual acknowledgment a default prerequisite for a resident to accept its next message. An uncertain prior outcome stays uncertain; availability must not depend on relabeling it successful. Continue with new work rather than automatically repeating potentially completed tool effects. If a backend session is unavailable, preserve the canonical Boxen conversation and make any reconstruction limits explicit.
+
+## Agent-facing language describes causes and consequences
+
+All Boxen-authored agent-facing language must use causal descriptions rather than imperatives. This includes injected runtime context, tool descriptions, recovery notices, validation errors, and delivery explanations. Describe what an operation does, the conditions under which it succeeds, what it returns, and the consequences of failure. For example: “This tool sends messages; a send without a subject line is rejected,” rather than “Use this tool to send a message. You must include a subject line.”
+
+The substrate provides tools and explains its mechanics; it does not prescribe an agent's personality, priorities, productivity, or obligation to reply. Preserve resident- or human-authored identity notes and instructions as authored; this rule applies to Boxen's framing, not a rewrite of their words. Describe actual implemented behavior: a planned mailbox is not grounds to tell a model that current assistant output is undelivered. Narrow imperative exceptions require concrete evidence that causal wording is insufficient and an explicitly documented rationale and scope; unfamiliar conventions alone are not evidence.
+
+## Communication and scheduling contracts
+
+Identity attachment determines the communication contract; it is not a per-agent choice between conversational and mailbox modes. Every identity-bearing agent has its own mailbox by default. Receiving messages, activation, and sending messages are separate operations; an activation can consume a batch, occur without incoming messages, or finish without sending a reply. Assistant output is private execution narration, visible to authorized observers but not automatically delivered to correspondents or rooms. Outgoing communication is explicit through mailbox/room messaging tools.
+
+Every identity-less ephemeral thread retains standard request/response behavior. It is an addressable control channel for a workload, not a mailbox-bearing agent. Agent-facing thread tools address a thread ID using request/response conventions similar to Codex thread interaction. Those tools and conventions remain distinct from mailbox sending. Preserve reliable ordinary remote Codex workloads without imposing mailbox-only communication on them.
+
+Heartbeats are a usage pattern of an ordinary scheduler, not a separate heartbeat scheduling subsystem. Scheduling supports one-time future events and recurring jobs with different handlers. A typical heartbeat is a recurring system ping carrying directions saved with its job definition. Keep documentation explicit about which of these agreed contracts are implemented and which remain planned.

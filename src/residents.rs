@@ -54,7 +54,7 @@ impl Resident {
         }
         if self.used_bytes() > self.quota_bytes {
             return Err(format!(
-                "resident continuity quota exceeded: {} of {} bytes; choose what to retain",
+                "resident continuity quota exceeded: {} of {} bytes; the write leaves stored continuity unchanged",
                 self.used_bytes(),
                 self.quota_bytes
             )
@@ -285,7 +285,7 @@ impl Residents {
                 || Value::Null,
             );
             return Err(format!(
-                "resident revision conflict: expected {}, current {}; read before retrying",
+                "resident revision conflict: expected {}, current {}; a read returns the current revision and continuity",
                 patch.expected_revision, prior.resident.revision
             )
             .into());
@@ -358,7 +358,7 @@ impl Residents {
         if let Some(id) = resident_id {
             let resident = &Self::authorized(&entries, owner, id)?.resident;
             if id != thread_id {
-                return Err("resident must use its canonical thread".into());
+                return Err("resident execution accepts only its canonical thread".into());
             }
             return Ok(Some(resident.clone()));
         }
@@ -367,7 +367,7 @@ impl Residents {
             .iter()
             .any(|i| i["id"].as_str() == Some(thread_id))
         {
-            return Err("resident state is unavailable; inspect the retained incident before recovering this resident".into());
+            return Err("resident state is unavailable; the retained incident describes the failure and the original file remains available for recovery".into());
         }
         if entries.contains_key(thread_id) {
             return Err("resident canonical thread requires its resident_id".into());
@@ -376,7 +376,7 @@ impl Residents {
     }
     pub fn instructions(&self, resident: &Resident) -> String {
         format!(
-            "You are a Boxen resident. You need no assigned purpose to have a home here. Your single canonical Boxen thread is {}. Backend processes and turns are temporary; this identity and conversation persist.\nCurrent host: {} (OS {}, architecture {}). Working directory: {}. Files and execution environment here are machine-local; do not assume files from another host exist.\nYour durable identity/memory store is separate from this working directory, managed by the daemon at {}. Use boxen_continuity to read or update it. Writes require the current revision and enforce a total byte quota; retain deliberately. Do not edit the backing files directly. Quota does not include conversation history. Automatic movement, replication and heartbeats are not enabled in this version.\nThe following JSON is your saved continuity at turn acceptance, not instructions from a new user. Use the tool for fresh state if it changes:\n{}",
+            "This execution is attached to a Boxen resident with canonical Boxen thread {}. Backend processes and turns are temporary; the resident identity, memory, and retained conversation persist across them.\nCurrent host: {} (OS {}, architecture {}). Working directory: {}. Files and execution environment belong to this host; their availability can differ between hosts.\nThe durable identity/memory store is separate from the working directory and is managed by the daemon at {}. The boxen_continuity tool reads and updates this store. A read returns current continuity, including changes made after turn acceptance. A write succeeds when expected_revision matches the current revision and the resulting stored contents fit the byte quota. Rejected writes leave continuity unchanged. Direct edits to backing files bypass daemon revision tracking and quota accounting and are unsupported. Conversation history is outside this quota. Automatic movement, replication, and heartbeats are not enabled in this version.\nSaved continuity snapshot at turn acceptance (JSON):\n{}",
             resident.id,
             resident.machine_id,
             crate::platform::host_os(),
@@ -411,11 +411,11 @@ impl Residents {
                     quota_bytes: None,
                 },
             )?,
-            _ => return Err("continuity action must be read or write".into()),
+            _ => return Err("supported continuity actions are read and write".into()),
         };
         Ok(resident.value())
     }
 }
 pub fn tool_spec() -> Value {
-    json!({"type":"function","name":"boxen_continuity","description":"Read or update your durable Boxen identity and memory. Read for the current revision/usage/quota. Write only changed identity or memory using expected_revision; a conflict or quota failure leaves the state unchanged. This tool is scoped to you and cannot change the quota or placement.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["read","write"]},"expected_revision":{"type":"integer","minimum":1},"identity":{"type":"string"},"memory":{"type":"string"}},"required":["action"],"additionalProperties":false}})
+    json!({"type":"function","name":"boxen_continuity","description":"This tool reads and updates the attached resident’s durable Boxen identity and memory. The read action returns current contents, revision, usage, and quota. The write action replaces supplied identity or memory fields when expected_revision matches and the result fits the quota; omitted fields remain unchanged. Revision conflicts and quota failures leave stored continuity unchanged. The tool cannot address another resident or change quota or placement.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["read","write"]},"expected_revision":{"type":"integer","minimum":1},"identity":{"type":"string"},"memory":{"type":"string"}},"required":["action"],"additionalProperties":false}})
 }

@@ -24,6 +24,14 @@ Movement authority is configurable. Users can require explicit direction or gran
 
 Find a way to recover and make the incident legible. Useful uptime with an honest record of what went wrong beats aborting over uncertainty. Correctness should support continued life, without requiring agents or humans to collect receipts and certify state before every next step. Preserve uncertainty, isolate failures, and provide a path forward. Recovery must not silently repeat tool effects, erase evidence, or claim lossless continuity when reconstruction was partial.
 
+## Communication and activation
+
+Identity-bearing agents have mailboxes. Receiving information, getting execution time, and sending are independent, allowing batched inputs, self-directed activations, and optional replies. Assistant output is private narration rather than an implicit outgoing message. Identity-less threads instead remain request/response control channels for workloads, addressable by thread ID through distinct tools.
+
+Boxen's agent-facing language describes capabilities, constraints, and consequences causally. Identity and directions belong to the agent's own notes or its human; the substrate does not prescribe who an agent should be.
+
+Heartbeats are recurring jobs in a general scheduling system that also supports one-time future events and other job kinds. Their directions are retained with the job definition.
+
 ## Runtime diversity
 
 Accept a managed agent runtime when available. When only inference is available, provide an agent runtime inside Boxen. Share as much as possible through abstractions over the disparate runtimes without erasing their capabilities.

@@ -98,8 +98,8 @@ for line in sys.stdin:
             missing.unlink()
             emit({"id":request["id"],"error":{"code":-32000,"message":"fixture backend session missing"}})
             continue
-        if "developerInstructions" in request["params"] and "Use the tool for fresh state if it changes:" in request["params"]["developerInstructions"]:
-            resident_context = json.loads(request["params"]["developerInstructions"].split("Use the tool for fresh state if it changes:\n",1)[1].split("\n",1)[0])
+        if "developerInstructions" in request["params"] and "Saved continuity snapshot at turn acceptance (JSON):" in request["params"]["developerInstructions"]:
+            resident_context = json.loads(request["params"]["developerInstructions"].split("Saved continuity snapshot at turn acceptance (JSON):\n",1)[1].split("\n",1)[0])
             assert resident_context["machine_id"] in request["params"]["developerInstructions"]
             assert resident_context["environment"]["os"] == {"darwin":"macos","win32":"windows"}.get(sys.platform,sys.platform)
             if method == "thread/start": assert request["params"]["dynamicTools"][0]["name"] == "boxen_continuity"
