@@ -16,7 +16,7 @@ cargo build --release
 ./target/release/boxen serve
 ```
 
-The daemon prints its public identity, LAN listener, and local control-page URL. The plain HTML control page is embedded in the binary; no Node, browser framework, or separate asset installation is required. Open the printed URL to use it. The UI is deliberately minimal while the product experience is being designed.
+The daemon prints its public identity, LAN listener, and local control-page URL. The plain HTML control page is embedded in the binary; no Node, browser framework, or separate asset installation is required. Open the printed URL to use it. The UI is deliberately minimal while the product experience is being designed. The intended official GUI is a Rust desktop app; custom GUIs can use the same independent daemon API.
 
 On each machine, trust the other machine's public key, obtained through a trusted channel:
 
@@ -44,7 +44,7 @@ boxen cancel other-machine.lan:42424 OTHER_PUBLIC_KEY RUN_ID
 
 Use `--thread THREAD_ID` on `start` for a follow-up, `--id RUN_ID` for a retry-safe submission, and `watch --after SEQUENCE` to replay only missed events. `-` selects the executing machine's configured model. `serve --codex PATH` selects its Codex executable explicitly. The selected managed backend must be installed separately; Boxen itself remains one binary.
 
-See [remote workloads and live streaming](docs/workloads.md) for ownership, recovery, and verification.
+See [remote workloads and live streaming](docs/workloads.md) for ownership, recovery, and verification, and [the client API](docs/client-api.md) for building an alternative GUI. Shell watchers automatically reconnect after transport loss; `--once` disables retry.
 
 ## Live daemon diagnostics
 
@@ -68,11 +68,13 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 python3 scripts/smoke.py
 python3 scripts/workload-smoke.py
+python3 scripts/recovery-smoke.py
 python3 scripts/logging-smoke.py
 python3 scripts/platform-smoke.py
 # After building the portable artifact:
 python3 scripts/smoke.py target/cosmo/release/boxen.com
 python3 scripts/workload-smoke.py target/cosmo/release/boxen.com
+python3 scripts/recovery-smoke.py target/cosmo/release/boxen.com
 python3 scripts/logging-smoke.py target/cosmo/release/boxen.com
 python3 scripts/platform-smoke.py target/cosmo/release/boxen.com
 ```

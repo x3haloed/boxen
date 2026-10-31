@@ -397,7 +397,7 @@ impl Jobs {
             .map(|run| run.snapshot())
             .filter(|snapshot| snapshot.record.owner == owner)
             .collect();
-        records.sort_by_key(|s| s.record.created_at);
+        records.sort_by_key(|s| (s.record.created_at, s.record.spec.id.clone()));
         records
     }
 
@@ -454,7 +454,7 @@ impl Jobs {
             .map(|r| r.snapshot())
             .filter(|r| r.record.spec.thread_id == spec.thread_id)
             .collect();
-        previous.sort_by_key(|s| s.record.created_at);
+        previous.sort_by_key(|s| (s.record.created_at, s.record.spec.id.clone()));
         for prior in &previous {
             if prior.record.owner != owner {
                 return Err("thread belongs to a different peer".into());
@@ -478,7 +478,15 @@ impl Jobs {
         let record = Record {
             spec: spec.clone(),
             owner: owner.into(),
-            created_at: now(),
+            // Preserve acceptance order even for submissions in the same millisecond
+            // or after a wall-clock correction. Follow-ups must resume the latest run.
+            created_at: now().max(
+                runs.values()
+                    .map(|r| r.snapshot().record.created_at)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1),
+            ),
         };
         state::publish_new(&path.join("record.json"), &serde_json::to_vec(&record)?)?;
         state::write_new(&path.join("events.jsonl"), b"")?;

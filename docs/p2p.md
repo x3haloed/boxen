@@ -46,7 +46,7 @@ The default data directory is `~/.boxen`. Override it with `BOXEN_HOME` or `--da
 
 On Unix, Boxen creates private directories with mode 0700 and state files with mode 0600. State is plaintext on disk under the user's account; OS keychain integration and encrypted storage are not implemented. Windows filesystem permissions have not been verified.
 
-The local page uses a per-process bearer capability supplied in the printed URL fragment. It removes the fragment from the visible URL and retains the capability in tab session storage. The API requires authentication and rejects unexpected Host headers; the listener must bind to IPv4 loopback. Opening a fresh tab requires the printed capability URL. Treat logs containing that URL as private.
+The local page uses a persistent local bearer capability supplied in the printed URL fragment. It removes the fragment from the visible URL and retains the capability in tab session storage. The API requires authentication and rejects unexpected Host headers; the listener must bind to IPv4 loopback. Opening a fresh tab requires the printed capability URL. The capability is retained in the private `control-token` file so existing clients can reconnect after daemon restart. To revoke local client capabilities, stop the daemon, remove that file, restart, and use the newly printed URL. Treat logs containing that URL as private.
 
 ## Protocol and operational bounds
 

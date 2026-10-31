@@ -45,7 +45,7 @@ boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--codex PATH]\n
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
 boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID]\n\
 boxen [--data-dir PATH] runs HOST:PORT PUBLIC_KEY\n\
-boxen [--data-dir PATH] watch HOST:PORT PUBLIC_KEY RUN_ID [--after SEQUENCE]\n\
+boxen [--data-dir PATH] watch HOST:PORT PUBLIC_KEY RUN_ID [--after SEQUENCE] [--once]\n\
 boxen [--data-dir PATH] cancel HOST:PORT PUBLIC_KEY RUN_ID\n\n\
 boxen [--data-dir PATH] steer HOST:PORT PUBLIC_KEY RUN_ID MESSAGE\n\
 boxen [--data-dir PATH] respond HOST:PORT PUBLIC_KEY RUN_ID REQUEST_ID_JSON RESULT_JSON\n\n\
@@ -108,7 +108,7 @@ Workloads run through Codex app-server with Full access on the destination."
             }
             let peer_listener = TcpListener::bind(&listen)?;
             let ui_listener = TcpListener::bind(ui_addr)?;
-            let token = state::random_hex()?;
+            let token = state.control_token()?;
             logging::install(state.public_key())?;
             let jobs = jobs::Jobs::open(state.directory().join("runs"), codex)?;
             logging::record(
@@ -205,21 +205,65 @@ Workloads run through Codex app-server with Full access on the destination."
             );
         }
         "watch" => {
-            let after = take_option(&mut args, "--after")?
+            use std::io::Write;
+            let mut after = take_option(&mut args, "--after")?
                 .unwrap_or_else(|| "0".into())
                 .parse::<u64>()?;
+            let once = if let Some(index) = args.iter().position(|arg| arg == "--once") {
+                args.remove(index);
+                true
+            } else {
+                false
+            };
             if args.len() != 3 {
                 return Err("watch requires HOST:PORT PUBLIC_KEY RUN_ID".into());
             }
-            let mut session = protocol::connect(&state, &args[0], &args[1])?;
-            session.send(&serde_json::json!({"op":"watch","id":args[2],"after":after}))?;
+            jobs::valid_id(&args[2])?;
+            state.require_trust(&args[1])?;
+            let mut delay = 500;
             loop {
-                let batch = protocol::result(session.receive()?)?;
-                for event in batch["events"].as_array().ok_or("missing event batch")? {
-                    println!("{}", event);
-                }
-                if batch["done"] == true {
-                    break;
+                let outcome = (|| -> Result<()> {
+                    let mut session = protocol::connect(&state, &args[0], &args[1])?;
+                    session.send(&serde_json::json!({"op":"watch","id":args[2],"after":after}))?;
+                    loop {
+                        let batch = protocol::result(session.receive()?)?;
+                        delay = 500;
+                        for event in batch["events"].as_array().ok_or("missing event batch")? {
+                            let seq = event["seq"].as_u64().ok_or("missing event sequence")?;
+                            if seq <= after {
+                                continue;
+                            }
+                            if seq != after + 1 {
+                                return Err("event sequence gap".into());
+                            }
+                            // Advance only after successful publication to the consumer.
+                            writeln!(std::io::stdout(), "{event}")?;
+                            after = seq;
+                        }
+                        if batch["done"] == true {
+                            return Ok(());
+                        }
+                    }
+                })();
+                match outcome {
+                    Ok(()) => break,
+                    Err(error)
+                        if error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe) =>
+                    {
+                        break;
+                    }
+                    Err(error) if once || error.downcast_ref::<protocol::Rejected>().is_some() => {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "Machine unreachable; execution outcome unknown. Reconnecting after event {after}: {error}"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                        delay = (delay * 2).min(5000);
+                    }
                 }
             }
         }

@@ -48,7 +48,9 @@ if (token) { sessionStorage.setItem('boxen-token', token); history.replaceState(
 const headers = {Authorization: 'Bearer ' + (token || sessionStorage.getItem('boxen-token') || ''), 'Content-Type':'application/json'};
 let identity, target, records = [], selectedThread = '', currentRun = null, watcher, generation = 0, connected = false, submitting = false;
 let items = new Map(), pending = new Map(), cursors = new Map();
-let pendingStart = null;
+let pendingStart = null, syncing = false, observing = false;
+const pause = ms => new Promise(resolve=>setTimeout(resolve,ms));
+function unauthorized(response) { if(response.status===401) { const error=new Error("Local authorization changed. Open the control URL printed by the daemon.");error.authorization=true;throw error; } }
 function rememberSubmission() {
   if(pendingStart) localStorage.setItem('boxen-pending-start',JSON.stringify({target,spec:pendingStart}));
   else localStorage.removeItem('boxen-pending-start');
@@ -57,20 +59,22 @@ const terminal = status => ['completed','failed','cancelled','interrupted'].incl
 function id() { return [...crypto.getRandomValues(new Uint8Array(32))].map(v=>v.toString(16).padStart(2,'0')).join(''); }
 function save() { localStorage.setItem('boxen-controls',JSON.stringify({peer:$('peer').value,address:$('address').value,cwd:$('cwd').value,model:$('model').value,thread:selectedThread})); }
 async function operation(request, destination=target) {
-  const response = await fetch('/api/operation',{method:'POST',headers,body:JSON.stringify({...destination,request})});
+  const response = await fetch('/api/operation',{method:'POST',headers,signal:AbortSignal.timeout(12000),body:JSON.stringify({...destination,request})});
+  unauthorized(response);
   if (!response.ok) {const error=new Error(await response.text());error.definitive=response.status===422;throw error;}
   return response.json();
 }
 function controls() {
   const active = currentRun && !terminal(currentRun.status);
   $('send').textContent = active ? 'Send to active run' : selectedThread ? 'Send follow-up' : 'Start thread';
-  $('send').disabled = !connected || submitting;
+  $('send').disabled = !connected || syncing || submitting;
   $('peer').disabled=submitting;$('address').disabled=submitting;$('threads').disabled=submitting;$('connectButton').disabled=submitting;
   $('prompt').disabled = !!pendingStart;
   if(pendingStart)$('send').textContent='Retry original submission';
-  $('cancel').disabled = !active || !connected;
+  $('cancel').disabled = !active || !connected || syncing;
   $('cwd').disabled = !!selectedThread || !!pendingStart; $('model').disabled = !!active || !!pendingStart;
-  $('detach').disabled = !watcher;
+  $('detach').disabled = !observing;
+  for(const panel of pending.values())for(const input of panel.querySelectorAll('button,input,textarea'))input.disabled=!connected||syncing;
 }
 function add(label,text,meta='') {
   const article = document.createElement('article');
@@ -174,17 +178,23 @@ function updateThreads() {
   for(const [thread,record] of [...latest].reverse()) $('threads').append(new Option(titles.get(thread).slice(0,55)+' · '+record.status,thread));
   $('threads').value=selectedThread;
 }
-async function watch(run, gen) {
-  let after=cursors.get(run)||0;
+// The executing daemon owns the history. Cursors belong to this rendered view:
+// reopening rebuilds from zero; reconnecting continues after the last applied event.
+async function watch(run, gen, destination) {
+  let after=cursors.get(run)||0, attempt=0;
   while(gen===generation) {
-    watcher=new AbortController();controls();
+    const controller=new AbortController();watcher=controller;controls();
+    let reader, timer;
+    const arm=()=>{clearTimeout(timer);timer=setTimeout(()=>controller.abort(),12000);};
     try {
-      const response=await fetch('/api/watch',{method:'POST',headers,signal:watcher.signal,body:JSON.stringify({...target,request:{id:run,after}})});
+      arm();
+      const response=await fetch('/api/watch',{method:'POST',headers,signal:controller.signal,body:JSON.stringify({...destination,request:{id:run,after}})});
+      unauthorized(response);
       if(!response.ok)throw new Error(await response.text());
-      const reader=response.body.getReader(), decoder=new TextDecoder();let buffer='';let done=false;
+      reader=response.body.getReader();const decoder=new TextDecoder();let buffer='';let done=false;
       while(gen===generation) {
         const chunk=await reader.read();if(gen!==generation)return;if(chunk.done)break;
-        buffer+=decoder.decode(chunk.value,{stream:true});
+        arm();buffer+=decoder.decode(chunk.value,{stream:true});
         let newline;
         while((newline=buffer.indexOf('\n'))>=0){
           const batch=JSON.parse(buffer.slice(0,newline));buffer=buffer.slice(newline+1);
@@ -194,8 +204,11 @@ async function watch(run, gen) {
             if(event.seq!==after+1)throw new Error('Event sequence gap; reconnecting');
             render(run,event);after=event.seq;cursors.set(run,after);
           }
-          currentRun=batch.snapshot; connected=true;
-          $('connection').textContent='Connected · live events';
+          currentRun=batch.snapshot;connected=true;attempt=0;
+          // A snapshot can be ahead of a replay batch. Do not enable controls
+          // until this view has caught up to the executing machine's journal.
+          syncing=after<currentRun.last_seq || run!==records.filter(r=>r.record.spec.thread_id===selectedThread).at(-1)?.record.spec.id;
+          $('connection').textContent=syncing?'Connected · replaying retained events':'Connected · live events';
           $('location').textContent='Executing machine: '+$('peer').selectedOptions[0].textContent+' · '+currentRun.record.spec.cwd+' · run '+run.slice(0,12)+' · event '+after;
           const index=records.findIndex(r=>r.record.spec.id===run);if(index>=0)records[index]=currentRun;
           updateThreads();controls();
@@ -203,64 +216,109 @@ async function watch(run, gen) {
         }
         if(done)break;
       }
-      if(done){watcher=null;controls();return;}
+      if(done)return;
       throw new Error('Event connection ended');
     } catch(error) {
       if(gen!==generation)return;
-      connected=false;$('connection').textContent='Connection lost; execution outcome unknown. Reconnecting… '+error.message;controls();
-      await new Promise(resolve=>setTimeout(resolve,1000));
+      connected=false;syncing=true;
+      $('connection').textContent=error.authorization?error.message:'Machine unreachable; execution outcome unknown. Reconnecting… '+error.message;controls();
+      if(error.authorization)return false;
+      await pause(Math.min(500*2**attempt++,5000));
+    } finally {
+      clearTimeout(timer);controller.abort();
+      if(reader)try{await reader.cancel();}catch{}
+      if(watcher===controller)watcher=null;
     }
   }
 }
-function detach() { generation++;watcher?.abort();watcher=null;controls(); }
-async function showThread(thread) {
+function detach() { observing=false;generation++;watcher?.abort();watcher=null;syncing=false;controls(); }
+function restorePending(destination) {
+  let savedPending;try{savedPending=JSON.parse(localStorage.getItem('boxen-pending-start')||'null');}catch{}
+  pendingStart=savedPending?.target.peer===destination.peer?savedPending.spec:null;
+  if(!pendingStart)return;
+  const accepted=records.find(r=>r.record.spec.id===pendingStart.id);
+  if(accepted){selectedThread=accepted.record.spec.thread_id;pendingStart=null;rememberSubmission();}
+  else{$('cwd').value=pendingStart.cwd;$('model').value=pendingStart.model;$('prompt').value=pendingStart.prompt;$('runStatus').textContent='Prior submission is unconfirmed. Retry sends its original input and ID.';}
+}
+async function refreshRecords(gen,destination) {
+  const incoming=await operation({op:'list'},destination);
+  if(gen!==generation)return false;
+  records=incoming;restorePending(destination);updateThreads();save();return true;
+}
+async function showThread(thread, refresh=false) {
   detach();selectedThread=thread;currentRun=null;items=new Map();pending=new Map();cursors=new Map();$('transcript').replaceChildren();$('runStatus').textContent='';$('location').textContent='';save();
-  const related=records.filter(r=>r.record.spec.thread_id===thread);
-  if(related.length){$('cwd').value=related[0].record.spec.cwd;$('model').value=related.at(-1).record.spec.model;}
-  controls();const gen=generation;
-  for(const record of related){if(gen!==generation)return;await watch(record.record.spec.id,gen);}
+  observing=true;syncing=true;controls();const gen=generation,destination={...target};let attempt=0;
+  // Refresh the catalog after each terminal run and while idle. Progress itself
+  // always comes from the ordered stream, never from snapshot polling.
+  while(gen===generation) {
+    try {
+      if(refresh && !await refreshRecords(gen,destination))return;
+      refresh=true;
+      const related=records.filter(r=>r.record.spec.thread_id===selectedThread);
+      if(related.length){$('cwd').value=related[0].record.spec.cwd;$('model').value=related.at(-1).record.spec.model;}
+      syncing=true;controls();
+      for(const record of related){
+        if(gen!==generation)return;
+        if(cursors.get(record.record.spec.id)===record.last_seq && terminal(record.status))continue;
+        if(await watch(record.record.spec.id,gen,destination)===false)return;
+      }
+      if(gen!==generation)return;
+      connected=true;syncing=false;attempt=0;
+      $('connection').textContent='Connected · '+(related.length?'history up to date':'ready');controls();
+      await pause(2000);
+    }catch(error){
+      if(gen!==generation)return;
+      connected=false;syncing=true;
+      $('connection').textContent=error.authorization?error.message:'Machine unreachable; last known state retained. Reconnecting… '+error.message;controls();
+      if(error.authorization)return;
+      await pause(Math.min(500*2**attempt++,5000));
+    }
+  }
 }
 async function connect() {
-  detach();const gen=generation;target={peer:$('peer').value,address:$('address').value};
-  $('connection').textContent='Connecting…';connected=false;controls();
-  try {
-    const incoming=await operation({op:'list'});if(gen!==generation)return;records=incoming;connected=true;$('connection').textContent='Connected';
-    let savedPending;try{savedPending=JSON.parse(localStorage.getItem('boxen-pending-start')||'null');}catch{}
-    pendingStart = savedPending?.target.peer===target.peer ? savedPending.spec : null;
-    if(pendingStart) {
-      const accepted=records.find(r=>r.record.spec.id===pendingStart.id);
-      if(accepted){selectedThread=accepted.record.spec.thread_id;pendingStart=null;rememberSubmission();}
-      else{$('cwd').value=pendingStart.cwd;$('model').value=pendingStart.model;$('prompt').value=pendingStart.prompt;$('runStatus').textContent='Prior submission is unconfirmed. Retry sends its original input and ID.';}
+  detach();const gen=generation;target={peer:$('peer').value,address:$('address').value};const destination={...target};
+  observing=true;save();$('connection').textContent='Connecting…';connected=false;syncing=true;controls();let attempt=0;
+  while(gen===generation){
+    try {
+      if(!await refreshRecords(gen,destination))return;
+      if(!records.some(r=>r.record.spec.thread_id===selectedThread))selectedThread='';
+      connected=true;updateThreads();save();showThread(selectedThread);return;
+    }catch(error){
+      if(gen!==generation)return;
+      $('connection').textContent=error.authorization?error.message:'Machine unreachable; reconnecting… '+error.message;controls();
+      if(error.authorization)return;
+      await pause(Math.min(500*2**attempt++,5000));
     }
-    if(!records.some(r=>r.record.spec.thread_id===selectedThread))selectedThread='';
-    updateThreads();save();await showThread(selectedThread);
-  }catch(error){$('connection').textContent='Not connected · '+error.message;controls();}
+  }
 }
 $('connect').onsubmit=event=>{event.preventDefault();connect();};
-$('threads').onchange=()=>showThread($('threads').value);
-$('peer').onchange=()=>{detach();connected=false;selectedThread='';$('addressLabel').hidden=$('peer').value===identity;controls();};
+$('threads').onchange=()=>showThread($('threads').value,true);
+$('peer').onchange=()=>{detach();connected=false;selectedThread='';currentRun=null;pendingStart=null;$('addressLabel').hidden=$('peer').value===identity;controls();};
 $('work').onsubmit=async event=>{
-  event.preventDefault();if(!connected)return;
+  event.preventDefault();if(!connected||syncing)return;
+  const gen=generation,destination={...target};
+  const steering=currentRun&&!terminal(currentRun.status);
   submitting=true;controls();
   try {
     const text=$('prompt').value;
-    if(currentRun&&!terminal(currentRun.status)) {
+    if(steering) {
       await operation({op:'control',id:currentRun.record.spec.id,action:{type:'steer',text}});$('prompt').value='';return;
     }
     // Keep an uncertain submission's id and exact input so retry cannot duplicate it.
     if(!pendingStart) { const run=id();pendingStart={id:run,thread_id:selectedThread||run,backend:'codex',cwd:$('cwd').value,model:$('model').value,prompt:text}; rememberSubmission(); }
-    const snapshot=await operation({op:'start',spec:pendingStart});pendingStart=null;rememberSubmission();
-    records.push(snapshot);selectedThread=snapshot.record.spec.thread_id;$('prompt').value='';
+    const snapshot=await operation({op:'start',spec:pendingStart},destination);if(gen!==generation)return;pendingStart=null;rememberSubmission();
+    if(!records.some(r=>r.record.spec.id===snapshot.record.spec.id))records.push(snapshot);selectedThread=snapshot.record.spec.thread_id;$('prompt').value='';
     updateThreads();save();showThread(selectedThread);
-  }catch(error){if(error.definitive){pendingStart=null;rememberSubmission();$('runStatus').textContent='Request rejected: '+error.message;}else{$('runStatus').textContent='Submission not confirmed: '+error.message+'. Retrying submits the same run ID.';}}
+  }catch(error){if(error.definitive){pendingStart=null;rememberSubmission();$('runStatus').textContent='Request rejected: '+error.message;}else{$('runStatus').textContent=steering?'Steering delivery unconfirmed: '+error.message+'. Inspect retained events before sending again.':'Submission not confirmed: '+error.message+'. Retrying submits the same run ID.';}}
   finally{submitting=false;controls();}
 };
 $('cancel').onclick=async()=>{try{await operation({op:'control',id:currentRun.record.spec.id,action:{type:'cancel'}});$('runStatus').textContent='Cancellation requested; waiting for backend confirmation';}catch(error){$('runStatus').textContent=error.message;}};
-$('detach').onclick=()=>{detach();$('connection').textContent='Viewer detached. Execution continues; connect to reattach.';};
+$('detach').onclick=()=>{detach();connected=false;controls();$('connection').textContent='Viewer detached. Execution continues; connect to reattach.';};
 $('ping').onclick=async()=>{try{const response=await fetch('/api/ping',{method:'POST',headers,body:JSON.stringify({...target,message:'hello from Boxen'})});const text=await response.text();if(!response.ok)throw new Error(text);$('pingResult').textContent=text;}catch(error){$('pingResult').textContent=error.message;}};
 async function load(){
-  try{
-    const response=await fetch('/api/status',{headers});if(!response.ok)throw new Error(await response.text());
+  let attempt=0;
+  while(true)try{
+    const response=await fetch('/api/status',{headers,signal:AbortSignal.timeout(12000)});unauthorized(response);if(!response.ok)throw new Error(await response.text());
     const state=await response.json();identity=state.identity;$('identity').textContent=identity;
     $('peer').append(new Option('This machine',identity));for(const peer of state.peers)$('peer').append(new Option(peer.label,peer.key));
     let saved={};try{saved=JSON.parse(localStorage.getItem('boxen-controls')||'{}');}catch{}
@@ -269,7 +327,8 @@ async function load(){
     $('addressLabel').hidden=$('peer').value===identity;
     $('connection').textContent='Select a machine and connect.';controls();
     if($('peer').value===identity||$('address').value)connect();
-  }catch(error){$('connection').textContent=error.message;controls();}
+    return;
+  }catch(error){$('connection').textContent=error.authorization?error.message:'Local daemon unreachable; reconnecting… '+error.message;controls();if(error.authorization)return;await pause(Math.min(500*2**attempt++,5000));}
 }
 load();
 </script>

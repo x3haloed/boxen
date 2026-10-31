@@ -121,6 +121,24 @@ impl State {
             identity,
         })
     }
+    /// A local client's authorization survives a daemon restart. Delete this file
+    /// while stopped to revoke local clients; never expose its contents in logs.
+    pub fn control_token(&self) -> Result<String> {
+        let path = self.directory.join("control-token");
+        if !path.exists() {
+            match publish_new(&path, random_hex()?.as_bytes()) {
+                Ok(()) => {}
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::AlreadyExists) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let token = fs::read_to_string(path)?;
+        key(&token)?;
+        Ok(token)
+    }
     pub fn public_key(&self) -> &str {
         &self.identity.public
     }

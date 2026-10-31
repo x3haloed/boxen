@@ -168,7 +168,7 @@ fn handle(
         );
     }
     if request == "GET /api/status HTTP/1.1" {
-        let status = json!({"identity":state.public_key(),"peers":state.peers()?});
+        let status = json!({"api_version":1,"identity":state.public_key(),"peers":state.peers()?});
         return respond(
             stream,
             200,

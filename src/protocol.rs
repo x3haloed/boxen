@@ -345,6 +345,10 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 serde_json::from_value::<Spec>(request["spec"].clone())?,
             )?)?),
             "list" => Ok(serde_json::to_value(jobs.list(owner))?),
+            "get" => Ok(serde_json::to_value(
+                jobs.get(owner, request["id"].as_str().ok_or("run id required")?)?
+                    .snapshot(),
+            )?),
             "control" => {
                 let run = jobs.get(owner, request["id"].as_str().ok_or("run id required")?)?;
                 run.control(serde_json::from_value::<Control>(

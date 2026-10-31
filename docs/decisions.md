@@ -6,7 +6,7 @@ These decisions describe the intended product and the first implementation slice
 
 Prefer one portable executable with no installed application runtime or complicated setup. The initial implementation follows the Cosmopolitan APE approach: one file containing ARM64 and x86-64 builds. A launchable GUI and daemon may eventually use separate binaries if that improves the experience. Native platform builds remain available from the same source.
 
-The user will primarily direct GUI design. Early controls should provide simple clickable access to capabilities without establishing a detailed product layout. The first control surface is plain HTML embedded in the daemon and served only on loopback.
+The user will primarily direct GUI design. Early controls should provide simple clickable access to capabilities without establishing a detailed product layout. The intended official GUI is a Rust desktop app, not a hosted web application. It may have a separate binary from the daemon. The daemon must remain friendly to alternative GUIs, including user-generated clients: authenticated discovery, submission, replay, observation, and control belong to its documented API and cannot depend on the official GUI. The current plain HTML surface embedded in the daemon and served only on loopback is provisional.
 
 Commit and push coherent, verified implementation slices as part of the development workflow.
 
