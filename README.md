@@ -52,6 +52,8 @@ Create a named resident without assigning a job. It has one canonical conversati
 
 See [the first resident](docs/residents.md) for continuity and [mailboxes](docs/mailboxes.md) for communication, activation, tools, CLI/API, and current limits. This first implementation stays on one selected host; synchronization and movement come later.
 
+The next runtime is being researched in [inference providers and the Boxen runtime](docs/research/inference-runtime.md), including source comparisons, Watch's compatibility cases, proposed ownership boundaries, and verification criteria. Inference-provider support is not implemented yet.
+
 ## Live daemon diagnostics
 
 Diagnostics are off by default and can be enabled, filtered, streamed remotely, redirected to a file, and disabled without restarting the daemon:
