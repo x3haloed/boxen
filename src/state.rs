@@ -47,7 +47,7 @@ pub fn random_hex() -> Result<String> {
         .private))
 }
 
-fn private_dir(path: &Path) -> Result<()> {
+pub(crate) fn private_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
@@ -57,7 +57,7 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -71,7 +71,19 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn publish_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    let temporary = path.with_extension(format!("pending-{}", random_hex()?));
+    write_new(&temporary, bytes)?;
+    let published = fs::hard_link(&temporary, path);
+    fs::remove_file(temporary)?;
+    published?;
+    Ok(())
+}
+
 impl State {
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
     pub fn open(directory: PathBuf) -> Result<Self> {
         private_dir(&directory)?;
         private_dir(&directory.join("peers"))?;

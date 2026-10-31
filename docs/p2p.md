@@ -2,7 +2,7 @@
 
 The current slice distributes a single executable to another LAN machine, runs listeners on both hosts, establishes durable mutual trust, and exchanges authenticated, encrypted echo messages directly between them. SSH is used only to bootstrap development deployment and exchange public identities through an already trusted channel.
 
-There is no remote command execution, agent runtime, workload scheduler, automatic discovery, NAT traversal, mailbox delivery queue, or persistent background peer link yet. Each exchange creates a fresh authenticated connection. A paired peer is a trusted identity, not proof that its host is currently reachable.
+The transport also carries [remote Codex workloads](workloads.md). There is no workload scheduler, automatic discovery, NAT traversal, mailbox delivery queue, or persistent background peer link yet. Requests create authenticated connections; event watches keep a connection open while subscribed. A paired peer is a trusted identity, not proof that its host is currently reachable.
 
 ## Build and packaging
 
@@ -50,11 +50,11 @@ The local page uses a per-process bearer capability supplied in the printed URL 
 
 ## Protocol and operational bounds
 
-The peer protocol uses the Snow implementation of `Noise_XX_25519_ChaChaPoly_BLAKE2s` over TCP, with the `boxen-lan-v1` prologue. Both sides prove possession of their persistent private keys; the application then enforces its public-key allowlist. Trust is rechecked before processing a message. Messages and replies are encrypted and authenticated by Noise.
+The peer protocol uses the Snow implementation of `Noise_XX_25519_ChaChaPoly_BLAKE2s` over TCP, with the `boxen-lan-v2` prologue. Both sides prove possession of their persistent private keys; the application then enforces its public-key allowlist. Trust is rechecked before processing a message and during event watches. Messages and replies are encrypted and authenticated by Noise. Upgrade both peers together; v1 echo-only peers cannot use this protocol.
 
-Frames use a two-byte big-endian length bounded by 65,535 bytes; application text is limited to 4,096 bytes. Connections have read/write timeouts, connection attempts have per-address timeouts, and inbound peer handlers are capped at 32. The local HTTP surface is sequential and bounded in request size. These limits are prototype resource bounds, not comprehensive denial-of-service protection.
+Frames use a two-byte big-endian length bounded by 65,535 bytes. Authenticated fragments carry JSON messages up to 8 MiB; echo text is limited to 4,096 bytes. Connections have read/write timeouts, connection attempts have per-address timeouts, and inbound peer handlers are capped at 32. The local HTTP surface supports up to 64 concurrent handlers so event watches do not block controls. These limits are prototype resource bounds, not comprehensive denial-of-service protection.
 
-Echo replies identify the authenticated peer and return the exact sent message. Failed or unreachable exchanges report failure without claiming delivery or durable queuing. Echoes themselves are not retained as messages; only successful exchange metadata is printed. Message logs, workloads, and their recovery contracts are future slices.
+Echo replies identify the authenticated peer and return the exact sent message. Failed or unreachable echoes report failure without claiming delivery or durable queuing. Echoes themselves are not retained as messages. Workload events have a separate retained journal and recovery contract.
 
 ## Verification
 
@@ -67,4 +67,4 @@ Verified on October 31, 2026:
 - The actual local control page was opened and used to send a message to the remote machine; its authenticated reply was visibly rendered.
 - Formatting, unit tests, and Clippy with warnings denied passed.
 
-The proven path is explicit user input → selected trusted identity → authenticated connection → remote trust check → encrypted echo → verified local result. The next frontier is a durable remote workload lifecycle; the current echo path does not establish execution, event retention, or job recovery.
+The original proven path was explicit user input → selected trusted identity → authenticated connection → remote trust check → encrypted echo → verified local result. Workload execution and event retention are covered by the subsequent [workload verification](workloads.md#verification).

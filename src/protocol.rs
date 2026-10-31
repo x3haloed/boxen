@@ -1,8 +1,10 @@
 use crate::{
     Result,
+    jobs::{Control, Jobs, Spec},
     state::{self, State},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use snow::{HandshakeState, TransportState, params::NoiseParams};
 use std::{
     io::{Read, Write},
@@ -16,7 +18,7 @@ use std::{
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TEXT: usize = 4096;
-const PROLOGUE: &[u8] = b"boxen-lan-v1";
+const PROLOGUE: &[u8] = b"boxen-lan-v2";
 
 pub fn params() -> NoiseParams {
     "Noise_XX_25519_ChaChaPoly_BLAKE2s"
@@ -28,10 +30,6 @@ pub fn params() -> NoiseParams {
 pub struct Reply {
     pub from: String,
     pub message: String,
-}
-#[derive(Serialize, Deserialize)]
-struct Request {
-    message: String,
 }
 
 fn send(stream: &mut TcpStream, message: &[u8]) -> Result<()> {
@@ -73,22 +71,51 @@ fn configure(stream: &TcpStream) -> Result<()> {
     stream.set_nodelay(true)?;
     Ok(())
 }
-pub fn ping(state: &State, address: &str, expected: &str, message: &str) -> Result<Reply> {
-    state.require_trust(expected)?;
-    if message.len() > MAX_TEXT {
-        return Err("message exceeds 4096 bytes".into());
+pub struct Session {
+    stream: TcpStream,
+    transport: TransportState,
+}
+impl Session {
+    pub fn send(&mut self, value: &Value) -> Result<()> {
+        let bytes = serde_json::to_vec(value)?;
+        if bytes.len() > 8 * 1024 * 1024 {
+            return Err("peer message exceeds 8 MiB".into());
+        }
+        let chunks = bytes.chunks(60000);
+        let count = chunks.len();
+        for (index, chunk) in chunks.enumerate() {
+            let mut frame = Vec::with_capacity(chunk.len() + 1);
+            frame.push(u8::from(index + 1 < count));
+            frame.extend_from_slice(chunk);
+            encrypt(&mut self.stream, &mut self.transport, &frame)?;
+        }
+        Ok(())
     }
-    let mut connected = None;
-    for address in address.to_socket_addrs()? {
-        match TcpStream::connect_timeout(&address, Duration::from_secs(3)) {
-            Ok(stream) => {
-                connected = Some(stream);
-                break;
+    pub fn receive(&mut self) -> Result<Value> {
+        let mut bytes = Vec::new();
+        loop {
+            let frame = decrypt(&mut self.stream, &mut self.transport)?;
+            let (&more, payload) = frame.split_first().ok_or("empty peer fragment")?;
+            if more > 1 || bytes.len() + payload.len() > 8 * 1024 * 1024 {
+                return Err("invalid peer fragments".into());
             }
-            Err(_) => continue,
+            bytes.extend_from_slice(payload);
+            if more == 0 {
+                return Ok(serde_json::from_slice(&bytes)?);
+            }
         }
     }
-    let mut stream = connected.ok_or("peer unreachable; no message delivered")?;
+}
+pub fn connect(state: &State, address: &str, expected: &str) -> Result<Session> {
+    state.require_trust(expected)?;
+    let mut connected = None;
+    for address in address.to_socket_addrs()? {
+        if let Ok(stream) = TcpStream::connect_timeout(&address, Duration::from_secs(3)) {
+            connected = Some(stream);
+            break;
+        }
+    }
+    let mut stream = connected.ok_or("peer unreachable; delivery is not confirmed")?;
     configure(&stream)?;
     let private = state.private_key()?;
     let mut noise = snow::Builder::new(params())
@@ -101,21 +128,66 @@ pub fn ping(state: &State, address: &str, expected: &str, message: &str) -> Resu
         return Err("remote identity differs from the selected peer; no message sent".into());
     }
     handshake_send(&mut stream, &mut noise)?;
-    let mut transport = noise.into_transport_mode()?;
-    encrypt(
-        &mut stream,
-        &mut transport,
-        &serde_json::to_vec(&Request {
-            message: message.into(),
-        })?,
-    )?;
-    let reply: Reply = serde_json::from_slice(&decrypt(&mut stream, &mut transport)?)?;
+    Ok(Session {
+        stream,
+        transport: noise.into_transport_mode()?,
+    })
+}
+pub fn request(state: &State, address: &str, expected: &str, request: Value) -> Result<Value> {
+    let mut session = connect(state, address, expected)?;
+    session.send(&request)?;
+    result(session.receive()?)
+}
+pub fn result(reply: Value) -> Result<Value> {
+    if let Some(error) = reply.get("error") {
+        return Err(Box::new(Rejected(
+            error.as_str().unwrap_or("peer error").to_string(),
+        )));
+    }
+    Ok(reply)
+}
+
+#[derive(Debug)]
+pub struct Rejected(pub String);
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+impl std::error::Error for Rejected {}
+pub fn ping(state: &State, address: &str, expected: &str, message: &str) -> Result<Reply> {
+    if message.len() > MAX_TEXT {
+        return Err("message exceeds 4096 bytes".into());
+    }
+    let reply: Reply = serde_json::from_value(request(
+        state,
+        address,
+        expected,
+        json!({"op":"ping","message":message}),
+    )?)?;
     if reply.from != expected || reply.message != message {
         return Err("invalid peer reply".into());
     }
     Ok(reply)
 }
-fn handle(mut stream: TcpStream, state: &State) -> Result<()> {
+pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value> {
+    match request["op"].as_str().unwrap_or("") {
+        "start" => Ok(serde_json::to_value(jobs.start(
+            owner,
+            serde_json::from_value::<Spec>(request["spec"].clone())?,
+        )?)?),
+        "list" => Ok(serde_json::to_value(jobs.list(owner))?),
+        "control" => {
+            let run = jobs.get(owner, request["id"].as_str().ok_or("run id required")?)?;
+            run.control(serde_json::from_value::<Control>(
+                request["action"].clone(),
+            )?)?;
+            Ok(json!({"accepted":true}))
+        }
+        _ => Err("unknown peer operation".into()),
+    }
+}
+fn handle(mut stream: TcpStream, state: &State, jobs: Option<&Arc<Jobs>>) -> Result<()> {
     configure(&stream)?;
     let private = state.private_key()?;
     let mut noise = snow::Builder::new(params())
@@ -127,22 +199,50 @@ fn handle(mut stream: TcpStream, state: &State) -> Result<()> {
     handshake_receive(&mut stream, &mut noise)?;
     let remote = state::hex(noise.get_remote_static().ok_or("missing peer identity")?);
     state.require_trust(&remote)?;
-    let mut transport = noise.into_transport_mode()?;
-    let request: Request = serde_json::from_slice(&decrypt(&mut stream, &mut transport)?)?;
-    if request.message.len() > MAX_TEXT {
-        return Err("message exceeds 4096 bytes".into());
-    }
-    // Recheck at the operation boundary so revocation applies to new messages.
-    state.require_trust(&remote)?;
-    let reply = Reply {
-        from: state.public_key().into(),
-        message: request.message,
+    let mut session = Session {
+        stream,
+        transport: noise.into_transport_mode()?,
     };
-    encrypt(&mut stream, &mut transport, &serde_json::to_vec(&reply)?)?;
-    println!("Authenticated exchange with {remote}");
+    let request = session.receive()?;
+    state.require_trust(&remote)?;
+    let outcome = (|| -> Result<()> {
+        if request["op"] == "ping" {
+            let message = request["message"].as_str().ok_or("message required")?;
+            if message.len() > MAX_TEXT {
+                return Err("message exceeds 4096 bytes".into());
+            }
+            session.send(&json!({"from":state.public_key(),"message":message}))?;
+        } else {
+            let jobs = jobs.ok_or("workload service not available")?;
+            if request["op"] == "watch" {
+                let run = jobs.get(&remote, request["id"].as_str().ok_or("run id required")?)?;
+                let mut after = request["after"].as_u64().unwrap_or(0);
+                loop {
+                    state.require_trust(&remote)?;
+                    let (events, snapshot) = run.batch(after, true)?;
+                    if let Some(last) = events.last() {
+                        after = last.seq;
+                    }
+                    let done =
+                        crate::jobs::terminal(&snapshot.status) && after == snapshot.last_seq;
+                    session.send(&json!({"events":events,"snapshot":snapshot,"done":done}))?;
+                    if done {
+                        break;
+                    }
+                }
+            } else {
+                session.send(&operation(jobs, &remote, &request)?)?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = outcome {
+        let _ = session.send(&json!({"error":error.to_string()}));
+        return Err(error);
+    }
     Ok(())
 }
-pub fn serve(listener: TcpListener, state: Arc<State>) {
+pub fn serve(listener: TcpListener, state: Arc<State>, jobs: Arc<Jobs>) {
     let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let stream = match stream {
@@ -158,8 +258,9 @@ pub fn serve(listener: TcpListener, state: Arc<State>) {
         }
         let state = state.clone();
         let active = active.clone();
+        let jobs = jobs.clone();
         std::thread::spawn(move || {
-            if let Err(error) = handle(stream, &state) {
+            if let Err(error) = handle(stream, &state, Some(&jobs)) {
                 eprintln!("Peer exchange rejected: {error}");
             }
             active.fetch_sub(1, Ordering::SeqCst);
@@ -188,7 +289,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             for _ in 0..4 {
                 let (stream, _) = listener.accept().unwrap();
-                let _ = handle(stream, &worker_b);
+                let _ = handle(stream, &worker_b, None);
             }
         });
         assert!(ping(&a, &address, b.public_key(), "unpaired").is_err());

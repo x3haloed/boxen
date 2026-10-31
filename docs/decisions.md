@@ -76,9 +76,11 @@ Acceptance criteria:
 - Close and reopen the client without stopping execution.
 - Disconnect and reconnect without losing already-recorded events or mistaking lost contact for completion.
 - Retain durable thread and run identifiers, execution location, and recoverable observations.
+- Stream backend-exposed thinking summaries, agent messages, tool activity, and command output as they occur. Remote execution should feel local; completion-only delivery or periodic polling is insufficient.
+- Replay missed events in sequence after reconnection without duplicating displayed content or coupling execution lifetime to the viewer.
 
 Use destination-local files and explicit placement initially. Resident identity, shared memory, automatic scheduling, and relocation are not prerequisites for this slice. File transfer is not required to prove it.
 
 Next, add the built-in inference runtime to verify that the common execution contract supports both runtime kinds. Resident continuity and movement between machines follow; parallel conversations, clones, and reintegration remain part of the beta requirements.
 
-The first implemented prerequisite is [LAN pairing and authenticated message exchange](p2p.md). The next design task is the smallest daemon-to-daemon execution contract needed for remote workloads. Workload recovery semantics, storage, scheduling topology, production enrollment UX, and wide-area connectivity remain open.
+The initial [LAN pairing prerequisite](p2p.md) now carries [remote Codex workloads with live event streaming](workloads.md). The executing daemon owns each run and its retained event sequence. A client can detach and reconnect; a daemon restart marks unfinished execution uncertain rather than retrying it automatically. Broader recovery, storage retention, scheduling, production enrollment UX, and wide-area connectivity remain open. The built-in inference runtime is the next planned backend, not part of this implemented slice.

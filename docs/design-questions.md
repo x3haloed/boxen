@@ -30,7 +30,7 @@ This is an inventory of unresolved design work, not a settled architecture or an
 
 Start an anonymous workload remotely through Codex app-server, observe it through completion, cancel it, and detach and reconnect without stopping execution or losing recorded observations. Use explicit placement and destination-local files. See [the acceptance criteria](decisions.md#first-implementation-slice).
 
-The built-in inference runtime follows to test the shared contract. Resident continuity, portable state, mobility, configurable conversation structure, and reintegration remain beta requirements. The initial [LAN pairing prerequisite](p2p.md) uses Rust and Noise over direct TCP. Workload contracts, storage design, wide-area connectivity, scheduling topology, and workload restart recovery remain open.
+The built-in inference runtime follows to test the shared contract. Resident continuity, portable state, mobility, configurable conversation structure, and reintegration remain beta requirements. The initial [LAN transport](p2p.md) and [remote Codex workload contract](workloads.md) use Rust and Noise over direct TCP. Events stream immediately and replay by sequence; unfinished runs become uncertain after a daemon restart. General runtime contracts, durable storage retention, wide-area connectivity, scheduling topology, and richer workload recovery remain open.
 
 ## Proposals still requiring decisions
 

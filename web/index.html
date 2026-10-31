@@ -4,60 +4,273 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Boxen</title>
 <style>
-  body { font: 16px system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1rem; }
-  label { display: block; margin-top: 1rem; }
-  input, select, button { font: inherit; box-sizing: border-box; padding: .5rem; }
-  input, select { display: block; width: 100%; margin-top: .3rem; }
-  button { margin-top: 1rem; cursor: pointer; }
-  code { overflow-wrap: anywhere; }
-  pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem; background: #f2f2f2; }
+  body { font: 16px system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+  label { display: block; margin-top: .75rem; }
+  input, select, textarea, button { font: inherit; box-sizing: border-box; padding: .5rem; }
+  input, select, textarea { display: block; width: 100%; margin-top: .25rem; }
+  button { margin: .75rem .5rem .25rem 0; cursor: pointer; }
+  code, pre { overflow-wrap: anywhere; }
+  pre { white-space: pre-wrap; margin: .5rem 0; font: 14px ui-monospace, monospace; }
+  article { border-top: 1px solid #ddd; padding: .75rem 0; }
+  article strong { font-size: .85rem; }
+  .meta { color: #555; font-size: .85rem; }
+  #connection { min-height: 1.5rem; }
+  [hidden] { display: none !important; }
 </style>
 <h1>Boxen</h1>
-<p>LAN pairing prototype</p>
-<p>This machine: <code id="identity">Loading…</code></p>
-<form id="ping">
-  <label>Trusted peer<select id="peer" required></select></label>
-  <label>Peer address<input id="address" placeholder="machine.lan:42424" required></label>
-  <label>Message<input id="message" value="hello from Boxen" required></label>
-  <button id="send">Send test message</button>
+<details><summary>Machine identity</summary><code id="identity">Loading…</code></details>
+<form id="connect">
+  <label>Execute on<select id="peer" required></select></label>
+  <label id="addressLabel">Peer address<input id="address" placeholder="machine.lan:42424"></label>
+  <button id="connectButton">Connect / refresh threads</button>
 </form>
-<pre id="result" role="status" aria-live="polite">Loading trusted peers…</pre>
+<p id="connection" role="status" aria-live="polite">Loading…</p>
+<label>Thread<select id="threads"><option value="">New anonymous thread</option></select></label>
+<form id="work">
+  <label>Working directory on executing machine<input id="cwd" placeholder="/absolute/path/on/that/machine" required></label>
+  <label>Backend<select id="backend"><option value="codex">Codex app-server</option></select></label>
+  <label>Model<input id="model" placeholder="Executing machine’s configured default"></label>
+  <p class="meta">Full access · files and tools belong to the executing machine.</p>
+  <label>Message<textarea id="prompt" rows="3" required></textarea></label>
+  <button id="send">Start thread</button><button id="cancel" type="button" disabled>Cancel run</button>
+  <button id="detach" type="button" disabled>Detach viewer</button>
+</form>
+<p id="runStatus" role="status" aria-live="polite"></p>
+<p class="meta" id="location"></p>
+<section id="transcript" aria-label="Conversation"></section>
+<details><summary>Connection test</summary>
+  <button id="ping" type="button">Send test message</button><pre id="pingResult"></pre>
+</details>
 <script>
-  const token = location.hash.slice(1);
-  // Keep the capability out of subsequent URLs and referers; retain for this tab's refresh.
-  if (token) { sessionStorage.setItem('boxen-token', token); history.replaceState(null, '', '/'); }
-  const headers = { Authorization: 'Bearer ' + (token || sessionStorage.getItem('boxen-token') || '') };
-  const result = document.getElementById('result');
-  const peer = document.getElementById('peer');
-  const button = document.getElementById('send');
-  async function load() {
-    try {
-      const response = await fetch('/api/status', {headers});
-      if (!response.ok) throw new Error(await response.text());
-      const state = await response.json();
-      document.getElementById('identity').textContent = state.identity;
-      for (const entry of state.peers) {
-        const option = document.createElement('option');
-        option.value = entry.key; option.textContent = entry.label + ' · ' + entry.key.slice(0, 12);
-        peer.append(option);
-      }
-      button.disabled = !state.peers.length;
-      result.textContent = state.peers.length ? 'Ready. Choose a peer and enter its LAN address.' : 'No trusted peers. Exchange public keys and run boxen trust on both machines.';
-    } catch (error) { result.textContent = error.message; button.disabled = true; }
+const $ = id => document.getElementById(id);
+const token = location.hash.slice(1);
+if (token) { sessionStorage.setItem('boxen-token', token); history.replaceState(null, '', '/'); }
+const headers = {Authorization: 'Bearer ' + (token || sessionStorage.getItem('boxen-token') || ''), 'Content-Type':'application/json'};
+let identity, target, records = [], selectedThread = '', currentRun = null, watcher, generation = 0, connected = false, submitting = false;
+let items = new Map(), pending = new Map(), cursors = new Map();
+let pendingStart = null;
+function rememberSubmission() {
+  if(pendingStart) localStorage.setItem('boxen-pending-start',JSON.stringify({target,spec:pendingStart}));
+  else localStorage.removeItem('boxen-pending-start');
+}
+const terminal = status => ['completed','failed','cancelled','interrupted'].includes(status);
+function id() { return [...crypto.getRandomValues(new Uint8Array(32))].map(v=>v.toString(16).padStart(2,'0')).join(''); }
+function save() { localStorage.setItem('boxen-controls',JSON.stringify({peer:$('peer').value,address:$('address').value,cwd:$('cwd').value,model:$('model').value,thread:selectedThread})); }
+async function operation(request, destination=target) {
+  const response = await fetch('/api/operation',{method:'POST',headers,body:JSON.stringify({...destination,request})});
+  if (!response.ok) {const error=new Error(await response.text());error.definitive=response.status===422;throw error;}
+  return response.json();
+}
+function controls() {
+  const active = currentRun && !terminal(currentRun.status);
+  $('send').textContent = active ? 'Send to active run' : selectedThread ? 'Send follow-up' : 'Start thread';
+  $('send').disabled = !connected || submitting;
+  $('peer').disabled=submitting;$('address').disabled=submitting;$('threads').disabled=submitting;$('connectButton').disabled=submitting;
+  $('prompt').disabled = !!pendingStart;
+  if(pendingStart)$('send').textContent='Retry original submission';
+  $('cancel').disabled = !active || !connected;
+  $('cwd').disabled = !!selectedThread || !!pendingStart; $('model').disabled = !!active || !!pendingStart;
+  $('detach').disabled = !watcher;
+}
+function add(label,text,meta='') {
+  const article = document.createElement('article');
+  const title = document.createElement('strong'); title.textContent=label;
+  const content = document.createElement('pre');content.textContent=text;
+  article.append(title,content);
+  if(meta) { const small=document.createElement('div');small.className='meta';small.textContent=meta;article.append(small); }
+  $('transcript').append(article); return {article,title,content};
+}
+function itemFor(run,itemId,label='Activity') {
+  const key=run+':'+itemId;
+  if(!items.has(key)) items.set(key,add(label,''));
+  return items.get(key);
+}
+function itemText(item) {
+  if(item.type==='reasoning') return (item.summary||[]).join('\n\n');
+  if(item.type==='commandExecution') return [item.command,item.aggregatedOutput].filter(Boolean).join('\n\n');
+  if(item.type==='agentMessage' || item.type==='userMessage') return item.text || (item.content||[]).map(c=>c.text||'').join('\n');
+  if(item.type==='plan') return item.text||JSON.stringify(item,null,2);
+  return JSON.stringify(item,null,2);
+}
+const labels={agentMessage:'Agent',userMessage:'You',reasoning:'Thinking',commandExecution:'Command',mcpToolCall:'Tool call',dynamicToolCall:'Tool call',fileChange:'File changes',webSearch:'Web search',plan:'Plan'};
+function answerPanel(run,message) {
+  const key=run+':'+JSON.stringify(message.id);
+  if(pending.has(key)) return;
+  const method=message.method, params=message.params||{};
+  const row=add('Input requested', params.reason || params.command || method);
+  const body=document.createElement('pre');body.textContent=JSON.stringify(params,null,2);row.article.append(body);
+  async function respond(result) {
+    try { await operation({op:'control',id:run,action:{type:'respond',request_id:message.id,result}}); }
+    catch(error){ $('runStatus').textContent=error.message; }
   }
-  document.getElementById('ping').addEventListener('submit', async event => {
-    event.preventDefault(); button.disabled = true; result.textContent = 'Connecting…';
+  if(method==='item/commandExecution/requestApproval'||method==='item/fileChange/requestApproval') {
+    for(const decision of ['accept','decline','cancel']) {
+      const button=document.createElement('button');button.textContent=decision;button.onclick=()=>respond({decision});row.article.append(button);
+    }
+  } else if(method==='item/tool/requestUserInput'||method==='tool/requestUserInput') {
+    const questions=[];
+    for(const question of params.questions||[]) {
+      const label=document.createElement('label');label.textContent=question.question;
+      const input=document.createElement('input');
+      if(question.options?.length){ input.placeholder=question.options.map(o=>o.label).join(' / '); }
+      label.append(input); row.article.append(label);questions.push({id:question.id,input});
+    }
+    const button=document.createElement('button');button.textContent='Reply';button.onclick=()=>respond({answers:Object.fromEntries(questions.map(q=>[q.id,{answers:[q.input.value]}]))});row.article.append(button);
+  } else {
+    const input=document.createElement('textarea');input.setAttribute('aria-label','Backend response JSON');input.placeholder='Response JSON for this backend request';
+    const button=document.createElement('button');button.textContent='Send response';button.onclick=()=>{try{respond(JSON.parse(input.value));}catch(error){$('runStatus').textContent=error.message;}};
+    row.article.append(input,button);
+  }
+  pending.set(key,row.article);
+}
+function resolveRequest(run,requestId) {
+  const key=run+':'+JSON.stringify(requestId), panel=pending.get(key);
+  if(panel){panel.remove();pending.delete(key);}
+}
+function render(run,event) {
+  if(event.kind==='status') {
+    $('runStatus').textContent=event.data.status + (event.data.detail && event.data.detail!=='null' ? ' · '+event.data.detail:'');
+    if(terminal(event.data.status)) {
+      for(const [key,panel] of pending)if(key.startsWith(run+':')){panel.remove();pending.delete(key);}
+      if(event.data.status!=='completed')for(const [key,row] of items)if(key.startsWith(run+':')&&!row.completed)row.title.textContent=row.title.textContent.replace(' · inProgress','')+' · interrupted with turn';
+    }
+    return;
+  }
+  if(event.kind==='user_message') { add('You',event.data.text);return; }
+  if(event.kind==='request_answered'){resolveRequest(run,event.data.request_id);return;}
+  if(event.kind==='control'){if(event.data.text)add('You · steering',event.data.text);else add('Control',event.data.type);return;}
+  if(event.kind==='control_error'){add('Control error',event.data.message);return;}
+  if(event.kind!=='backend')return;
+  const message=event.data, method=message.method, params=message.params||{};
+  if(message.id!==undefined){answerPanel(run,message);return;}
+  if(method==='serverRequest/resolved'){resolveRequest(run,params.requestId);return;}
+  if(method==='item/started'||method==='item/completed') {
+    const item=params.item||{};
+    if(item.type==='userMessage')return;
+    const row=itemFor(run,item.id,labels[item.type]||item.type||'Activity');
+    row.title.textContent=(labels[item.type]||item.type||'Activity')+(item.status?' · '+item.status:'');
+    row.completed=method==='item/completed';
+    const text=itemText(item);
+    if(text || method==='item/completed')row.content.textContent=text;
+    return;
+  }
+  if(method?.endsWith('Delta')||method?.endsWith('/delta')) {
+    const label=method.includes('reasoning')?'Thinking':method.includes('agentMessage')?'Agent':method.includes('commandExecution')?'Command':'Activity';
+    const row=itemFor(run,params.itemId,label);
+    if(method.includes('outputDelta')&&!row.hasOutput){row.content.append(document.createTextNode('\n\n'));row.hasOutput=true;}
+    row.content.append(document.createTextNode(params.delta||''));return;
+  }
+  if(method==='turn/plan/updated'){add('Plan',(params.plan||[]).map(p=>p.status+' · '+p.step).join('\n'));return;}
+  if(method==='turn/diff/updated'){add('Changes',params.diff||'');return;}
+  if(method==='error'){add('Backend error',JSON.stringify(params.error||params,null,2));return;}
+  if(method?.startsWith('item/')||method?.includes('progress')) {
+    const details=document.createElement('details'), summary=document.createElement('summary'),pre=document.createElement('pre');
+    summary.textContent=method;pre.textContent=JSON.stringify(params,null,2);details.append(summary,pre);$('transcript').append(details);
+  }
+}
+function updateThreads() {
+  const latest=new Map(), titles=new Map();for(const record of records){const thread=record.record.spec.thread_id;latest.set(thread,record);if(!titles.has(thread))titles.set(thread,record.record.spec.prompt);}
+  $('threads').replaceChildren(new Option('New anonymous thread',''));
+  for(const [thread,record] of [...latest].reverse()) $('threads').append(new Option(titles.get(thread).slice(0,55)+' · '+record.status,thread));
+  $('threads').value=selectedThread;
+}
+async function watch(run, gen) {
+  let after=cursors.get(run)||0;
+  while(gen===generation) {
+    watcher=new AbortController();controls();
     try {
-      const response = await fetch('/api/ping', {method: 'POST', headers: {...headers, 'Content-Type': 'application/json'}, body: JSON.stringify({
-        address: document.getElementById('address').value, peer: peer.value, message: document.getElementById('message').value
-      })});
-      const text = await response.text();
-      if (!response.ok) throw new Error(text);
-      const reply = JSON.parse(text);
-      result.textContent = 'Authenticated reply from ' + reply.from + '\n\n' + reply.message;
-    } catch (error) { result.textContent = 'Exchange failed: ' + error.message; }
-    finally { button.disabled = false; }
-  });
-  load();
+      const response=await fetch('/api/watch',{method:'POST',headers,signal:watcher.signal,body:JSON.stringify({...target,request:{id:run,after}})});
+      if(!response.ok)throw new Error(await response.text());
+      const reader=response.body.getReader(), decoder=new TextDecoder();let buffer='';let done=false;
+      while(gen===generation) {
+        const chunk=await reader.read();if(gen!==generation)return;if(chunk.done)break;
+        buffer+=decoder.decode(chunk.value,{stream:true});
+        let newline;
+        while((newline=buffer.indexOf('\n'))>=0){
+          const batch=JSON.parse(buffer.slice(0,newline));buffer=buffer.slice(newline+1);
+          if(batch.error)throw new Error(batch.error);
+          for(const event of batch.events||[]) {
+            if(event.seq<=after)continue;
+            if(event.seq!==after+1)throw new Error('Event sequence gap; reconnecting');
+            render(run,event);after=event.seq;cursors.set(run,after);
+          }
+          currentRun=batch.snapshot; connected=true;
+          $('connection').textContent='Connected · live events';
+          $('location').textContent='Executing machine: '+$('peer').selectedOptions[0].textContent+' · '+currentRun.record.spec.cwd+' · run '+run.slice(0,12)+' · event '+after;
+          const index=records.findIndex(r=>r.record.spec.id===run);if(index>=0)records[index]=currentRun;
+          updateThreads();controls();
+          if(batch.done){done=true;break;}
+        }
+        if(done)break;
+      }
+      if(done){watcher=null;controls();return;}
+      throw new Error('Event connection ended');
+    } catch(error) {
+      if(gen!==generation)return;
+      connected=false;$('connection').textContent='Connection lost; execution outcome unknown. Reconnecting… '+error.message;controls();
+      await new Promise(resolve=>setTimeout(resolve,1000));
+    }
+  }
+}
+function detach() { generation++;watcher?.abort();watcher=null;controls(); }
+async function showThread(thread) {
+  detach();selectedThread=thread;currentRun=null;items=new Map();pending=new Map();cursors=new Map();$('transcript').replaceChildren();$('runStatus').textContent='';$('location').textContent='';save();
+  const related=records.filter(r=>r.record.spec.thread_id===thread);
+  if(related.length){$('cwd').value=related[0].record.spec.cwd;$('model').value=related.at(-1).record.spec.model;}
+  controls();const gen=generation;
+  for(const record of related){if(gen!==generation)return;await watch(record.record.spec.id,gen);}
+}
+async function connect() {
+  detach();const gen=generation;target={peer:$('peer').value,address:$('address').value};
+  $('connection').textContent='Connecting…';connected=false;controls();
+  try {
+    const incoming=await operation({op:'list'});if(gen!==generation)return;records=incoming;connected=true;$('connection').textContent='Connected';
+    let savedPending;try{savedPending=JSON.parse(localStorage.getItem('boxen-pending-start')||'null');}catch{}
+    pendingStart = savedPending?.target.peer===target.peer ? savedPending.spec : null;
+    if(pendingStart) {
+      const accepted=records.find(r=>r.record.spec.id===pendingStart.id);
+      if(accepted){selectedThread=accepted.record.spec.thread_id;pendingStart=null;rememberSubmission();}
+      else{$('cwd').value=pendingStart.cwd;$('model').value=pendingStart.model;$('prompt').value=pendingStart.prompt;$('runStatus').textContent='Prior submission is unconfirmed. Retry sends its original input and ID.';}
+    }
+    if(!records.some(r=>r.record.spec.thread_id===selectedThread))selectedThread='';
+    updateThreads();save();await showThread(selectedThread);
+  }catch(error){$('connection').textContent='Not connected · '+error.message;controls();}
+}
+$('connect').onsubmit=event=>{event.preventDefault();connect();};
+$('threads').onchange=()=>showThread($('threads').value);
+$('peer').onchange=()=>{detach();connected=false;selectedThread='';$('addressLabel').hidden=$('peer').value===identity;controls();};
+$('work').onsubmit=async event=>{
+  event.preventDefault();if(!connected)return;
+  submitting=true;controls();
+  try {
+    const text=$('prompt').value;
+    if(currentRun&&!terminal(currentRun.status)) {
+      await operation({op:'control',id:currentRun.record.spec.id,action:{type:'steer',text}});$('prompt').value='';return;
+    }
+    // Keep an uncertain submission's id and exact input so retry cannot duplicate it.
+    if(!pendingStart) { const run=id();pendingStart={id:run,thread_id:selectedThread||run,backend:'codex',cwd:$('cwd').value,model:$('model').value,prompt:text}; rememberSubmission(); }
+    const snapshot=await operation({op:'start',spec:pendingStart});pendingStart=null;rememberSubmission();
+    records.push(snapshot);selectedThread=snapshot.record.spec.thread_id;$('prompt').value='';
+    updateThreads();save();showThread(selectedThread);
+  }catch(error){if(error.definitive){pendingStart=null;rememberSubmission();$('runStatus').textContent='Request rejected: '+error.message;}else{$('runStatus').textContent='Submission not confirmed: '+error.message+'. Retrying submits the same run ID.';}}
+  finally{submitting=false;controls();}
+};
+$('cancel').onclick=async()=>{try{await operation({op:'control',id:currentRun.record.spec.id,action:{type:'cancel'}});$('runStatus').textContent='Cancellation requested; waiting for backend confirmation';}catch(error){$('runStatus').textContent=error.message;}};
+$('detach').onclick=()=>{detach();$('connection').textContent='Viewer detached. Execution continues; connect to reattach.';};
+$('ping').onclick=async()=>{try{const response=await fetch('/api/ping',{method:'POST',headers,body:JSON.stringify({...target,message:'hello from Boxen'})});const text=await response.text();if(!response.ok)throw new Error(text);$('pingResult').textContent=text;}catch(error){$('pingResult').textContent=error.message;}};
+async function load(){
+  try{
+    const response=await fetch('/api/status',{headers});if(!response.ok)throw new Error(await response.text());
+    const state=await response.json();identity=state.identity;$('identity').textContent=identity;
+    $('peer').append(new Option('This machine',identity));for(const peer of state.peers)$('peer').append(new Option(peer.label,peer.key));
+    let saved={};try{saved=JSON.parse(localStorage.getItem('boxen-controls')||'{}');}catch{}
+    $('peer').value=saved.peer||state.peers[0]?.key||identity;
+    $('address').value=saved.address||'';$('cwd').value=saved.cwd||'';$('model').value=saved.model||'';selectedThread=saved.thread||'';
+    $('addressLabel').hidden=$('peer').value===identity;
+    $('connection').textContent='Select a machine and connect.';controls();
+    if($('peer').value===identity||$('address').value)connect();
+  }catch(error){$('connection').textContent=error.message;controls();}
+}
+load();
 </script>
 </html>
