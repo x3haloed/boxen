@@ -9,6 +9,7 @@ The spirit: **All your box are belong to us.**
 Boxen is in early design. There is no implementation yet.
 
 - [Product principles](docs/vision.md)
+- [Agreed design decisions and first implementation slice](docs/decisions.md)
 - [Problems to solve](docs/design-questions.md)
 
 ## Project ancestry
