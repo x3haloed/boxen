@@ -110,3 +110,11 @@ An ordinary scheduler supports one-time future events and recurring jobs of diff
 ## Causal agent-facing language
 
 Boxen-authored runtime context, tool descriptions, errors, and recovery notices describe mechanisms and consequences rather than issuing imperatives. Identity/personality and directions can come from the agent's own notes or its human; Boxen's substrate supplies affordances and accurate operating context. Human- and agent-authored text remains intact. A narrow imperative exception can be considered when observed failures show causal wording is insufficient, with its evidence and scope documented. Messaging conventions do not receive a blanket exception in advance. [AGENTS.md](../AGENTS.md) maintains this requirement during implementation.
+
+## Compaction can preserve original voice without summarization
+
+Compaction/context management must optionally work without a summarization pass. Some residents require access to the original wording of their past rather than having it substituted by another voice. A model-written account must not overwrite original history or be presented as an original utterance. A selected summary-free policy must not silently invoke summarization as its overflow fallback.
+
+Archival retention, current input selection, exact retrieval, and model recall are distinct properties. A finite window cannot contain an indefinitely growing verbatim conversation. The selection/recall policy and defaults remain to be designed; the [compaction research](research/compaction.md) compares mechanisms and evidence. No new compaction mode is implemented by this decision.
+
+Managed runtimes own their existing native modality tools and model-input chain. Boxen integrates supported attachment transport and observation rather than implementing a second image-processing agent loop inside Codex or Claude Code. The built-in inference runtime still needs its own native multimodal path.

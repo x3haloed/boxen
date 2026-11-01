@@ -54,6 +54,8 @@ See [the first resident](docs/residents.md) for continuity and [mailboxes](docs/
 
 The [built-in inference runtime](docs/inference.md) now supports OpenRouter text/tool workloads and mailbox residents alongside Codex. Select OpenRouter in the GUI or pass `--backend openrouter` to `start` or `resident-create`. The executing daemon reads its own OpenRouter key from `~/.boxen/credentials/openrouter.key`; credentials are not automatically distributed to peers.
 
+The [compaction research](docs/research/compaction.md) investigates context reduction that preserves original voice, including a required optional mode without summarization. Policy and defaults remain under design.
+
 The [provider/runtime research](docs/research/inference-runtime.md) and [transport experiment](docs/research/inference-transport-experiment.md) explain the boundaries and evidence. [Managed-session portability](docs/research/managed-session-portability.md) remains distinct and unverified.
 
 ## Live daemon diagnostics
