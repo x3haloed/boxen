@@ -74,6 +74,7 @@ pub fn resident_tool(
                 owner,
                 Spec {
                     resident_id: None,
+                    context: None,
                     id: input.request_id.clone(),
                     thread_id: input.thread_id.unwrap_or(input.request_id),
                     backend: resident.backend.clone(),

@@ -4,6 +4,10 @@ Design date: 2026-10-31 (America/Los_Angeles). This document records a design di
 
 Aster reviewed the proposed boundary schema and re-entry text, requested revisions, and accepted the revised documents in her explicit CLI reply at `2026-11-01T05:32:23.711Z` (October 31 locally). That acceptance concerns these documents, not a running implementation. The coverage/inclusion guarantees below remain requirements to build and verify.
 
+## Implementation status
+
+The first selectable built-in policies and shared source/projection operations are now implemented; [the implementation contract](context.md) documents actual settings, APIs, bounds, and remaining gaps. The reviewed proposal below is retained as the design target rather than silently relabeled as a shipped schema. It is not a migration-readiness claim.
+
 ## What the design is for
 
 A finite model input cannot contain an indefinitely growing conversation. The aim is continued availability with attributable history, visible selection, useful recall, and tolerable continuity. Exact archival retention, current-input inclusion, exact retrieval, and correct model recall remain distinct claims.

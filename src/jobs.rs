@@ -43,6 +43,7 @@ mod tests {
             mailbox: None,
             created_at: now(),
             spec: Spec {
+                context: None,
                 id: id.clone(),
                 resident_id: None,
                 thread_id: id.clone(),
@@ -88,6 +89,8 @@ pub fn valid_id(id: &str) -> Result<()> {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Spec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::context::Settings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resident_id: Option<String>,
     pub id: String,
@@ -184,6 +187,26 @@ impl Run {
             fields,
             payload,
         );
+    }
+    pub fn context_events(&self) -> Vec<Event> {
+        self.inner
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind.as_str(),
+                    "inference_message"
+                        | "context_boundary"
+                        | "context_bundle"
+                        | "context_note"
+                        | "context_compact_requested"
+                        | "context_exposure"
+                )
+            })
+            .cloned()
+            .collect()
     }
     pub fn snapshot(&self) -> Snapshot {
         self.inner.lock().unwrap().snapshot.clone()
@@ -305,31 +328,21 @@ impl History {
     pub fn journal_directory(&self) -> &std::path::Path {
         &self.directory
     }
-    pub fn inference_messages(&self) -> Result<(Vec<Value>, usize)> {
-        let mut groups = std::collections::VecDeque::new();
-        let mut bytes = 0;
-        let mut omitted = 0;
-        for run in &self.runs {
-            let inner = run.inner.lock().unwrap();
-            let group: Vec<Value> = inner
-                .events
-                .iter()
-                .filter(|e| e.kind == "inference_message")
-                .map(|e| e.data.clone())
-                .collect();
-            let size = serde_json::to_vec(&group)?.len();
-            bytes += size;
-            groups.push_back((group, size));
-            while bytes > 512 * 1024 {
-                if let Some((group, size)) = groups.pop_front() {
-                    bytes = bytes.saturating_sub(size);
-                    omitted += group.len();
-                } else {
-                    break;
-                }
-            }
-        }
-        Ok((groups.into_iter().flat_map(|g| g.0).collect(), omitted))
+    pub fn source(&self, current: &Arc<Run>) -> crate::context::Source {
+        let mut runs = self.runs.clone();
+        runs.push(current.clone());
+        crate::context::Source::from_runs(&runs)
+    }
+    pub fn settings(&self, spec: &Spec) -> crate::context::Settings {
+        spec.context
+            .clone()
+            .or_else(|| {
+                self.runs
+                    .iter()
+                    .rev()
+                    .find_map(|r| r.snapshot().record.spec.context)
+            })
+            .unwrap_or_default()
     }
     pub fn reconstruction(&self) -> Result<String> {
         let mut recent = std::collections::VecDeque::new();
@@ -386,8 +399,49 @@ pub struct Jobs {
 }
 
 impl Jobs {
+    pub fn context_operation(&self, owner: &str, thread: &str, args: Value) -> Result<Value> {
+        let _transition = self.transitions.lock().unwrap();
+        valid_id(thread)?;
+        let mut runs: Vec<_> = self
+            .runs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.snapshot().record.spec.thread_id == thread)
+            .cloned()
+            .collect();
+        runs.sort_by_key(|r| r.snapshot().record.created_at);
+        let last = runs.last().ok_or("thread has no accepted run")?;
+        for run in &runs {
+            if run.snapshot().record.owner != owner {
+                return Err("thread belongs to a different peer".into());
+            }
+        }
+        if last.snapshot().record.spec.backend != "openrouter" {
+            return Err("Boxen history projection tools apply to the built-in inference runtime; managed runtimes retain native history controls".into());
+        }
+        let mutating = terminal(&last.snapshot().status);
+        let result = crate::context::Source::from_runs(&runs).operation(
+            last,
+            args.clone(),
+            mutating,
+            "operator",
+            49152,
+        );
+        last.diagnostic(
+            if result.is_ok() {
+                Level::Info
+            } else {
+                Level::Warn
+            },
+            "context.operation",
+            || json!({"action":args["action"],"accepted":result.is_ok(),"external":true}),
+            || Value::Null,
+        );
+        result
+    }
     pub fn runtime_info(&self) -> Value {
-        json!({"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"model_provider_support_required":true,"tools":true,"full_access":true}]})
+        json!({"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]})
     }
 
     pub fn machine_id(&self) -> &str {
@@ -716,6 +770,11 @@ impl Jobs {
         }
         activation.message_ids = batch.iter().map(|m| m.id.clone()).collect();
         let spec = Spec {
+            context: if resident.backend == "openrouter" {
+                Some(resident.context.clone())
+            } else {
+                None
+            },
             resident_id: Some(id.into()),
             id: run_id,
             thread_id: id.into(),
@@ -858,6 +917,12 @@ impl Jobs {
         }
         if spec.backend == "openrouter" && activation.is_none() {
             self.inference.ready()?;
+        }
+        if let Some(settings) = &spec.context {
+            settings.validate()?;
+            if spec.backend != "openrouter" {
+                return Err("Boxen context policies apply to the built-in runtime; managed runtimes own their native compaction".into());
+            }
         }
         if spec.prompt.is_empty() || spec.prompt.len() > 256 * 1024 {
             return Err("prompt must contain 1–262144 bytes".into());

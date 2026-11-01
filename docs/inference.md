@@ -31,7 +31,7 @@ Reasoning uses the selected model’s provider defaults. A universal reasoning-d
 
 ## Tools and communication
 
-Every built-in workload has `boxen_shell`, a Full-access shell in its configured working directory. Tools run serially. A complete assistant response and a normal tool-call finish are conditions of dispatch. Calls from length-limited or otherwise incomplete responses are not executed. JSON arguments are parsed and validated by the selected tool; malformed inputs produce errors rather than guessed repairs. A retained dispatch record precedes tool execution, and the result is retained before another inference request.
+Every built-in workload has `boxen_history` for exact journal recall and context operations, plus `boxen_shell`, a Full-access shell in its configured working directory. Tools run serially. A complete assistant response and a normal tool-call finish are conditions of dispatch. Calls from length-limited or otherwise incomplete responses are not executed. JSON arguments are parsed and validated by the selected tool; malformed inputs produce errors rather than guessed repairs. A retained dispatch record precedes tool execution, and the result is retained before another inference request.
 
 The shell accepts `command` and optional `timeout_ms` (default 30000, range 1–120000). It returns a combined text output and exit code, with real-time stdout/stderr observations. Output is capped at 256 KiB. Native Unix and the verified macOS APE use an owned process group so cancellation/time limits also terminate ordinary descendants. Files, network requests, detached work, or external effects can already have occurred; termination is not rollback. Windows shell/process-group behavior remains unverified.
 
@@ -45,7 +45,7 @@ Accepted native messages and tool results live in the existing run journals. Fol
 
 A crash or cancellation between an assistant call and its durable result leaves the effect uncertain. A later activation can proceed: the current projection supplies a synthetic unknown result describing that uncertainty. It does not dispatch the historical call or relabel it successful. A completed effect followed by failed inference retains its original result. Explicit mail sends also retain the existing daemon idempotency guarantees.
 
-This initial context policy keeps complete recent run groups within a 512 KiB prior-message budget. It records omitted-message counts and supplies the location of full journals. Identity/memory and the new input are retained independently. This is a disclosed bounded projection, **not model-generated compaction or lossless continuity**. Very large current input/tools or output can still exceed the request budget and end an activation with a retained incident; a later activation stays possible. Configurable context management remains later work, including the required optional summary-free mode; see [the compaction research](research/compaction.md).
+The built-in runtime now has selectable summary compaction and summary-free verbatim continuity, backed by the same original journals, exact paged history, source bundles, coverage records, and provenance. Anonymous threads default to summary; residents default to verbatim. Policy selection is independent of communication style. Settings, failure behavior, bounds, and verification are documented in [built-in context policies](context.md). The former 512 KiB whole-run projection is retired.
 
 Other initial bounds: 16 inference exchanges per activation, 2048 requested output tokens per exchange, 120 seconds per HTTP request plus a supervisor deadline, 24 MiB outbound request, 1 MiB SSE line/frame, and 16 MiB received exchange data. The host's existing eight-active-run limit remains. Provider accounting, tool schemas, and media budgeting need broader work before these become general-purpose resource policies.
 
@@ -66,7 +66,7 @@ It starts two real paired daemons and a controlled provider, exercising actual s
 
 The APE worker-launch test found that Rust's Linux-target `current_exe()` looked for `/proc/self/exe` on macOS. `platform::executable()` now uses Cosmopolitan's `GetProgramExecutableName` when built as APE. The actual worker path and process-group operations are covered by runtime tests, beyond successful compilation alone.
 
-Still planned: client media uploads, general provider adapters/options, model-generated compaction, richer budget configuration, safe route/model switching, scheduling, and managed-session migration. The [Linux rotation](testing.md) now verifies the built-in runtime and native media projection on Debian 13 x86-64 with controlled providers. Live inference on Linux, Windows, and macOS x86-64 execution remain unverified.
+Still planned: client media uploads, general provider adapters/options, model-specific token/window accounting, safe route/model switching, scheduling, and managed-session migration. The [Linux rotation](testing.md) now verifies the built-in runtime and native media projection on Debian 13 x86-64 with controlled providers. Live inference on Linux, Windows, and macOS x86-64 execution remain unverified.
 
 ## Development deployment evidence
 

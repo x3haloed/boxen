@@ -4,6 +4,7 @@ extern crate cosmo_compat as _;
 mod agent_tools;
 mod chat;
 mod codex;
+mod context;
 mod inference;
 #[cfg(feature = "inference-probe")]
 mod inference_probe;
@@ -51,7 +52,8 @@ boxen [--data-dir PATH] untrust PUBLIC_KEY\n\
 boxen [--data-dir PATH] peers\n\
 boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--codex PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
-boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|openrouter]\n\
+boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|openrouter] [--context JSON]\n\
+boxen [--data-dir PATH] context HOST:PORT PUBLIC_KEY THREAD_ID JSON\n\
 boxen [--data-dir PATH] runs HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] watch HOST:PORT PUBLIC_KEY RUN_ID [--after SEQUENCE] [--once]\n\
 boxen [--data-dir PATH] cancel HOST:PORT PUBLIC_KEY RUN_ID\n\n\
@@ -194,6 +196,10 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
             );
         }
         "resident-create" => {
+            let context: crate::context::Settings = take_option(&mut args, "--context")?
+                .map(|s| serde_json::from_str(&s))
+                .transpose()?
+                .unwrap_or_else(crate::context::Settings::resident);
             let backend = take_option(&mut args, "--backend")?.unwrap_or_else(|| "codex".into());
             let auto = take_option(&mut args, "--auto-activate")?
                 .map(|v| v.parse::<bool>())
@@ -220,11 +226,14 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"resident_create","spec":{"backend":backend,"id":id,"name":args[2],"cwd":args[3],"model":if args[4]=="-" {""}else{&args[4]},"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
+                    serde_json::json!({"op":"resident_create","spec":{"backend":backend,"context":context,"id":id,"name":args[2],"cwd":args[3],"model":if args[4]=="-" {""}else{&args[4]},"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
                 )?
             );
         }
         "resident-update" => {
+            let context: Option<crate::context::Settings> = take_option(&mut args, "--context")?
+                .map(|s| serde_json::from_str(&s))
+                .transpose()?;
             let identity = take_option(&mut args, "--identity-file")?
                 .map(std::fs::read_to_string)
                 .transpose()?;
@@ -248,7 +257,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"resident_update","id":args[2],"patch":{"expected_revision":revision,"name":name,"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
+                    serde_json::json!({"op":"resident_update","id":args[2],"patch":{"expected_revision":revision,"context":context,"name":name,"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
                 )?
             );
         }
@@ -329,7 +338,21 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 )?
             );
         }
+        "context" if args.len() == 4 => {
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"context","thread_id":args[2],"args":serde_json::from_str::<serde_json::Value>(&args[3])?})
+                )?
+            );
+        }
         "start" => {
+            let context = take_option(&mut args, "--context")?
+                .map(|v| serde_json::from_str(&v))
+                .transpose()?;
             let backend = take_option(&mut args, "--backend")?.unwrap_or_else(|| "codex".into());
             let thread = take_option(&mut args, "--thread")?;
             let id = take_option(&mut args, "--id")?.unwrap_or(state::random_hex()?);
@@ -338,6 +361,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
             }
             let spec = jobs::Spec {
                 resident_id: None,
+                context,
                 id: id.clone(),
                 thread_id: thread.unwrap_or(id),
                 backend,

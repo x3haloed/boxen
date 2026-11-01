@@ -138,7 +138,7 @@ A summary-free mode needs a stricter contract than a template saying “preserve
 7. Preparing a new view does not install it. Installation names the source revision/ranges and succeeds atomically at a safe inference boundary. Failure leaves an inspectable source and a usable next step, without requiring an agent's receipt or authored memo before it can continue.
 8. Rollover/compaction preserves the canonical Boxen conversation, optional mailbox reply semantics, and outstanding effect uncertainty. It neither creates another resident nor resends incoming messages or completed effects.
 
-The built-in runtime currently keeps recent whole-run groups within a 512 KiB prior-message budget and reports omissions. That is an early summary-free projection, but it does not yet provide the token budgeting, deliberate selection, direct history tools, or authored checkpoint control proposed here. “Files remain readable through the shell” is a starting capability, not a finished recall experience.
+At the research checkpoint, the built-in runtime kept recent whole-run groups within a 512 KiB prior-message budget and reports omissions. That was an early summary-free projection and did not provide the token budgeting, deliberate selection, direct history tools, or authored checkpoint control proposed here. “Files remain readable through the shell” was a starting capability, not a finished recall experience. The subsequent [implemented context policies](../context.md) replace that stopgap; the research findings above remain historical evidence.
 
 ## The finite-window decision cannot be avoided
 

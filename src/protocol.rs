@@ -344,6 +344,11 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 owner,
                 serde_json::from_value::<Spec>(request["spec"].clone())?,
             )?)?),
+            "context" => jobs.context_operation(
+                owner,
+                request["thread_id"].as_str().ok_or("thread_id required")?,
+                request["args"].clone(),
+            ),
             "runtime_info" => Ok(jobs.runtime_info()),
             "mailbox_status" => Ok(jobs.mailboxes.status()),
             "mailbox_send" => {

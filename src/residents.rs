@@ -21,6 +21,8 @@ fn default_quota() -> usize {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Create {
+    #[serde(default = "crate::context::Settings::resident")]
+    pub context: crate::context::Settings,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -39,6 +41,8 @@ pub struct Create {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Resident {
+    #[serde(default = "crate::context::Settings::resident")]
+    pub context: crate::context::Settings,
     pub id: String,
     pub owner: String,
     pub machine_id: String,
@@ -57,6 +61,7 @@ pub struct Resident {
 }
 impl Resident {
     fn validate(&self) -> Result<()> {
+        self.context.validate()?;
         jobs::valid_id(&self.id)?;
         if !matches!(self.backend.as_str(), "codex" | "openrouter") {
             return Err("unsupported resident backend".into());
@@ -105,6 +110,7 @@ struct Stored {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Patch {
+    pub context: Option<crate::context::Settings>,
     pub expected_revision: u64,
     pub name: Option<String>,
     pub identity: Option<String>,
@@ -254,6 +260,7 @@ impl Residents {
             return Err("resident id already exists with different input or owner".into());
         }
         let resident = Resident {
+            context: initial.context.clone(),
             id: initial.id.clone(),
             owner: owner.into(),
             machine_id: self.machine_id.clone(),
@@ -325,6 +332,9 @@ impl Residents {
         }
         let mut stored = prior.clone();
         let r = &mut stored.resident;
+        if let Some(value) = patch.context {
+            r.context = value;
+        }
         if let Some(value) = patch.name {
             r.name = value;
         }
@@ -438,6 +448,7 @@ impl Residents {
                 owner,
                 id,
                 Patch {
+                    context: None,
                     expected_revision: input
                         .expected_revision
                         .ok_or("expected_revision required for writes")?,

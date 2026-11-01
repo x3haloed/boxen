@@ -32,6 +32,7 @@
   <label>Name<input id="residentName" required maxlength="100"></label>
   <label>Resident working directory<input id="residentCwd" placeholder="/absolute/path/on/that/machine" required></label>
   <label>Resident backend<select id="residentBackend"><option value="codex">Codex app-server</option><option value="openrouter">OpenRouter · built-in runtime</option></select></label>
+  <label>Built-in context policy<select id="residentContext"><option value="summary">Summary compaction</option><option value="verbatim">Verbatim continuity</option></select></label>
   <label>Resident model<input id="residentModel" placeholder="Executing machine’s configured default"></label>
   <label>Initial identity<textarea id="residentIdentity" rows="3"></textarea></label>
   <label>Initial memory<textarea id="residentMemory" rows="3"></textarea></label>
@@ -45,6 +46,7 @@
   <form id="editResident">
     <label>Saved name<input id="editName" required maxlength="100"></label>
     <label>Saved identity<textarea id="editIdentity" rows="3"></textarea></label>
+    <label>Built-in context policy<select id="editContext"><option value="summary">Summary compaction</option><option value="verbatim">Verbatim continuity</option></select></label>
     <label>Saved memory<textarea id="editMemory" rows="4"></textarea></label>
     <label>Saved quota (bytes)<input id="editQuota" type="number" min="1" max="262144" required></label>
     <button id="saveResident">Save identity and memory</button>
@@ -55,6 +57,7 @@
 <form id="work">
   <label>Working directory on executing machine<input id="cwd" placeholder="/absolute/path/on/that/machine" required></label>
   <label>Backend<select id="backend"><option value="codex">Codex app-server</option><option value="openrouter">OpenRouter · built-in runtime</option></select></label>
+  <label>Built-in context policy<select id="contextPolicy"><option value="summary">Summary compaction</option><option value="verbatim">Verbatim continuity</option></select></label>
   <label>Model<input id="model" placeholder="Executing machine’s configured default"></label>
   <p class="meta">Full access · files and tools belong to the executing machine.</p>
   <label id="subjectLabel" hidden>Subject<input id="mailSubject" value="Message" maxlength="256"></label>
@@ -79,6 +82,9 @@
 </details>
 <script>
 const $ = id => document.getElementById(id);
+$('residentContext').value='verbatim';
+$('backend').onchange=()=>controls();
+$('residentBackend').onchange=()=>controls();
 const token = location.hash.slice(1);
 if (token) { sessionStorage.setItem('boxen-token', token); history.replaceState(null, '', '/'); }
 const headers = {Authorization: 'Bearer ' + (token || sessionStorage.getItem('boxen-token') || ''), 'Content-Type':'application/json'};
@@ -120,12 +126,15 @@ function controls() {
   $('autoActivate').disabled=!connected||syncing||residentBusy;
   if(resident)$('autoActivate').checked=resident.auto_activate;
   $('send').disabled = !connected || syncing || submitting || residentBusy;
+  $('contextPolicy').disabled=!!resident||!!active||!!pendingStart||$('backend').value!=='openrouter';
   $('model').disabled=!!resident||!!selectedThread&&$('backend').value==='openrouter'; $('backend').disabled=!!selectedThread||!!pendingStart;
-  if(resident)$('backend').value=resident.backend||'codex';
+  if(resident){$('backend').value=resident.backend||'codex';$('contextPolicy').value=resident.context?.mode||'verbatim';}
   $('createResidentButton').disabled=!connected||residentBusy||submitting;
   $('createResidentButton').textContent=pendingResident?'Retry original resident creation':'Create resident';
   for(const input of $('createResident').querySelectorAll('input,textarea,select'))input.disabled=residentBusy||!!pendingResident;
-  for(const input of $('editResident').querySelectorAll('input,textarea,button'))input.disabled=!connected||syncing||residentBusy;
+  for(const input of $('editResident').querySelectorAll('input,textarea,select,button'))input.disabled=!connected||syncing||residentBusy;
+  $('residentContext').disabled=residentBusy||!!pendingResident||$('residentBackend').value!=='openrouter';
+  $('editContext').disabled=!connected||syncing||residentBusy||resident?.backend!=='openrouter';
   if(resident)$('residentInfo').textContent='Resident '+resident.id+' · machine '+resident.machine_id+' · stored revision '+resident.revision+' · '+resident.used_bytes+' / '+resident.quota_bytes+' bytes · editor based on revision '+editorRevision;
   $('peer').disabled=submitting||residentBusy;$('address').disabled=submitting||residentBusy;$('threads').disabled=!connected||submitting||residentBusy;$('connectButton').disabled=submitting||residentBusy;
   $('prompt').disabled = submissionPending||pendingMail?.resident===selectedThread;
@@ -210,6 +219,9 @@ function render(run,event) {
     return;
   }
   if(event.kind==='recovery_notice'){add('Recovery notice',event.data.detail);return;}
+  if(event.kind==='context_summary_started'){add('Compacting context','Preparing an attributed summary; execution remains owned by the daemon.');return;}
+  if(event.kind==='context_boundary'){add('Context view installed',JSON.stringify({mode:event.data.settings.mode,source_entries:event.data.source_count,selected:event.data.selected.length,masked:event.data.masked.length,excluded_bundles:event.data.excluded_bundles.length,fallback:event.data.fallback_reason}));return;}
+  if(event.kind==='context_summary_failed'){add('Compaction incident',event.data.reason);return;}
   if(event.kind==='backend_session_rebuilt'){add('Backend session rebuilt',event.data.detail);return;}
   if(event.kind==='activation_input'){add('Activation input · private',event.data.text);return;}
   if(event.kind==='user_message') { add('You',event.data.text);return; }
@@ -288,7 +300,7 @@ function loadResidentEditor() {
   $('residentDetails').hidden=!resident;
   if(!resident)return;
   editorRevision=resident.revision;
-  $('editName').value=resident.name;$('editIdentity').value=resident.identity;$('editMemory').value=resident.memory;$('editQuota').value=resident.quota_bytes;
+  $('editName').value=resident.name;$('editIdentity').value=resident.identity;$('editMemory').value=resident.memory;$('editQuota').value=resident.quota_bytes;$('editContext').value=resident.context?.mode||'verbatim';$('editContext').disabled=resident.backend!=='openrouter';
   $('residentEditStatus').textContent='';
 }
 // The executing daemon owns the history. Cursors belong to this rendered view:
@@ -370,6 +382,7 @@ async function refreshRecords(gen,destination) {
 async function showThread(thread, refresh=false) {
   detach();selectedThread=thread;currentRun=null;items=new Map();pending=new Map();cursors=new Map();$('transcript').replaceChildren();$('runStatus').textContent='';$('location').textContent='';save();
   mailMessages=new Map();residentCursor=0;clientCursor=0;const residentView=residents.some(r=>r.id===thread);$('messagesView').hidden=!residentView;$('activityTitle').textContent=residentView?'Private execution activity (not sent messages)':'Thread activity and response';$('activityView').open=!residentView;$('mailMessages').replaceChildren();const unsent=target?pendingMails[mailKey(target,thread)]:null;if(unsent){$('prompt').value=unsent.message.body;$('mailSubject').value=unsent.message.subject;}
+  $('contextPolicy').value=records.filter(r=>r.record.spec.thread_id===thread&&r.record.spec.context).at(-1)?.record.spec.context.mode||'summary';
   observing=true;syncing=true;loadResidentEditor();controls();const gen=generation,destination={...target};let attempt=0;
   // Refresh the catalog after each terminal run and while idle. Progress itself
   // always comes from the ordered stream, never from snapshot polling.
@@ -439,7 +452,7 @@ $('work').onsubmit=async event=>{
       await operation({op:'control',id:currentRun.record.spec.id,action:{type:'steer',text}});$('prompt').value='';return;
     }
     // Keep an uncertain submission's id and exact input so retry cannot duplicate it.
-    if(!pendingStart) { const run=id();pendingStart={id:run,thread_id:selectedThread||run,resident_id:residents.some(r=>r.id===selectedThread)?selectedThread:null,backend:$('backend').value,cwd:$('cwd').value,model:$('model').value,prompt:text}; rememberSubmission(); }
+    if(!pendingStart) { const run=id();pendingStart={id:run,thread_id:selectedThread||run,resident_id:residents.some(r=>r.id===selectedThread)?selectedThread:null,backend:$('backend').value,...($('backend').value==='openrouter'?{context:{...(records.filter(r=>r.record.spec.thread_id===selectedThread&&r.record.spec.context).at(-1)?.record.spec.context||{}),mode:$('contextPolicy').value}}:{}),cwd:$('cwd').value,model:$('model').value,prompt:text}; rememberSubmission(); }
     const snapshot=await operation({op:'start',spec:pendingStart},destination);if(gen!==generation)return;pendingStart=null;rememberSubmission();
     if(!records.some(r=>r.record.spec.id===snapshot.record.spec.id))records.push(snapshot);selectedThread=snapshot.record.spec.thread_id;$('prompt').value='';
     updateThreads();save();showThread(selectedThread);
@@ -451,7 +464,7 @@ $('createResident').onsubmit=async event=>{
   residentBusy=true;controls();const destination={...target},gen=generation;
   try {
     if(pendingResident&&pendingResident.target.peer!==destination.peer)throw new Error('A resident creation is unconfirmed on another machine. Reconnect there to retry its original ID.');
-    if(!pendingResident){pendingResident={target:destination,spec:{backend:$('residentBackend').value,id:id(),name:$('residentName').value,cwd:$('residentCwd').value,model:$('residentModel').value,identity:$('residentIdentity').value,memory:$('residentMemory').value,quota_bytes:Number($('residentQuota').value)}};localStorage.setItem('boxen-pending-resident',JSON.stringify(pendingResident));}
+    if(!pendingResident){pendingResident={target:destination,spec:{backend:$('residentBackend').value,context:{mode:$('residentContext').value},id:id(),name:$('residentName').value,cwd:$('residentCwd').value,model:$('residentModel').value,identity:$('residentIdentity').value,memory:$('residentMemory').value,quota_bytes:Number($('residentQuota').value)}};localStorage.setItem('boxen-pending-resident',JSON.stringify(pendingResident));}
     const resident=await operation({op:'resident_create',spec:pendingResident.spec},destination);
     pendingResident=null;localStorage.removeItem('boxen-pending-resident');
     if(gen!==generation)return;
@@ -465,7 +478,7 @@ $('editResident').onsubmit=async event=>{
   event.preventDefault();if(!connected||residentBusy)return;
   residentBusy=true;controls();const residentId=selectedThread,destination={...target};
   try{
-    const updated=await operation({op:'resident_update',id:residentId,patch:{expected_revision:editorRevision,name:$('editName').value,identity:$('editIdentity').value,memory:$('editMemory').value,quota_bytes:Number($('editQuota').value)}},destination);
+    const updated=await operation({op:'resident_update',id:residentId,patch:{expected_revision:editorRevision,context:{...(residents.find(r=>r.id===residentId)?.context||{}),mode:$('editContext').value},name:$('editName').value,identity:$('editIdentity').value,memory:$('editMemory').value,quota_bytes:Number($('editQuota').value)}},destination);
     if(selectedThread!==residentId||target.peer!==destination.peer)return;
     residents=residents.map(r=>r.id===residentId?updated:r);editorRevision=updated.revision;updateThreads();$('residentEditStatus').textContent='Saved revision '+updated.revision;
   }catch(error){$('residentEditStatus').textContent=error.message+' · Your edits are retained; reload stored values before reconciling and retrying.';}
