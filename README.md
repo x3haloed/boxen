@@ -52,6 +52,8 @@ Create a named resident without assigning a job. It has one canonical conversati
 
 See [the first resident](docs/residents.md) for continuity and [mailboxes](docs/mailboxes.md) for communication, activation, tools, CLI/API, and current limits. This first implementation stays on one selected host; synchronization and movement come later.
 
+The [host-local scheduler](docs/scheduling.md) wakes residents and existing anonymous threads once or on a recurring interval. The simple Schedules panel and `boxen schedule` command share the authenticated daemon API; jobs survive client disconnects and daemon restarts.
+
 The [built-in inference runtime](docs/inference.md) now supports OpenRouter text/tool and native media-reading workloads and mailbox residents alongside Codex. Select OpenRouter in the GUI or pass `--backend openrouter` to `start` or `resident-create`. The executing daemon reads its own OpenRouter key from `~/.boxen/credentials/openrouter.key`; credentials are not automatically distributed to peers.
 
 The [compaction research](docs/research/compaction.md) investigates context reduction that preserves original voice, including a required optional mode without summarization. Policy and defaults remain under design.

@@ -121,7 +121,7 @@ impl Source {
                         id: format!("{}:{}", snapshot.record.spec.id, event.seq),
                         at: event.at,
                         message: event.data,
-                        provenance: json!({"run_id":snapshot.record.spec.id,"thread_id":snapshot.record.spec.thread_id,"backend":snapshot.record.spec.backend,"model":if snapshot.record.spec.model.is_empty(){crate::inference::DEFAULT_MODEL}else{&snapshot.record.spec.model},"resident_id":snapshot.record.spec.resident_id}),
+                        provenance: json!({"run_id":snapshot.record.spec.id,"thread_id":snapshot.record.spec.thread_id,"backend":snapshot.record.spec.backend,"model":if snapshot.record.spec.model.is_empty(){crate::inference::DEFAULT_MODEL}else{&snapshot.record.spec.model},"resident_id":snapshot.record.spec.resident_id,"scheduled":snapshot.record.scheduled}),
                     });
                 } else {
                     events.push(json!({"id":format!("{}:{}",snapshot.record.spec.id,event.seq),"at":event.at,"kind":event.kind,"data":event.data}));

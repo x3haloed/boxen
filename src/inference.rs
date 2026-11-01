@@ -543,6 +543,7 @@ pub fn execute(
     history: History,
 ) -> Result<()> {
     let record = run.snapshot().record;
+    let trigger_context = record.trigger_context();
     let resident = record.resident;
     if let Some(recovery) = &record.recovery {
         run.append("recovery_notice", recovery.clone())?;
@@ -578,6 +579,7 @@ pub fn execute(
     if let Some(r) = &resident {
         system.push_str(&jobs.residents.instructions(r));
     }
+    system.push_str(&trigger_context);
     if let Some(recovery) = &record.recovery {
         system.push_str(&format!("\nRecovery incident: {recovery}"));
     }

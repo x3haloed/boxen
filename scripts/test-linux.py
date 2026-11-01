@@ -22,7 +22,7 @@ import tempfile
 import time
 
 SUITES = ["platform", "smoke", "workload", "recovery", "resident", "mailbox",
-          "logging", "inference-runtime", "compaction", "media", "inference-probe"]
+          "logging", "scheduler", "inference-runtime", "compaction", "media", "inference-probe"]
 
 
 def worker(binary):
@@ -146,6 +146,29 @@ def cross_host_check(ssh, remote, binary, peer_port, codex, model):
             assert [e['seq'] for e in events] == list(range(1, len(events) + 1))
             replay = [json.loads(line) for line in cli('watch', address, peer['key'], ident, '--once').splitlines()]
             assert replay == events
+            scheduled_wake = None
+            if not codex:
+                definition = {'id': os.urandom(32).hex(), 'name': 'Direct LAN scheduled follow-up',
+                              'target': {'type': 'thread', 'id': run['record']['spec']['thread_id']},
+                              'directions': 'SLOW scheduled LAN request', 'at_ms': int(time.time()*1000)+400}
+                cli('schedule', address, peer['key'], json.dumps({'action':'create','spec':definition}))
+                deadline = time.monotonic()+15
+                while time.monotonic()<deadline:
+                    job = json.loads(cli('schedule', address, peer['key'], json.dumps({'action':'get','id':definition['id']})))
+                    if job['last'] and job['last']['outcome']=='dispatched':
+                        break
+                    time.sleep(.05)
+                else:
+                    raise AssertionError(('LAN scheduled request was not accepted',job))
+                scheduled_id = job['last']['run_id']
+                scheduled_events = [json.loads(line) for line in cli('watch',address,peer['key'],scheduled_id,'--once').splitlines()]
+                assert any(e['kind']=='scheduled_event' and e['data']['schedule_id']==definition['id'] for e in scheduled_events)
+                assert any(e['kind']=='status' and e['data']['status']=='completed' for e in scheduled_events)
+                assert json.loads(cli('thread-result',address,peer['key'],scheduled_id))['response']=='Fixture result'
+                assert next(e['data']['id'] for e in scheduled_events if e['kind']=='backend_thread') == next(e['data']['id'] for e in events if e['kind']=='backend_thread')
+                assert [e['seq'] for e in scheduled_events] == list(range(1,len(scheduled_events)+1))
+                assert [json.loads(line) for line in cli('watch',address,peer['key'],scheduled_id,'--once').splitlines()] == scheduled_events
+                scheduled_wake = True
             if codex:
                 effect = subprocess.check_output(ssh + ['cat ' + shlex.quote(remote + '/proof.txt')], text=True, timeout=15)
                 assert effect == marker
@@ -158,7 +181,7 @@ def cross_host_check(ssh, remote, binary, peer_port, codex, model):
                 resumed = next(e['data']['id'] for e in more if e['kind']=='backend_thread')
                 assert original == resumed and not any(e['kind']=='backend_session_rebuilt' for e in more)
             return {'ok': True, 'transport': 'direct_tcp', 'direct_lan_verified': True, 'linux_address': address, 'local_address': f'{local_ip}:{local_peer}', 'bidirectional_ping': True, 'linux_workload': 'real Codex app-server' if codex else 'controlled Codex fixture', 'real_shell_effect_and_resume': bool(codex),
-                    'events': len(events), 'streamed_before_completion': True, 'command_output_deltas': first_output is not None, 'gap_free_replay': True}
+                    'scheduled_thread_wake_and_replay': scheduled_wake, 'events': len(events), 'streamed_before_completion': True, 'command_output_deltas': first_output is not None, 'gap_free_replay': True}
         finally:
             server.stdin.close()
             try:

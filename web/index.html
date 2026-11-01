@@ -65,6 +65,19 @@
   <button id="send">Start thread</button><button id="cancel" type="button" disabled>Cancel run</button>
   <button id="detach" type="button" disabled>Detach viewer</button>
 </form>
+<details id="schedulePanel"><summary>Schedules</summary>
+<p class="meta">Schedules run on the selected machine while this client is closed. A regular thread receives a request; a resident gets an independent activation.</p>
+<form id="scheduleForm">
+<label>Name<input id="scheduleName" required maxlength="100"></label>
+<label>Run at (your local time)<input id="scheduleAt" type="datetime-local" step="1" required></label>
+<label>Repeat every seconds (0 = one time)<input id="scheduleInterval" type="number" min="0" step="1" value="0" required></label>
+<label>Saved directions<textarea id="scheduleDirections" rows="3"></textarea></label>
+<p id="scheduleTarget" class="meta"></p>
+<button id="saveSchedule">Create schedule</button><button id="resetSchedule" type="button">New schedule</button>
+</form>
+<button id="refreshSchedules" type="button">Refresh schedules</button>
+<p id="scheduleStatus" role="status"></p><div id="scheduleList"></div>
+</details>
 <p id="runStatus" role="status" aria-live="polite"></p>
 <p class="meta" id="location"></p>
 <section id="messagesView" hidden aria-label="Mailbox messages">
@@ -97,6 +110,7 @@ const mailKey=(destination,resident)=>destination.peer+':'+resident;
 const savePendingMails=()=>localStorage.setItem('boxen-pending-mails',JSON.stringify(pendingMails));
 let residents=[], editorRevision=0, residentBusy=false;
 let pendingResident;try{pendingResident=JSON.parse(localStorage.getItem('boxen-pending-resident')||'null');}catch{}
+let editingSchedule=null, pendingSchedule=null, scheduleBusy=false;
 let pendingStart = null, syncing = false, observing = false;
 const pause = ms => new Promise(resolve=>setTimeout(resolve,ms));
 function unauthorized(response) { if(response.status===401) { const error=new Error("Local authorization changed. Open the control URL printed by the daemon.");error.authorization=true;throw error; } }
@@ -114,6 +128,10 @@ async function operation(request, destination=target) {
   return response.json();
 }
 function controls() {
+  $('saveSchedule').disabled=!connected||scheduleBusy||(!selectedThread&&!editingSchedule&&!pendingSchedule);
+  $('refreshSchedules').disabled=!connected||scheduleBusy;
+  $('scheduleTarget').textContent='Target: '+(editingSchedule?.definition.target.id||pendingSchedule?.request.spec?.target.id||selectedThread||'An existing thread or resident');
+
   const active = currentRun && !terminal(currentRun.status);
   const resident=residents.find(r=>r.id===selectedThread);
   const pendingMail=target?pendingMails[mailKey(target,selectedThread)]:null;
@@ -219,6 +237,7 @@ function render(run,event) {
     return;
   }
   if(event.kind==='recovery_notice'){add('Recovery notice',event.data.detail);return;}
+  if(event.kind==='scheduled_event'){add('Scheduled wake',JSON.stringify(event.data));return;}
   if(event.kind==='context_summary_started'){add('Compacting context','Preparing an attributed summary; execution remains owned by the daemon.');return;}
   if(event.kind==='context_boundary'){add('Context view installed',JSON.stringify({mode:event.data.settings.mode,source_entries:event.data.source_count,selected:event.data.selected.length,masked:event.data.masked.length,excluded_bundles:event.data.excluded_bundles.length,fallback:event.data.fallback_reason}));return;}
   if(event.kind==='context_summary_failed'){add('Compaction incident',event.data.reason);return;}
@@ -431,7 +450,7 @@ async function connect() {
 }
 $('connect').onsubmit=event=>{event.preventDefault();connect();};
 $('threads').onchange=()=>showThread($('threads').value,true);
-$('peer').onchange=()=>{detach();connected=false;selectedThread='';currentRun=null;pendingStart=null;records=[];residents=[];mailMessages.clear();$('messagesView').hidden=true;$('mailMessages').replaceChildren();updateThreads();$('transcript').replaceChildren();$('residentDetails').hidden=true;target={peer:$('peer').value,address:$('address').value};$('addressLabel').hidden=$('peer').value===identity;controls();};
+$('peer').onchange=()=>{editingSchedule=null;pendingSchedule=null;$('scheduleList').replaceChildren();$('saveSchedule').textContent='Create schedule';detach();connected=false;selectedThread='';currentRun=null;pendingStart=null;records=[];residents=[];mailMessages.clear();$('messagesView').hidden=true;$('mailMessages').replaceChildren();updateThreads();$('transcript').replaceChildren();$('residentDetails').hidden=true;target={peer:$('peer').value,address:$('address').value};$('addressLabel').hidden=$('peer').value===identity;controls();};
 $('work').onsubmit=async event=>{
   event.preventDefault();if(!connected||syncing)return;
   const gen=generation,destination={...target};
@@ -495,6 +514,40 @@ $('autoActivate').onchange=async()=>{
   const resident=residents.find(r=>r.id===selectedThread);if(!resident)return;
   try{const updated=await operation({op:'resident_update',id:resident.id,patch:{expected_revision:resident.revision,auto_activate:$('autoActivate').checked}});residents=residents.map(r=>r.id===updated.id?updated:r);if(editorRevision===resident.revision)editorRevision=updated.revision;controls();}catch(error){$('mailStatus').textContent=error.message;controls();}
 };
+
+function localScheduleTime(ms){return new Date(ms-new Date(ms).getTimezoneOffset()*60000).toISOString().slice(0,19);}
+$('scheduleAt').value=localScheduleTime(Date.now()+60000);
+async function refreshSchedules(){
+ const destination={...target},gen=generation;let after='',jobs=[],issues=[];
+ do {const page=await operation({op:'schedule',args:{action:'list',after_id:after,limit:20}},destination);if(gen!==generation)return;jobs.push(...page.jobs);if(!after)issues=page.issues||[];if(page.jobs.length<20)break;after=page.next_after_id;}while(after);
+ $('scheduleList').replaceChildren();
+ for(const issue of issues){const row=document.createElement('p');row.textContent='Schedule '+issue.id+' unavailable · '+issue.detail;$('scheduleList').append(row);}
+ for(const job of jobs){const row=document.createElement('p');row.append(document.createTextNode(job.definition.name+' · '+job.definition.target.type+' '+job.definition.target.id.slice(0,10)+' · '+(job.deleted?'deleted':job.enabled?'enabled':'paused/completed')+' · next '+(job.next_at_ms?new Date(job.next_at_ms).toLocaleString():'none')+' · last '+(job.last?.outcome||'none')+(job.unavailable?' · '+job.unavailable:'')));
+  if(!job.deleted){
+   const edit=document.createElement('button');edit.type='button';edit.textContent='Edit';edit.onclick=async()=>{scheduleBusy=true;controls();try{const current=await operation({op:'schedule',args:{action:'get',id:job.definition.id}},destination);if(gen!==generation)return;editingSchedule=current;pendingSchedule=null;$('scheduleName').value=current.definition.name;$('scheduleAt').value=localScheduleTime(current.next_at_ms||Date.now()+60000);editingSchedule.editorAt=$('scheduleAt').value;$('scheduleInterval').value=(current.definition.interval_ms||0)/1000;$('scheduleDirections').value=current.definition.directions;$('saveSchedule').textContent=current.next_at_ms?'Save schedule':'Schedule again';$('scheduleStatus').textContent='Editing revision '+current.revision;controls();}catch(e){$('scheduleStatus').textContent=e.message;}finally{scheduleBusy=false;controls();}};row.append(edit);
+   for(const [label,patch] of [...(job.next_at_ms?[[job.enabled?'Pause':'Resume',{enabled:!job.enabled}]]:[]),['Delete',{delete:true}]]){const button=document.createElement('button');button.type='button';button.textContent=label;button.onclick=async()=>{try{await operation({op:'schedule',args:{action:'update',id:job.definition.id,patch:{expected_revision:job.revision,...patch}}},destination);await refreshSchedules();}catch(e){$('scheduleStatus').textContent=e.message;}};row.append(button);}
+  }
+  $('scheduleList').append(row);
+ }
+}
+$('scheduleForm').onsubmit=async event=>{
+ event.preventDefault();if(scheduleBusy)return;const scheduleGeneration=generation;scheduleBusy=true;controls();
+ try{
+  if(!pendingSchedule){
+   const at=Date.parse($('scheduleAt').value),interval=Number($('scheduleInterval').value)*1000;
+   if(!Number.isSafeInteger(at)||!Number.isSafeInteger(interval))throw Error('The schedule needs a valid time and whole-second interval.');
+   let request;
+   if(editingSchedule){const patch={expected_revision:editingSchedule.revision,name:$('scheduleName').value,directions:$('scheduleDirections').value,interval_ms:interval};if($('scheduleAt').value!==editingSchedule.editorAt||!editingSchedule.next_at_ms)patch.at_ms=at;if(!editingSchedule.next_at_ms)patch.enabled=true;request={action:'update',id:editingSchedule.definition.id,patch};}
+   else {if(!selectedThread)throw Error('A schedule targets an existing thread or resident.');request={action:'create',spec:{id:id(),name:$('scheduleName').value,target:{type:residents.some(r=>r.id===selectedThread)?'resident':'thread',id:selectedThread},directions:$('scheduleDirections').value,at_ms:at,interval_ms:interval||null}};}
+   pendingSchedule={destination:{...target},request};
+  }
+  const accepted=await operation({op:'schedule',args:pendingSchedule.request},pendingSchedule.destination);
+  if(scheduleGeneration!==generation)return;pendingSchedule=null;editingSchedule=accepted;editingSchedule.editorAt=$('scheduleAt').value;$('saveSchedule').textContent='Save schedule';$('scheduleStatus').textContent='Schedule saved at revision '+accepted.revision+'. Accepted runs have independent execution lifetimes.';await refreshSchedules();
+ }catch(e){$('scheduleStatus').textContent='Schedule acceptance is unconfirmed or rejected: '+e.message+'. Retry retains the same id and input; get/history can confirm stored state.';}
+ finally{scheduleBusy=false;controls();}
+};
+$('refreshSchedules').onclick=()=>refreshSchedules().catch(e=>$('scheduleStatus').textContent=e.message);
+$('resetSchedule').onclick=()=>{editingSchedule=null;pendingSchedule=null;$('saveSchedule').textContent='Create schedule';$('scheduleStatus').textContent='A new definition gets a new id; an earlier unconfirmed definition may still exist. Refresh shows stored schedules.';controls();};
 $('cancel').onclick=async()=>{try{await operation({op:'control',id:currentRun.record.spec.id,action:{type:'cancel'}});$('runStatus').textContent='Cancellation requested; waiting for backend confirmation';}catch(error){$('runStatus').textContent=error.message;}};
 $('detach').onclick=()=>{detach();connected=false;controls();$('connection').textContent='Viewer detached. Execution continues; connect to reattach.';};
 $('ping').onclick=async()=>{try{const response=await fetch('/api/ping',{method:'POST',headers,body:JSON.stringify({...target,message:'hello from Boxen'})});const text=await response.text();if(!response.ok)throw new Error(text);$('pingResult').textContent=text;}catch(error){$('pingResult').textContent=error.message;}};

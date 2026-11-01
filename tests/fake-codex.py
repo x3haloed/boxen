@@ -97,6 +97,12 @@ def work(prompt):
                 if result["done"]:break
                 time.sleep(.05)
             assert result["response"]=="Fixture result"
+        if "SCHEDULE_SELF" in activation['directions']:
+            response,job=invoke("boxen_schedule",{"action":"create","spec":{"id":secrets.token_hex(32),"name":"Resident-owned future activation","directions":"Authored by the resident fixture","at_ms":int(time.time()*1000)+86400000}},180)
+            assert response["success"] and job["definition"]["target"]=={"type":"resident","id":resident_context["id"]}
+        if activation['directions'].startswith('SCHEDULE_SCOPE:'):
+            response,result=invoke("boxen_schedule",{"action":"get","id":activation['directions'].split(':',1)[1]},181)
+            assert not response['success'] and 'only the attached resident' in result['error']
         if not "RESIDENT_" in prompt: answer = "PRIVATE_NARRATION_ONLY"
     for number in range(30 if "SLOW" in prompt else 5):
         if cancel.wait(0.1):

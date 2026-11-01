@@ -1,6 +1,6 @@
 # Agreed design decisions
 
-These decisions describe the intended product and the first implementation slice. Later beta requirements remain binding even when early implementations support only simpler cases. Agent storage and scheduling topology remain undecided. The initial LAN implementation uses Rust and direct TCP with Noise authentication and encryption; this does not settle discovery or wide-area connectivity.
+These decisions describe the intended product and the first implementation slice. Later beta requirements remain binding even when early implementations support only simpler cases. Agent storage and cross-host scheduling topology remain undecided. The initial LAN implementation uses Rust and direct TCP with Noise authentication and encryption; this does not settle discovery or wide-area connectivity.
 
 ## Packaging and GUI ownership
 
@@ -87,7 +87,7 @@ Use destination-local files and explicit placement initially. Resident identity,
 
 The next slice adds the first resident: a named identity, one canonical conversation, and a quota-managed identity/memory store on an explicitly selected host. The [first built-in inference runtime](inference.md) now verifies text/tool execution and mailbox communication through OpenRouter. Native image, audio, video, and PDF reading is now implemented for compatible OpenRouter models/routes; broader provider coverage remains planned. Movement follows; parallel conversations, clones, and reintegration remain part of the beta requirements.
 
-The initial [LAN pairing prerequisite](p2p.md) now carries [remote Codex workloads with live event streaming](workloads.md). The executing daemon owns each run and its retained event sequence. A client can detach and reconnect; a daemon restart marks unfinished execution uncertain rather than retrying it automatically. Broader recovery, storage retention, scheduling, production enrollment UX, and wide-area connectivity remain open. The [built-in inference backend](inference.md) now adds OpenRouter text/tool workloads using the same run, observation, control, and mailbox authorities.
+The initial [LAN pairing prerequisite](p2p.md) now carries [remote Codex workloads with live event streaming](workloads.md). The executing daemon owns each run and its retained event sequence. A client can detach and reconnect; a daemon restart marks unfinished execution uncertain rather than retrying it automatically. Broader recovery, storage retention, production enrollment UX, and wide-area connectivity remain open. The [built-in inference backend](inference.md) now adds OpenRouter text/tool workloads using the same run, observation, control, and mailbox authorities.
 
 ## Recovery favors availability
 
@@ -105,7 +105,7 @@ The [mailbox implementation](mailboxes.md) now enforces these contracts for host
 
 ## Scheduling and heartbeat pattern
 
-An ordinary scheduler supports one-time future events and recurring jobs of different kinds. A heartbeat is a typical recurring-job pattern: for example, an hourly system ping to an agent carrying directions crafted and retained when the heartbeat job was defined. The scheduler determines when an event is due; the event handler determines its effect. A separate heartbeat-only scheduling subsystem is not the intended design. Independent resident activation is implemented; the general scheduler remains to be implemented.
+An ordinary scheduler supports one-time future events and recurring jobs of different kinds. A heartbeat is a typical recurring-job pattern: for example, an hourly system ping to an agent carrying directions crafted and retained when the heartbeat job was defined. The scheduler determines when an event is due; the event handler determines its effect. A separate heartbeat-only scheduling subsystem is not the intended design. The [host-local scheduler](scheduling.md) now implements one-time and anchored fixed-interval jobs for resident activation and ordinary identity-less thread requests. Both use existing execution and communication contracts. Overdue recurring ticks coalesce, active targets wait, and accepted work is reconciled without replay after restart. Cross-host ownership/movement and calendar recurrence remain planned.
 
 ## Causal agent-facing language
 

@@ -15,6 +15,7 @@ mod media;
 mod platform;
 mod protocol;
 mod residents;
+mod scheduler;
 mod state;
 mod web;
 
@@ -53,6 +54,7 @@ boxen [--data-dir PATH] peers\n\
 boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--codex PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
 boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|openrouter] [--context JSON]\n\
+boxen [--data-dir PATH] schedule HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] context HOST:PORT PUBLIC_KEY THREAD_ID JSON\n\
 boxen [--data-dir PATH] runs HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] watch HOST:PORT PUBLIC_KEY RUN_ID [--after SEQUENCE] [--once]\n\
@@ -335,6 +337,17 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &args[0],
                     &args[1],
                     serde_json::json!({"op":"thread_result","id":args[2]})
+                )?
+            );
+        }
+        "schedule" if args.len() == 3 => {
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"schedule","args":serde_json::from_str::<serde_json::Value>(&args[2])?})
                 )?
             );
         }

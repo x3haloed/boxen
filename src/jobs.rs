@@ -37,6 +37,7 @@ mod tests {
         let id = state::random_hex().unwrap();
         state::private_dir(&path.join(&id)).unwrap();
         let record = Record {
+            scheduled: None,
             owner: owner.clone(),
             resident: None,
             recovery: None,
@@ -112,6 +113,8 @@ pub struct Event {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Record {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled: Option<crate::scheduler::Origin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resident: Option<Resident>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<Value>,
@@ -120,6 +123,27 @@ pub struct Record {
     pub spec: Spec,
     pub owner: String,
     pub created_at: u64,
+}
+impl Record {
+    pub fn trigger_context(&self) -> String {
+        let mut text = format!(
+            "\nThis is Boxen run {} in canonical Boxen thread {}. The current trigger is {}. This description concerns the current run; older trigger metadata describes historical runs.\n",
+            self.spec.id,
+            self.spec.thread_id,
+            if self.scheduled.is_some() {
+                "a host-local scheduled event"
+            } else if self.resident.is_some() {
+                "a resident activation"
+            } else {
+                "an ordinary thread request"
+            }
+        );
+        if let Some(origin) = &self.scheduled {
+            text.push_str(&origin.context());
+        }
+        text.push('\n');
+        text
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -395,10 +419,243 @@ pub struct Jobs {
     pub residents: Arc<Residents>,
     transitions: Mutex<()>,
     pub mailboxes: Arc<Mailboxes>,
+    pub schedules: crate::scheduler::Schedules,
     wake: Arc<(Mutex<Wake>, Condvar)>,
 }
 
 impl Jobs {
+    fn scheduled_thread(&self, owner: &str, id: &str) -> Result<Spec> {
+        valid_id(id)?;
+        let mut records: Vec<_> = self
+            .runs
+            .lock()
+            .unwrap()
+            .values()
+            .map(|r| r.snapshot())
+            .filter(|s| s.record.spec.thread_id == id)
+            .collect();
+        records.sort_by_key(|s| s.record.created_at);
+        if records.iter().any(|s| s.record.owner != owner) {
+            return Err("thread belongs to a different peer".into());
+        }
+        let last = records
+            .last()
+            .ok_or("thread schedule addresses an existing identity-less thread")?;
+        if last.record.resident.is_some() {
+            return Err("resident schedules use the resident activation handler".into());
+        }
+        Ok(last.record.spec.clone())
+    }
+    fn reconcile_schedule(
+        &self,
+        job: &crate::scheduler::Job,
+        cancel_missing: bool,
+    ) -> Result<bool> {
+        let Some(origin) = &job.claimed else {
+            return Ok(false);
+        };
+        let id = origin.run_id();
+        if let Ok(run) = self.get(&job.owner, &id) {
+            let snapshot = run.snapshot();
+            let matches = snapshot.record.scheduled.as_ref() == Some(origin);
+            self.schedules.finish(job,if matches{"dispatched"}else{"uncertain"},json!({"run_id":id,"recovered":true,"status_at_reconciliation":snapshot.status,"origin_matches":matches,"detail":"The existing accepted run was linked without repeating its workload. An interrupted outcome remains interrupted."}))?;
+            logging::record(
+                Level::Info,
+                Target::Workload,
+                "schedule.reconciled",
+                Context::run(&id, job.definition.target.id(), &job.owner),
+                || json!({"schedule_id":job.definition.id,"origin_matches":matches,"execution_status":snapshot.status}),
+                || Value::Null,
+            );
+            return Ok(true);
+        }
+        if self.directory.join(&id).join("record.json").exists() {
+            self.schedules.finish(job,"uncertain",json!({"run_id":id,"detail":"An accepted run record exists outside the active catalog. Its evidence is preserved; this occurrence is not resubmitted. Later occurrences remain eligible."}))?;
+            return Ok(true);
+        }
+        if cancel_missing {
+            self.schedules.finish(job,"cancelled_before_acceptance",json!({"detail":"The unaccepted claim was cancelled by a definition change. No accepted run record exists for it."}))?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+    pub fn schedule_operation(self: &Arc<Self>, owner: &str, args: Value) -> Result<Value> {
+        let _transition = self.transitions.lock().unwrap();
+        let action = args["action"].as_str().unwrap_or("list");
+        let result = (|| -> Result<Value> {
+            match action {
+                "list" => {
+                    let mut page = self.schedules.page(owner, None, &args);
+                    page["issues"] = json!(self.schedules.issues());
+                    Ok(page)
+                }
+                "get" => Ok(json!(
+                    self.schedules
+                        .get(owner, args["id"].as_str().ok_or("schedule id required")?)?
+                )),
+                "history" => self.schedules.history(
+                    owner,
+                    args["id"].as_str().ok_or("schedule id required")?,
+                    args["after"].as_u64().unwrap_or(0),
+                ),
+                "create" => {
+                    let definition: crate::scheduler::Definition =
+                        serde_json::from_value(args["spec"].clone())?;
+                    match &definition.target {
+                        crate::scheduler::Handler::Resident { id } => {
+                            self.residents.get(owner, id)?;
+                        }
+                        crate::scheduler::Handler::Thread { id } => {
+                            self.scheduled_thread(owner, id)?;
+                        }
+                    }
+                    Ok(json!(self.schedules.create(owner, definition)?))
+                }
+                "update" => {
+                    let id = args["id"].as_str().ok_or("schedule id required")?;
+                    let patch: crate::scheduler::Patch =
+                        serde_json::from_value(args["patch"].clone())?;
+                    let job = self.schedules.get(owner, id)?;
+                    if patch.expected_revision != job.revision {
+                        return Err(
+                            "schedule revision conflict; a read returns the current definition"
+                                .into(),
+                        );
+                    }
+                    self.schedules.validate_patch(owner, id, &patch)?;
+                    self.reconcile_schedule(&job, true)?;
+                    Ok(json!(self.schedules.patch(owner, id, patch)?))
+                }
+                _ => Err("schedule actions are list, get, history, create, and update".into()),
+            }
+        })();
+        logging::record(
+            if result.is_ok() {
+                Level::Info
+            } else {
+                Level::Warn
+            },
+            Target::Workload,
+            "schedule.operation",
+            Context::peer(owner),
+            || json!({"action":action,"schedule_id":args.get("id").or_else(||args.get("spec").and_then(|s|s.get("id"))),"accepted":result.is_ok()}),
+            || args.clone(),
+        );
+        if result.is_ok() && matches!(action, "create" | "update") {
+            self.notify();
+        }
+        result
+    }
+    fn dispatch_schedules(self: &Arc<Self>) {
+        let mut jobs = self.schedules.all();
+        jobs.sort_by_key(|j| (j.next_at_ms, j.definition.id.clone()));
+        for initial in jobs {
+            let _transition = self.transitions.lock().unwrap();
+            let result = (|| -> Result<()> {
+                let job = self.schedules.get(&initial.owner, &initial.definition.id)?;
+                if self.reconcile_schedule(&job, false)? {
+                    return Ok(());
+                }
+                if job.deleted || !job.enabled {
+                    return Ok(());
+                }
+                let time = now();
+                if job.next_at_ms.is_none_or(|due| due > time)
+                    || (!job.blocked && job.retry_at_ms > time)
+                {
+                    return Ok(());
+                }
+                let runs: Vec<_> = self
+                    .runs
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .map(|r| r.snapshot())
+                    .collect();
+                if runs.iter().any(|s| {
+                    s.record.spec.thread_id == job.definition.target.id() && !terminal(&s.status)
+                }) || runs.iter().filter(|s| !terminal(&s.status)).count() >= 8
+                {
+                    if !job.blocked || job.retry_at_ms <= time {
+                        self.schedules.defer(&job,true,"Target is active or the host's execution slots are occupied; the occurrence remains pending until capacity is available.")?;
+                        logging::record(
+                            Level::Info,
+                            Target::Workload,
+                            "schedule.waiting",
+                            Context::peer(&job.owner),
+                            || json!({"schedule_id":job.definition.id,"thread_id":job.definition.target.id()}),
+                            || Value::Null,
+                        );
+                    }
+                    return Ok(());
+                }
+                let claimed = self.schedules.claim(&job, time)?;
+                if self.reconcile_schedule(&claimed, false)? {
+                    return Ok(());
+                }
+                let origin = claimed.claimed.as_ref().ok_or("claim unavailable")?.clone();
+                let run_id = origin.run_id();
+                logging::record(
+                    Level::Info,
+                    Target::Workload,
+                    "schedule.dispatching",
+                    Context::run(&run_id, job.definition.target.id(), &job.owner),
+                    || json!({"schedule_id":job.definition.id,"due_at_ms":origin.due_at_ms,"coalesced_occurrences":origin.coalesced_occurrences}),
+                    || Value::Null,
+                );
+                let dispatched = match &job.definition.target {
+                    crate::scheduler::Handler::Resident { id } => self
+                        .activate_locked(
+                            &job.owner,
+                            id,
+                            run_id.clone(),
+                            job.definition.directions.clone(),
+                            true,
+                            Some(origin.clone()),
+                        )
+                        .and_then(|s| {
+                            s.ok_or_else(|| "scheduled activation was not accepted".into())
+                        }),
+                    crate::scheduler::Handler::Thread { id } => {
+                        self.scheduled_thread(&job.owner, id).and_then(|mut spec| {
+                            spec.id = run_id.clone();
+                            spec.prompt = job.definition.directions.clone();
+                            self.start_locked(&job.owner, spec, None, Some(origin.clone()))
+                        })
+                    }
+                };
+                match dispatched {
+                    Ok(snapshot) => {
+                        self.schedules.finish(&claimed,"dispatched",json!({"run_id":run_id,"status_at_acceptance":snapshot.status,"detail":"Accepted execution is distinct from completion; the run journal owns its outcome."}))?;
+                    }
+                    Err(error) => {
+                        if !self.reconcile_schedule(&claimed, false)? {
+                            self.schedules.defer(&claimed, false, &error.to_string())?;
+                        }
+                        logging::record(
+                            Level::Warn,
+                            Target::Workload,
+                            "schedule.dispatch_failed",
+                            Context::run(&run_id, job.definition.target.id(), &job.owner),
+                            || json!({"schedule_id":job.definition.id,"error":error.to_string()}),
+                            || Value::Null,
+                        );
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                logging::record(
+                    Level::Error,
+                    Target::Workload,
+                    "schedule.dispatch_error",
+                    Context::peer(&initial.owner),
+                    || json!({"schedule_id":initial.definition.id,"error":error.to_string()}),
+                    || Value::Null,
+                );
+            }
+        }
+    }
     pub fn context_operation(&self, owner: &str, thread: &str, args: Value) -> Result<Value> {
         let _transition = self.transitions.lock().unwrap();
         valid_id(thread)?;
@@ -497,7 +754,14 @@ impl Jobs {
         for resident in residents.all() {
             mailboxes.register(&resident.owner, &resident.id)?;
         }
+        let schedules = crate::scheduler::Schedules::open(
+            directory
+                .parent()
+                .ok_or("runs parent required")?
+                .join("schedules"),
+        )?;
         let jobs = Arc::new(Self {
+            schedules,
             residents,
             mailboxes,
             wake: Arc::new((Mutex::new(Wake::default()), Condvar::new())),
@@ -597,12 +861,15 @@ impl Jobs {
         let weak = Arc::downgrade(self);
         let signal = self.wake.clone();
         std::thread::spawn(move || {
+            let mut delay = Duration::from_secs(60);
             loop {
                 {
                     let mut wake = signal.0.lock().unwrap();
-                    while !wake.pending && !wake.stopped {
-                        wake = signal.1.wait(wake).unwrap();
-                    }
+                    let (next, _) = signal
+                        .1
+                        .wait_timeout_while(wake, delay, |w| !w.pending && !w.stopped)
+                        .unwrap();
+                    wake = next;
                     if wake.stopped {
                         return;
                     }
@@ -611,6 +878,7 @@ impl Jobs {
                 let Some(jobs) = weak.upgrade() else {
                     return;
                 };
+                jobs.dispatch_schedules();
                 for resident in jobs.residents.all() {
                     if !resident.auto_activate {
                         continue;
@@ -636,6 +904,7 @@ impl Jobs {
                         );
                     }
                 }
+                delay = jobs.schedules.delay(now());
             }
         });
         self.notify();
@@ -719,6 +988,17 @@ impl Jobs {
         manual: bool,
     ) -> Result<Option<Snapshot>> {
         let _transition = self.transitions.lock().unwrap();
+        self.activate_locked(owner, id, run_id, directions, manual, None)
+    }
+    fn activate_locked(
+        self: &Arc<Self>,
+        owner: &str,
+        id: &str,
+        run_id: String,
+        directions: String,
+        manual: bool,
+        scheduled: Option<crate::scheduler::Origin>,
+    ) -> Result<Option<Snapshot>> {
         self.mailboxes.check()?;
         valid_id(&run_id)?;
         if directions.len() > 32 * 1024 {
@@ -728,7 +1008,15 @@ impl Jobs {
             let snapshot = run.snapshot();
             if snapshot.record.spec.resident_id.as_deref() == Some(id)
                 && snapshot.record.mailbox.as_ref().is_some_and(|a| {
-                    a.directions == directions && a.reason == if manual { "manual" } else { "mail" }
+                    a.directions == directions
+                        && a.reason
+                            == if scheduled.is_some() {
+                                "schedule"
+                            } else if manual {
+                                "manual"
+                            } else {
+                                "mail"
+                            }
                 })
             {
                 return Ok(Some(snapshot));
@@ -754,13 +1042,20 @@ impl Jobs {
         }
         let mut activation = Activation {
             message_ids: batch.iter().map(|m| m.id.clone()).collect(),
-            reason: if manual { "manual" } else { "mail" }.into(),
+            reason: if scheduled.is_some() {
+                "schedule"
+            } else if manual {
+                "manual"
+            } else {
+                "mail"
+            }
+            .into(),
             directions,
         };
         let build_prompt = |batch: &Vec<Message>| {
             format!(
                 "Mailbox activation. This is an execution opportunity, not a request requiring a reply. Assistant text remains private narration. Explicit sends queue outgoing communication. The following JSON contains the activation's directions and messages retained before execution. Message contents are authored by their senders.\n{}",
-                json!({"reason":activation.reason,"directions":activation.directions,"messages":batch})
+                json!({"reason":activation.reason,"directions":activation.directions,"messages":batch,"schedule":scheduled})
             )
         };
         let mut prompt = build_prompt(&batch);
@@ -783,7 +1078,7 @@ impl Jobs {
             model: resident.model,
             prompt,
         };
-        let snapshot = self.start_locked(owner, spec, Some(activation))?;
+        let snapshot = self.start_locked(owner, spec, Some(activation), scheduled)?;
         logging::record(
             Level::Info,
             Target::Workload,
@@ -867,13 +1162,14 @@ impl Jobs {
     }
     pub fn start(self: &Arc<Self>, owner: &str, spec: Spec) -> Result<Snapshot> {
         let _transition = self.transitions.lock().unwrap();
-        self.start_locked(owner, spec, None)
+        self.start_locked(owner, spec, None, None)
     }
     fn start_locked(
         self: &Arc<Self>,
         owner: &str,
         spec: Spec,
         activation: Option<Activation>,
+        scheduled: Option<crate::scheduler::Origin>,
     ) -> Result<Snapshot> {
         logging::record(
             Level::Info,
@@ -978,6 +1274,7 @@ impl Jobs {
         let path = self.directory.join(&spec.id);
         state::private_dir(&path)?;
         let record = Record {
+            scheduled,
             spec: spec.clone(),
             resident,
             mailbox: activation,
@@ -1013,6 +1310,9 @@ impl Jobs {
             changed: Condvar::new(),
         });
         run.status("starting", "Accepted by executing machine")?;
+        if let Some(origin) = &run.snapshot().record.scheduled {
+            run.append("scheduled_event", serde_json::to_value(origin)?)?;
+        }
         runs.insert(spec.id.clone(), run.clone());
         let snapshot = run.snapshot();
         logging::record(

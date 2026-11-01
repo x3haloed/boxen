@@ -262,6 +262,7 @@ impl Rpc {
                 message["params"]["tool"].as_str(),
                 Some(
                     "boxen_continuity"
+                        | "boxen_schedule"
                         | "boxen_mailbox"
                         | "boxen_send_message"
                         | "boxen_thread_request"
@@ -338,6 +339,7 @@ pub fn execute(
 ) -> Result<()> {
     let residents = jobs.residents.clone();
     let record = run.snapshot().record;
+    let trigger_context = record.trigger_context();
     let resident = record.resident;
     if let Some(recovery) = &record.recovery {
         run.append("recovery_notice", recovery.clone())?;
@@ -471,7 +473,7 @@ pub fn execute(
     run.status("running", "Starting Codex turn")?;
     let response = rpc.request(
         "turn/start",
-        json!({"threadId":thread,"input":[{"type":"text","text":spec.prompt}],"summary":"auto"}),
+        json!({"threadId":thread,"input":[{"type":"text","text":spec.prompt},{"type":"text","text":format!("Boxen provides the following current-run metadata independently of the request author. {}",trigger_context)}],"summary":"auto"}),
     )?;
     rpc.turn = response["turn"]["id"].as_str().map(str::to_owned);
     if !rpc.finished {
