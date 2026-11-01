@@ -24,6 +24,7 @@ struct Saved {
     workspace: Workspace,
     destinations: Vec<Destination>,
     selected: usize,
+    hidden_machines: HashSet<String>,
     drafts: Vec<(ThreadKey, String)>,
     pending: Vec<Pending>,
 }
@@ -782,6 +783,64 @@ fn new_id() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn thread_rows(
+    ui: &mut egui::Ui,
+    data: &Data,
+    actions: &mut Vec<Action>,
+    dest: &Destination,
+    query: &str,
+) {
+    if let Some(error) = data.errors.get(&dest.key) {
+        ui.colored_label(egui::Color32::LIGHT_RED, format!("Unreachable · {error}"));
+    }
+    let Some(threads) = data.catalogs.get(&dest.key) else {
+        ui.weak(if dest.address.is_empty() && dest.key != data.local_key {
+            "An address is needed in Commands → Machine connections."
+        } else {
+            "Connecting…"
+        });
+        return;
+    };
+    if threads.is_empty() {
+        ui.weak("No anonymous threads on this machine.");
+        return;
+    }
+    let mut matches = false;
+    for thread in threads
+        .iter()
+        .filter(|t| t.title.to_lowercase().contains(query))
+    {
+        matches = true;
+        let selected = data.selected_thread.as_ref() == Some(&thread.key);
+        let response = ui
+            .push_id((&thread.key.peer, &thread.key.id), |ui| {
+                ui.add(
+                    egui::Button::selectable(selected, &thread.title)
+                        .wrap()
+                        .min_size(egui::vec2(ui.available_width(), 32.)),
+                )
+            })
+            .inner;
+        if response.double_clicked() {
+            actions.push(Action::Open(thread.key.clone(), true));
+        } else if response.clicked() {
+            actions.push(Action::Open(thread.key.clone(), false));
+        }
+        response.on_hover_text(format!(
+            "{}\n{}",
+            thread.key.id,
+            thread
+                .runs
+                .last()
+                .and_then(|r| r["status"].as_str())
+                .unwrap_or("")
+        ));
+    }
+    if !matches {
+        ui.weak("No matching threads.");
+    }
+}
+
 struct Viewer<'a> {
     data: &'a mut Data,
     actions: &'a mut Vec<Action>,
@@ -859,58 +918,123 @@ impl TabViewer for Viewer<'_> {
                 });
             }
             Pane::Threads => {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.data.filter)
-                        .hint_text("Filter threads…")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.separator();
-                if let Some(dest) = self.data.saved.destinations.get(self.data.saved.selected) {
-                    if let Some(error) = self.data.errors.get(&dest.key) {
-                        ui.colored_label(
-                            egui::Color32::LIGHT_RED,
-                            format!("Unreachable · {error}"),
-                        );
-                    }
-                    let query = self.data.filter.to_lowercase();
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            let list = self.data.catalogs.get(&dest.key);
-                            if list.is_none() {
-                                ui.weak("Connecting…");
-                            } else if list.is_some_and(|l| l.is_empty()) {
-                                ui.weak("No anonymous threads on this machine.");
-                            }
-                            for thread in list
-                                .into_iter()
-                                .flatten()
-                                .filter(|t| t.title.to_lowercase().contains(&query))
+                ui.horizontal(|ui| {
+                    let search_width =
+                        (ui.available_width() - 28. - ui.spacing().item_spacing.x).max(24.);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.data.filter)
+                            .hint_text("Filter threads…")
+                            .desired_width(search_width),
+                    );
+                    let response = ui
+                        .add(egui::Button::new("").min_size(egui::vec2(28., 24.)))
+                        .on_hover_text("Filter machines");
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            "Filter machines",
+                        )
+                    });
+                    let center = response.rect.center();
+                    let active = self
+                        .data
+                        .saved
+                        .destinations
+                        .iter()
+                        .any(|d| self.data.saved.hidden_machines.contains(&d.key));
+                    let color = if active {
+                        ui.visuals().selection.stroke.color
+                    } else {
+                        ui.visuals().widgets.inactive.fg_stroke.color
+                    };
+                    ui.painter().add(egui::Shape::closed_line(
+                        vec![
+                            center + egui::vec2(-6., -5.),
+                            center + egui::vec2(6., -5.),
+                            center + egui::vec2(2., 0.),
+                            center + egui::vec2(2., 5.),
+                            center + egui::vec2(-2., 6.),
+                            center + egui::vec2(-2., 0.),
+                        ],
+                        egui::Stroke::new(1.3, color),
+                    ));
+                    egui::Popup::menu(&response)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            let destinations = &self.data.saved.destinations;
+                            let hidden = &mut self.data.saved.hidden_machines;
+                            let count = destinations
+                                .iter()
+                                .filter(|d| !hidden.contains(&d.key))
+                                .count();
+                            let mut all = count == destinations.len();
+                            if ui
+                                .add(
+                                    egui::Checkbox::new(&mut all, "All")
+                                        .indeterminate(count > 0 && count < destinations.len()),
+                                )
+                                .changed()
                             {
-                                let selected =
-                                    self.data.selected_thread.as_ref() == Some(&thread.key);
-                                let response = ui.add(
-                                    egui::Button::selectable(selected, &thread.title)
-                                        .wrap()
-                                        .min_size(egui::vec2(ui.available_width(), 32.)),
-                                );
-                                if response.double_clicked() {
-                                    self.actions.push(Action::Open(thread.key.clone(), true));
-                                } else if response.clicked() {
-                                    self.actions.push(Action::Open(thread.key.clone(), false));
+                                for d in destinations {
+                                    if all {
+                                        hidden.remove(&d.key);
+                                    } else {
+                                        hidden.insert(d.key.clone());
+                                    }
                                 }
-                                response.on_hover_text(format!(
-                                    "{}\n{}",
-                                    thread.key.id,
-                                    thread
-                                        .runs
-                                        .last()
-                                        .map(|r| r["status"].as_str().unwrap_or(""))
-                                        .unwrap_or("")
-                                ));
+                            }
+                            ui.separator();
+                            for dest in destinations {
+                                let mut checked = !hidden.contains(&dest.key);
+                                if ui
+                                    .push_id(&dest.key, |ui| ui.checkbox(&mut checked, &dest.label))
+                                    .inner
+                                    .changed()
+                                {
+                                    if checked {
+                                        hidden.remove(&dest.key);
+                                    } else {
+                                        hidden.insert(dest.key.clone());
+                                    }
+                                }
                             }
                         });
-                }
+                });
+                ui.separator();
+                let destinations: Vec<_> = self
+                    .data
+                    .saved
+                    .destinations
+                    .iter()
+                    .filter(|d| !self.data.saved.hidden_machines.contains(&d.key))
+                    .cloned()
+                    .collect();
+                let query = self.data.filter.to_lowercase();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if destinations.is_empty() {
+                            ui.weak(if self.data.saved.destinations.is_empty() {
+                                "Connecting to machines…"
+                            } else {
+                                "No machines selected."
+                            });
+                        }
+                        let grouped = destinations.len() > 1;
+                        for dest in &destinations {
+                            if grouped {
+                                egui::CollapsingHeader::new(&dest.label)
+                                    .id_salt(("thread-machine", &dest.key))
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        thread_rows(ui, self.data, self.actions, dest, &query);
+                                    });
+                            } else {
+                                thread_rows(ui, self.data, self.actions, dest, &query);
+                            }
+                        }
+                    });
             }
             Pane::Thread(key) => {
                 let Some(thread) = find_thread(self.data, key) else {
@@ -1120,20 +1244,6 @@ impl eframe::App for Desktop {
                 if !self.ready && ui.button("Reconnect daemon").clicked() {
                     self.connect();
                 }
-                egui::ComboBox::from_id_salt("machine")
-                    .selected_text(
-                        self.data
-                            .saved
-                            .destinations
-                            .get(self.data.saved.selected)
-                            .map(|d| d.label.as_str())
-                            .unwrap_or("No daemon"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (i, d) in self.data.saved.destinations.iter().enumerate() {
-                            ui.selectable_value(&mut self.data.saved.selected, i, &d.label);
-                        }
-                    });
                 if ui.button("New thread").clicked() {
                     self.new_thread = true;
                 }

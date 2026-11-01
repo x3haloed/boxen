@@ -30,7 +30,7 @@ Boxen home; `--url http://127.0.0.1:PORT` selects another loopback control port.
 Capabilities are read from the private file, never command-line arguments or
 query strings, and the client rejects non-loopback origins.
 
-The machine selector includes this machine and already-paired peers discovered
+The Threads pane includes this machine and already-paired peers discovered
 from the daemon. `lan-peer.json`, when present, supplies the development peer's
 address; otherwise **Commands → Machine connections** sets its address. The
 optional `--peer PUBLIC_KEY --address HOST:PORT` overrides one peer's address.
@@ -40,6 +40,12 @@ A peer address locates an already-pinned identity; it grants no new trust.
 
 - The thread list contains anonymous conversations only, grouped by canonical
   Boxen thread ID. An identity attachment in any run excludes the whole thread.
+- Machines appear as collapsible groups inside the Threads pane. The small funnel
+  button beside **Filter threads…** opens machine checkboxes and **All**. Unchecking
+  a machine hides its group; exactly one checked machine displays a plain thread
+  list. No checked machines displays an empty state. Machine visibility is saved
+  across launches and does not close tabs or stop observing open conversations.
+  The text filter searches threads within the visible machines.
 - A single click previews a thread in an italic tab. Another single click replaces
   that preview, wherever it has been docked. There is at most one preview across
   all machines, groups and floating surfaces.
@@ -55,8 +61,8 @@ A peer address locates an already-pinned identity; it grants no new trust.
   Typing filters commands and threads; arrows select, Enter opens, Escape closes.
   **Show thread list** restores a closed list; **Reset docking layout** restores
   the sidebar while preserving open conversations and drafts.
-- **New thread** starts an anonymous request on the selected machine with an
-  explicit destination-local working directory and runtime. The conversation
+- **New thread** starts an anonymous request on the machine selected in its
+  dialog, with an explicit destination-local working directory and runtime. The conversation
   composer sends a follow-up, or steering while a run is active. **⌘/Ctrl + Enter**
   submits; cancellation is a separate control.
 
@@ -117,8 +123,9 @@ these checks do not claim real-model inference evidence.
 
 Native UI checks additionally exercise preview/pin, palette search/Enter,
 message submission with live remote activity, moving conversation and list panes
-via tab menus, and saved workspace restoration. OS-level drag automation did not
-produce a drag on this host; pointer-event docking tests supply that interaction
+via tab menus, saved workspace restoration, machine accordion collapse, checkbox
+filtering (including All/none), single-machine plain lists, and thread search.
+OS-level drag automation did not produce a drag on this host; pointer-event docking tests supply that interaction
 coverage, while actual native tab-menu moves verify the resulting layout.
 
 A macOS ARM64 idle sample with two conversation panes and two discovered machines
