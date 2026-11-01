@@ -1,0 +1,365 @@
+use crate::model::Destination;
+use eframe::egui;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    io::{BufRead, BufReader},
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+    },
+    time::Duration,
+};
+
+#[derive(Clone)]
+pub struct Client {
+    origin: String,
+    token: String,
+    agent: ureq::Agent,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Pending {
+    pub destination: Destination,
+    pub spec: Value,
+}
+pub enum Update {
+    Discovered(Result<Value, String>),
+    Catalog(Destination, Result<Vec<Value>, String>),
+    Batch(String, u64, Value),
+    WatchError(String, u64, String),
+    Submitted(String, Result<Value, String>),
+    Controlled(String, Destination, String, Result<Value, String>),
+}
+pub struct Bus {
+    pub tx: SyncSender<Update>,
+    pub rx: Receiver<Update>,
+    pub ctx: egui::Context,
+}
+impl Bus {
+    pub fn new(ctx: egui::Context) -> Self {
+        let (tx, rx) = mpsc::sync_channel(256);
+        Self { tx, rx, ctx }
+    }
+    pub fn publisher(&self) -> Publisher {
+        Publisher {
+            tx: self.tx.clone(),
+            ctx: self.ctx.clone(),
+        }
+    }
+}
+#[derive(Clone)]
+pub struct Publisher {
+    tx: SyncSender<Update>,
+    ctx: egui::Context,
+}
+impl Publisher {
+    fn send(&self, event: Update) -> bool {
+        if self.tx.send(event).is_err() {
+            return false;
+        }
+        self.ctx.request_repaint();
+        true
+    }
+}
+impl Client {
+    pub fn new(origin: String, home: &Path) -> Result<Self, String> {
+        // A local capability is never transmitted to a peer or an arbitrary URL.
+        let authority = origin
+            .strip_prefix("http://")
+            .unwrap_or("")
+            .trim_end_matches('/');
+        let loopback = authority
+            .parse::<std::net::SocketAddr>()
+            .is_ok_and(|a| a.ip().is_loopback() && a.port() != 0);
+        if !loopback {
+            return Err("The desktop connection requires a loopback HTTP origin".into());
+        }
+        let token = std::fs::read_to_string(home.join("control-token"))
+            .map_err(|e| format!("Cannot read daemon capability: {e}"))?;
+        Ok(Self {
+            origin: origin.trim_end_matches('/').into(),
+            token: token.trim().into(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(8)))
+                .build()
+                .into(),
+        })
+    }
+    pub fn discover(&self, publisher: Publisher) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            publisher.send(Update::Discovered(client.status()));
+        });
+    }
+    pub fn status(&self) -> Result<Value, String> {
+        self.agent
+            .get(format!("{}/api/status", self.origin))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .call()
+            .map_err(safe_error)?
+            .body_mut()
+            .read_json()
+            .map_err(safe_error)
+    }
+    pub fn operation(&self, dest: &Destination, request: Value) -> Result<Value, String> {
+        self.agent
+            .post(format!("{}/api/operation", self.origin))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send_json(json!({"peer":dest.key,"address":dest.address,"request":request}))
+            .map_err(safe_error)?
+            .body_mut()
+            .read_json()
+            .map_err(safe_error)
+    }
+    pub fn catalog(&self, dest: Destination, publisher: Publisher, stop: Arc<AtomicBool>) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let result = client
+                    .operation(&dest, json!({"op":"list"}))
+                    .and_then(|v| v.as_array().cloned().ok_or("Invalid catalog".into()));
+                if !publisher.send(Update::Catalog(dest.clone(), result)) {
+                    break;
+                }
+                for _ in 0..20 {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        });
+    }
+    pub fn watch(
+        &self,
+        dest: Destination,
+        id: String,
+        after: u64,
+        epoch: u64,
+        publisher: Publisher,
+        stop: Arc<AtomicBool>,
+    ) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            let tag = run_key(&dest.key, &id);
+            let result = (|| -> Result<(), String> {
+                #[cfg(not(test))]
+                let lease = Duration::from_secs(8);
+                #[cfg(test)]
+                let lease = Duration::from_millis(500);
+                let agent: ureq::Agent = ureq::Agent::config_builder()
+                    .timeout_connect(Some(Duration::from_secs(3)))
+                    .timeout_recv_response(Some(Duration::from_secs(5)))
+                    .timeout_recv_body(Some(lease))
+                    .build()
+                    .into();
+                let mut cursor = after;
+                'connect: while !stop.load(Ordering::Relaxed) {
+                    let mut response=agent.post(format!("{}/api/watch",client.origin)).header("Authorization",format!("Bearer {}",client.token)).send_json(json!({"peer":dest.key,"address":dest.address,"request":{"id":id,"after":cursor}})).map_err(safe_error)?;
+
+                    let mut reader = BufReader::new(response.body_mut().as_reader());
+                    while !stop.load(Ordering::Relaxed) {
+                        let mut line = String::new();
+                        let n = match std::io::Read::take(&mut reader, 8 * 1024 * 1024)
+                            .read_line(&mut line)
+                        {
+                            Ok(n) => n,
+                            // A finite observation lease bounds detached workers. Renewals resume
+                            // immediately at the last losslessly published sequence, without a UI outage.
+                            Err(ref e)
+                                if e.get_ref()
+                                    .and_then(|e| e.downcast_ref::<ureq::Error>())
+                                    .is_some_and(|e| {
+                                        matches!(e, ureq::Error::Timeout(ureq::Timeout::RecvBody))
+                                    }) =>
+                            {
+                                continue 'connect;
+                            }
+                            Err(e) => return Err(safe_error(e)),
+                        };
+                        if n == 0 {
+                            return Err("Observation connection ended; reconnecting".into());
+                        }
+                        if !line.ends_with('\n') {
+                            return Err("Observation batch exceeded the client bound".into());
+                        }
+                        let batch: Value = serde_json::from_str(&line).map_err(safe_error)?;
+                        if let Some(error) = batch["error"].as_str() {
+                            return Err(error.into());
+                        }
+                        let done = batch["done"] == true;
+                        if let Some(seq) = batch["events"]
+                            .as_array()
+                            .and_then(|a| a.last())
+                            .and_then(|e| e["seq"].as_u64())
+                        {
+                            cursor = seq;
+                        }
+                        if !publisher.send(Update::Batch(tag.clone(), epoch, batch)) {
+                            return Ok(());
+                        }
+                        if done {
+                            return Ok(());
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                publisher.send(Update::WatchError(tag, epoch, error));
+            }
+        });
+    }
+    pub fn submit(&self, pending: Pending, publisher: Publisher) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            let id = pending.spec["id"].as_str().unwrap_or("").to_owned();
+            let result = client.operation(
+                &pending.destination,
+                json!({"op":"start","spec":pending.spec}),
+            );
+            publisher.send(Update::Submitted(id, result));
+        });
+    }
+    pub fn control(&self, dest: Destination, id: String, action: Value, publisher: Publisher) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            let text = action["text"].as_str().unwrap_or("").to_owned();
+            let result = client.operation(&dest, json!({"op":"control","id":id,"action":action}));
+            publisher.send(Update::Controlled(id, dest, text, result));
+        });
+    }
+}
+fn safe_error(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+pub fn run_key(peer: &str, id: &str) -> String {
+    format!("{peer}:{id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn capability_stays_on_loopback() {
+        for url in [
+            "https://example.com",
+            "http://127.0.0.1:80.evil.test",
+            "http://127.0.0.1:80@evil.test",
+            "http://127.0.0.1:80/path",
+            "http://192.168.1.1:80",
+        ] {
+            assert!(
+                Client::new(url.into(), Path::new("/does-not-exist"))
+                    .unwrap_err_or_message()
+                    .contains("loopback")
+            );
+        }
+    }
+    trait ErrorMessage {
+        fn unwrap_err_or_message(self) -> String;
+    }
+    impl ErrorMessage for Result<Client, String> {
+        fn unwrap_err_or_message(self) -> String {
+            match self {
+                Err(e) => e,
+                Ok(_) => panic!("Untrusted capability destination accepted"),
+            }
+        }
+    }
+    #[test]
+    #[ignore = "scripts/desktop-smoke.py supplies private paired daemons"]
+    fn real_daemon_boundary() {
+        let home = std::path::PathBuf::from(
+            std::env::var_os("BOXEN_GUI_TEST_HOME").expect("fixture home"),
+        );
+        let client = Client::new(std::env::var("BOXEN_GUI_TEST_URL").unwrap(), &home).unwrap();
+        let dest: Destination =
+            serde_json::from_str(&std::env::var("BOXEN_GUI_TEST_DEST").unwrap()).unwrap();
+        let id = crate::new_id();
+        let spec = json!({"id":id,"thread_id":id,"backend":"codex","cwd":home,"model":"fixture","prompt":"SLOW desktop transport proof"});
+        let first = client
+            .operation(&dest, json!({"op":"start","spec":spec}))
+            .unwrap();
+        assert_eq!(first["record"]["spec"]["id"], id);
+        let bus = Bus::new(egui::Context::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        client.watch(
+            dest.clone(),
+            id.clone(),
+            0,
+            0,
+            bus.publisher(),
+            stop.clone(),
+        );
+        let mut transcript = crate::model::Transcript::default();
+        let mut saw_live = false;
+        while !saw_live {
+            match bus.rx.recv_timeout(Duration::from_secs(12)).unwrap() {
+                Update::Batch(_, _, batch) => {
+                    for event in batch["events"].as_array().unwrap() {
+                        transcript.apply(event).unwrap();
+                        if event["data"]["method"] == "item/commandExecution/outputDelta" {
+                            saw_live = true;
+                            assert_ne!(batch["done"], true);
+                        }
+                    }
+                }
+                Update::WatchError(_, _, error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let cursor = transcript.seq;
+        let replay = Bus::new(egui::Context::default());
+        client.watch(
+            dest.clone(),
+            id.clone(),
+            cursor,
+            0,
+            replay.publisher(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        loop {
+            match replay.rx.recv_timeout(Duration::from_secs(12)).unwrap() {
+                Update::Batch(_, _, batch) => {
+                    for event in batch["events"].as_array().unwrap() {
+                        assert!(event["seq"].as_u64().unwrap() > cursor);
+                        transcript.apply(event).unwrap();
+                    }
+                    if batch["done"] == true {
+                        break;
+                    }
+                }
+                Update::WatchError(_, _, error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        assert!(transcript.rows.iter().any(|r| r.label == "Thinking"));
+        assert!(
+            transcript
+                .rows
+                .iter()
+                .any(|r| r.text.contains("Fixture result"))
+        );
+        // Same-ID submission is an observation-safe reconciliation, never a second accepted effect.
+        client
+            .operation(&dest, json!({"op":"start","spec":spec}))
+            .unwrap();
+        let runs = client.operation(&dest, json!({"op":"list"})).unwrap();
+        assert_eq!(
+            runs.as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["record"]["spec"]["id"] == id)
+                .count(),
+            1
+        );
+        println!(
+            "Remote native client: thinking, incremental tool output, detached replay, final response, exact-ID retry passed"
+        );
+    }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "boxen-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+description = "The Boxen desktop client"
+
+[dependencies]
+eframe = { version = "=0.35.0", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland", "accesskit", "persistence"] }
+egui_dock = { version = "=0.20.1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "=3.5.0", default-features = false, features = ["json"] }
+getrandom = "0.4"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+
+[workspace]

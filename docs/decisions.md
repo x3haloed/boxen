@@ -8,6 +8,8 @@ Prefer one portable executable with no installed application runtime or complica
 
 The user will primarily direct GUI design. Early controls should provide simple clickable access to capabilities without establishing a detailed product layout. The intended official GUI is a Rust desktop app, not a hosted web application. It may have a separate binary from the daemon. The daemon must remain friendly to alternative GUIs, including user-generated clients: authenticated discovery, submission, replay, observation, and control belong to its documented API and cannot depend on the official GUI. The current plain HTML surface embedded in the daemon and served only on loopback is provisional.
 
+The first native desktop slice uses one interchangeable docking tree for side panels and conversation tabs, with nested splits, resizing and a command palette. Anonymous conversations use VS Code-style preview/open semantics: at most one preview across the workspace; single-click replaces it, double-click keeps a tab open. Drafting or moving a tab also keeps it open. The GUI remains a separate Rust executable attaching to the existing authenticated daemon API. See [desktop](desktop.md) and the [framework investigation](research/desktop-framework.md).
+
 Commit and push coherent, verified implementation slices as part of the development workflow.
 
 ## Daemon diagnostics

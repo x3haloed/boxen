@@ -1,0 +1,294 @@
+use crate::model::{Pane, ThreadKey};
+use egui_dock::{DockState, NodeIndex, SurfaceIndex, TabIndex, TabPath};
+use serde::{Deserialize, Serialize};
+#[derive(Serialize, Deserialize)]
+pub struct Workspace {
+    pub dock: DockState<Pane>,
+    pub preview: Option<ThreadKey>,
+}
+impl Default for Workspace {
+    fn default() -> Self {
+        let mut dock = DockState::new(vec![Pane::Welcome]);
+        dock.main_surface_mut()
+            .split_left(NodeIndex::root(), 0.24, vec![Pane::Threads]);
+        Self {
+            dock,
+            preview: None,
+        }
+    }
+}
+impl Workspace {
+    pub fn open(&mut self, key: ThreadKey, pin: bool) {
+        let pane = Pane::Thread(key.clone());
+        if let Some(path) = self.dock.find_tab(&pane) {
+            self.focus(path);
+            if pin {
+                self.pin(&key)
+            }
+            return;
+        }
+        if !pin
+            && let Some(old) = self.preview.take()
+            && let Some(path) = self.dock.find_tab(&Pane::Thread(old))
+        {
+            self.dock[path.surface][path.node].tabs_mut().unwrap()[path.tab.0] = pane;
+            self.focus(path);
+            self.preview = Some(key);
+            return;
+        }
+        let target = self
+            .dock
+            .iter_all_tabs()
+            .find(|(_, p)| matches!(p, Pane::Thread(_) | Pane::Welcome))
+            .map(|(p, _)| p);
+        if let Some(path) = target {
+            let welcome = self.dock.find_tab(&Pane::Welcome);
+            if let Some(w) = welcome {
+                self.dock[w.surface][w.node].tabs_mut().unwrap()[w.tab.0] = pane;
+                self.focus(w);
+            } else {
+                let leaf = self.dock.leaf_mut(path.node_path()).unwrap();
+                leaf.tabs.push(pane);
+                leaf.active = TabIndex(leaf.tabs.len() - 1);
+                self.dock.set_focused_node_and_surface(path.node_path());
+            }
+        } else {
+            // The list may have been moved or the last editor closed. A new editor splits beside it.
+            let list = self.dock.find_tab(&Pane::Threads);
+            if let Some(path) = list {
+                self.dock.split(
+                    path.node_path(),
+                    egui_dock::Split::Right,
+                    0.72,
+                    egui_dock::Node::leaf(pane),
+                );
+            } else {
+                self.dock.main_surface_mut().push_to_first_leaf(pane);
+            }
+        }
+        if !pin {
+            self.preview = Some(key)
+        }
+    }
+    fn focus(&mut self, path: TabPath) {
+        let _ = self.dock.set_active_tab(path);
+        self.dock.set_focused_node_and_surface(path.node_path());
+    }
+    pub fn pin(&mut self, key: &ThreadKey) {
+        if self.preview.as_ref() == Some(key) {
+            self.preview = None
+        }
+    }
+    pub fn show_list(&mut self) {
+        if let Some(path) = self.dock.find_tab(&Pane::Threads) {
+            self.focus(path)
+        } else if self.dock.main_surface().is_empty() {
+            self.dock = DockState::new(vec![Pane::Threads]);
+        } else {
+            self.dock.split(
+                egui_dock::NodePath::new(SurfaceIndex::main(), NodeIndex::root()),
+                egui_dock::Split::Left,
+                0.24,
+                egui_dock::Node::leaf(Pane::Threads),
+            );
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn key(id: &str) -> ThreadKey {
+        ThreadKey {
+            peer: "p".into(),
+            id: id.into(),
+        }
+    }
+    #[test]
+    fn preview_replaces_globally_after_docking() {
+        let mut w = Workspace::default();
+        w.open(key("a"), false);
+        w.open(key("b"), true);
+        let a = w.dock.find_tab(&Pane::Thread(key("a"))).unwrap();
+        w.dock.detach_tab(
+            a,
+            eframe::egui::Rect::from_min_size(
+                eframe::egui::pos2(0., 0.),
+                eframe::egui::vec2(300., 300.),
+            ),
+        );
+        w.open(key("c"), false);
+        assert!(w.dock.find_tab(&Pane::Thread(key("a"))).is_none());
+        assert!(w.dock.find_tab(&Pane::Thread(key("b"))).is_some());
+        assert!(w.dock.find_tab(&Pane::Thread(key("c"))).is_some());
+        w.open(key("c"), true);
+        w.open(key("d"), false);
+        assert_eq!(
+            w.dock
+                .iter_all_tabs()
+                .filter(|(_, t)| matches!(t, Pane::Thread(_)))
+                .count(),
+            3
+        );
+    }
+    #[test]
+    fn same_thread_does_not_duplicate_and_peer_keys_are_distinct() {
+        let mut w = Workspace::default();
+        w.open(key("a"), false);
+        w.open(key("a"), true);
+        w.open(
+            ThreadKey {
+                peer: "other".into(),
+                id: "a".into(),
+            },
+            false,
+        );
+        assert_eq!(
+            w.dock
+                .iter_all_tabs()
+                .filter(|(_, t)| matches!(t, Pane::Thread(_)))
+                .count(),
+            2
+        );
+    }
+}
+
+#[cfg(test)]
+mod pointer_tests {
+    use super::*;
+    use eframe::egui::{self, Event, Modifiers, PointerButton, pos2, vec2};
+    use std::collections::HashMap;
+    #[derive(Default)]
+    struct Geometry {
+        tabs: HashMap<String, egui::Rect>,
+    }
+    impl egui_dock::TabViewer for Geometry {
+        type Tab = String;
+        fn title(&mut self, t: &mut String) -> egui::WidgetText {
+            t.clone().into()
+        }
+        fn ui(&mut self, ui: &mut egui::Ui, _: &mut String) {
+            ui.label("Conversation");
+        }
+        fn on_tab_button(&mut self, t: &mut String, r: &egui::Response) {
+            self.tabs.insert(t.clone(), r.rect);
+        }
+    }
+    struct Harness {
+        ctx: egui::Context,
+        dock: DockState<String>,
+        viewer: Geometry,
+        time: f64,
+    }
+    impl Harness {
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 1. / 60.;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(pos2(0., 0.), vec2(1000., 700.))),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let _ = self.ctx.run_ui(input, |ui| {
+                let mut style = egui_dock::Style::from_egui(ui.style());
+                style.overlay.overlay_type = egui_dock::OverlayType::HighlightedAreas;
+                egui_dock::DockArea::new(&mut self.dock)
+                    .style(style)
+                    .show_inside(ui, &mut self.viewer);
+            });
+        }
+        fn drag(&mut self, from: egui::Pos2, to: egui::Pos2) {
+            self.frame(vec![Event::PointerMoved(from)]);
+            self.frame(vec![Event::PointerButton {
+                pos: from,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }]);
+            for step in 1..=30 {
+                self.frame(vec![Event::PointerMoved(
+                    from + (to - from) * (step as f32 / 30.),
+                )]);
+            }
+            for _ in 0..30 {
+                self.frame(vec![]);
+            }
+            self.frame(vec![Event::PointerButton {
+                pos: to,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }]);
+            for _ in 0..3 {
+                self.frame(vec![]);
+            }
+        }
+    }
+    #[test]
+    fn real_pointer_resize_and_tab_reorder() {
+        let mut h = Harness {
+            ctx: egui::Context::default(),
+            dock: DockState::new(vec!["one".into(), "two".into(), "three".into()]),
+            viewer: Geometry::default(),
+            time: 0.,
+        };
+        h.dock
+            .main_surface_mut()
+            .split_left(NodeIndex::root(), 0.24, vec!["Threads".into()]);
+        for _ in 0..3 {
+            h.frame(vec![]);
+        }
+        let list = h.dock.find_tab(&"Threads".into()).unwrap();
+        let before = h.dock.leaf(list.node_path()).unwrap().rect.max.x;
+        h.drag(pos2(before + 1., 350.), pos2(before + 100., 350.));
+        let after = h.dock.leaf(list.node_path()).unwrap().rect.max.x;
+        assert!(
+            after > before + 40.,
+            "Dragging the divider should widen the sidebar: {before} -> {after}"
+        );
+        let from = h.viewer.tabs["three"].center();
+        let to = h.viewer.tabs["one"].left_center() + vec2(2., 0.);
+        h.drag(from, to);
+        let one = h.dock.find_tab(&"one".into()).unwrap();
+        let three = h.dock.find_tab(&"three".into()).unwrap();
+        assert_eq!(one.node, three.node);
+        assert!(
+            three.tab.0 < one.tab.0,
+            "Dragging onto the start of a tab bar should reorder"
+        );
+    }
+    #[test]
+    fn real_pointer_tab_splits_and_sidebar_moves() {
+        let mut h = Harness {
+            ctx: egui::Context::default(),
+            dock: DockState::new(vec!["one".into(), "two".into()]),
+            viewer: Geometry::default(),
+            time: 0.,
+        };
+        h.dock
+            .main_surface_mut()
+            .split_left(NodeIndex::root(), 0.24, vec!["Threads".into()]);
+        for _ in 0..3 {
+            h.frame(vec![]);
+        }
+        let from = h.viewer.tabs["two"].center();
+        h.drag(from, pos2(985., 350.));
+        let one = h.dock.find_tab(&"one".into()).unwrap();
+        let two = h.dock.find_tab(&"two".into()).unwrap();
+        assert_eq!(
+            two.surface,
+            SurfaceIndex::main(),
+            "Edge drop should dock, not float"
+        );
+        assert_ne!(
+            one.node, two.node,
+            "A pointer drop at the right edge creates a split"
+        );
+        let from = h.viewer.tabs["Threads"].center();
+        h.drag(from, pos2(500., 680.));
+        let list = h.dock.find_tab(&"Threads".into()).unwrap();
+        assert!(
+            h.dock.leaf(list.node_path()).unwrap().rect.min.y > 300.,
+            "The thread list can dock at the bottom"
+        );
+    }
+}

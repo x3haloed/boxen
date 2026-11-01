@@ -8,6 +8,19 @@ The spirit: **All your box are belong to us.**
 
 Boxen is in early development. Paired LAN machines can execute Codex threads and built-in OpenRouter text/tool and native media-reading workloads with live messages, backend-exposed thinking summaries, tool activity, and command output. Detaching the viewer leaves execution running; reconnecting replays missed events.
 
+## Try the desktop workspace
+
+```sh
+python3 scripts/build-desktop.py
+# macOS:
+open work/Boxen.app
+```
+
+The first native Rust client has interchangeable dockable panels, nested splits,
+a command palette, and anonymous conversations with VS Code-style preview and
+pinned tabs. It attaches to a running daemon and streams retained/live activity.
+See [desktop setup, controls and current scope](docs/desktop.md).
+
 ## Try the LAN prototype
 
 ```sh
@@ -16,7 +29,7 @@ cargo build --release
 ./target/release/boxen serve
 ```
 
-The daemon prints its public identity, LAN listener, and local control-page URL. The plain HTML control page is embedded in the binary; no Node, browser framework, or separate asset installation is required. Open the printed URL to use it. The UI is deliberately minimal while the product experience is being designed. The intended official GUI is a Rust desktop app; custom GUIs can use the same independent daemon API.
+The daemon prints its public identity, LAN listener, and local control-page URL. The plain HTML control page is embedded in the binary; no Node, browser framework, or separate asset installation is required. Open the printed URL to use it. The UI is deliberately minimal while the product experience is being designed. The native Rust desktop client is now available alongside this provisional page; custom GUIs can use the same independent daemon API.
 
 On each machine, trust the other machine's public key, obtained through a trusted channel:
 
