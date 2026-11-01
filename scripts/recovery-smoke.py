@@ -150,7 +150,8 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
             if event["data"].get("method") == "item/commandExecution/outputDelta": break
         gate.partition()
         time.sleep(.8)
-        assert watch.poll() is None, "watcher exited instead of reconnecting"
+        if watch.poll() is not None:
+            raise AssertionError(f"watcher exited instead of reconnecting: status={watch.returncode}, stderr={watch.stderr.read().decode()}")
         gate.enabled = True
         while True:
             event = read_line(watch)
@@ -162,6 +163,12 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         snapshot = request({"op":"get", "id":run["id"]})
         assert [e["seq"] for e in events] == list(range(1, snapshot["last_seq"]+1))
         print("PASS actual TCP partition, automatic shell reconnect, gap-free exactly-once event projection")
+        closed = subprocess.Popen(command + ["--data-dir", directories[0], "watch", gate.address, keys[1], run["id"], "--once"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        watchers.append(closed)
+        closed.stdout.close()
+        assert closed.wait(timeout=10) == 0, closed.stderr.read().decode()
+        print("PASS closed stdout exits cleanly; socket errors remain reconnectable")
 
         gate.partition()
         reconnect = subprocess.Popen(command + ["--data-dir", directories[0], "watch", gate.address, keys[1], run["id"], "--after", str(snapshot["last_seq"]-3)],

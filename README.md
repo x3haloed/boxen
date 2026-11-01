@@ -95,6 +95,12 @@ python3 scripts/logging-smoke.py target/cosmo/release/boxen.com
 python3 scripts/platform-smoke.py target/cosmo/release/boxen.com
 ```
 
+Linux is part of the runtime testing rotation. After building with
+`--features ape,inference-probe`, run `python3 scripts/test-linux.py` to test the
+same portable file on `chad@resident-host.lan`, including isolated regression
+suites and an SSH-forwarded cross-host streaming check. See [platform testing](docs/testing.md) for
+requirements, retained evidence, and verification limits.
+
 ## Design
 
 - [Product principles](docs/vision.md)

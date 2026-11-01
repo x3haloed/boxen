@@ -421,9 +421,14 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
             }
             jobs::valid_id(&args[2])?;
             state.require_trust(&args[1])?;
+            enum WatchEnd {
+                Complete,
+                ConsumerClosed,
+                OutputFailed(std::io::Error),
+            }
             let mut delay = 500;
             loop {
-                let outcome = (|| -> Result<()> {
+                let outcome = (|| -> Result<WatchEnd> {
                     let mut session = protocol::connect(&state, &args[0], &args[1])?;
                     session.send(&serde_json::json!({"op":"watch","id":args[2],"after":after}))?;
                     loop {
@@ -438,23 +443,25 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                                 return Err("event sequence gap".into());
                             }
                             // Advance only after successful publication to the consumer.
-                            writeln!(std::io::stdout(), "{event}")?;
+                            if let Err(error) = writeln!(std::io::stdout(), "{event}") {
+                                return Ok(if error.kind() == std::io::ErrorKind::BrokenPipe {
+                                    WatchEnd::ConsumerClosed
+                                } else {
+                                    WatchEnd::OutputFailed(error)
+                                });
+                            }
                             after = seq;
                         }
                         if batch["done"] == true {
-                            return Ok(());
+                            return Ok(WatchEnd::Complete);
                         }
                     }
                 })();
                 match outcome {
-                    Ok(()) => break,
-                    Err(error)
-                        if error
-                            .downcast_ref::<std::io::Error>()
-                            .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe) =>
-                    {
-                        break;
-                    }
+                    Ok(WatchEnd::OutputFailed(error)) => return Err(error.into()),
+                    Ok(WatchEnd::Complete | WatchEnd::ConsumerClosed) => break,
+                    // A socket EPIPE is a recoverable network failure. Only
+                    // stdout closure above means the consumer stopped watching.
                     Err(error) if once || error.downcast_ref::<protocol::Rejected>().is_some() => {
                         return Err(error);
                     }

@@ -12,7 +12,7 @@ The build helper verifies the Cosmopolitan compiler archive's SHA-256. Build-too
 
 On macOS and Linux invoke the APE using `bash boxen.com ...`; do not assume Finder launch or direct kernel execution. Consumers need no Cargo, Rust, Python, or Node installation to run the executable. Python and SSH are used only by development helpers.
 
-APE build support is not a portability certification. This slice has been exercised on two macOS ARM64 hosts. Linux, Windows, x86-64 execution, signing/notarization, and fresh-machine launch/security prompts have not been verified for Boxen.
+APE build support is not a portability certification. The APE has been exercised on two macOS ARM64 hosts and a Debian 13 Linux x86-64 host. See [the platform testing rotation](testing.md). Windows, Linux ARM64, macOS x86-64, signing/notarization, and fresh-machine launch/security prompts remain unverified.
 
 ## Pair manually
 

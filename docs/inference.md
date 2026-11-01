@@ -66,7 +66,7 @@ It starts two real paired daemons and a controlled provider, exercising actual s
 
 The APE worker-launch test found that Rust's Linux-target `current_exe()` looked for `/proc/self/exe` on macOS. `platform::executable()` now uses Cosmopolitan's `GetProgramExecutableName` when built as APE. The actual worker path and process-group operations are covered by runtime tests, beyond successful compilation alone.
 
-Still planned: native media through the daemon API and tools, general provider adapters/options, model-generated compaction, richer budget configuration, safe route/model switching, scheduling, and managed-session migration. Linux, Windows, and macOS x86-64 execution of this runtime are not yet verified.
+Still planned: client media uploads, general provider adapters/options, model-generated compaction, richer budget configuration, safe route/model switching, scheduling, and managed-session migration. The [Linux rotation](testing.md) now verifies the built-in runtime and native media projection on Debian 13 x86-64 with controlled providers. Live inference on Linux, Windows, and macOS x86-64 execution remain unverified.
 
 ## Development deployment evidence
 
@@ -192,8 +192,10 @@ initial investigation and other live regressions. All 13 Rust unit tests, Clippy
 controlled media/runtime suites, native/APE blocking and wake checks, and existing
 APE workload/recovery/resident/mailbox/logging suites passed. A separate real APE
 DeepSeek regression also passed shell execution, stateful follow-up, selective
-mail delivery, and no-send resident completion. Cross-platform runtime evidence
-remains macOS ARM64; Windows, Linux, and x86-64 are not newly verified here.
+mail delivery, and no-send resident completion. The live perception evidence
+above used macOS ARM64. Subsequent Linux x86-64 controlled-provider and media-wire
+verification is recorded in [the platform rotation](testing.md); Windows and other
+OS/architecture combinations remain unverified.
 
 After the final dependency consolidation, the shipping APE passed a fresh selected
 five-case live proof: Flash Lite text, GPT-4.1 Nano native PDF, Qwen Omni audio and

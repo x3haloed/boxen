@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Run the shipped APE regression suite on an SSH-accessible Linux host.
+
+Uses a private temporary directory; leaves installed daemons, identities and
+credentials alone. Requires Python 3, Bash, tar and OpenSSL on the test host.
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import platform
+import re
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+SUITES = ["platform", "smoke", "workload", "recovery", "resident", "mailbox",
+          "logging", "inference-runtime", "media", "inference-probe"]
+
+
+def worker(binary):
+    """Runs on Linux from the uploaded test bundle, without project/toolchain setup."""
+    assert platform.system() == "Linux", "test host is not Linux"
+    environment = {"os": platform.system(), "architecture": platform.machine(),
+                   "kernel": platform.release(), "python": platform.python_version(),
+                   "release": pathlib.Path('/etc/os-release').read_text(),
+                   "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+    print(json.dumps({"environment": environment}), flush=True)
+    results = []
+    for suite in SUITES:
+        script = "smoke.py" if suite == "smoke" else suite + "-smoke.py"
+        start = time.monotonic()
+        process = subprocess.Popen([sys.executable, "scripts/" + script, str(binary)],
+                                   start_new_session=True)
+        try:
+            status = process.wait(timeout=180)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            status = 124
+        result = {"suite": suite, "exit_code": status,
+                  "seconds": round(time.monotonic() - start, 3)}
+        results.append(result)
+        print(json.dumps({"suite_result": result}), flush=True)
+        if status:
+            break
+    report = {"environment": environment, "suites": results,
+              "ok": len(results) == len(SUITES) and all(r['exit_code'] == 0 for r in results)}
+    pathlib.Path("result.json").write_text(json.dumps(report, indent=2) + "\n")
+    return 0 if report['ok'] else 1
+
+
+def port():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
+
+
+def cross_host_server(binary, key):
+    command = ['/bin/bash', str(binary), '--data-dir', str(pathlib.Path('lan-data').resolve())]
+    cli = lambda *args: subprocess.check_output(command + list(args), text=True, timeout=15).strip()
+    public = cli('identity')
+    cli('trust', key, 'Rotation client')
+    peer, ui, reverse = port(), port(), port()
+    daemon = subprocess.Popen(command + ['serve', '--listen', f'127.0.0.1:{peer}', '--ui', f'127.0.0.1:{ui}',
+                                        '--codex', str(pathlib.Path('tests/fake-codex.py').resolve())],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        lines = [daemon.stdout.readline() for _ in range(3)]
+        assert 'Local controls:' in lines[-1], 'Linux LAN daemon did not start'
+        # Only public connection information leaves this process; no control token.
+        print(json.dumps({'key': public, 'port': peer, 'reverse_port': reverse, 'cwd': str(pathlib.Path.cwd())}), flush=True)
+        for line in sys.stdin:
+            request = json.loads(line)
+            print(json.dumps(json.loads(cli('ping', request['address'], key, request['message']))), flush=True)
+    finally:
+        daemon.terminate()
+        daemon.wait(timeout=10)
+    return 0
+
+
+def cross_host_check(ssh, remote, binary):
+    """Actual cross-OS traffic over SSH forwards, using disposable identities."""
+    with tempfile.TemporaryDirectory(prefix='boxen-linux-lan-') as directory:
+        command = ['/bin/bash', str(binary), '--data-dir', directory]
+        cli = lambda *args: subprocess.check_output(command + list(args), text=True, timeout=30).strip()
+        key = cli('identity')
+        remote_command = 'cd ' + shlex.quote(remote) + ' && ' + shlex.join([
+            'python3', 'scripts/test-linux.py', '--cross-host-server', '--binary', './boxen.com', '--trust-key', key])
+        server = subprocess.Popen(ssh + [remote_command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        daemon, tunnel = None, None
+        try:
+            peer = json.loads(server.stdout.readline())
+            cli('trust', peer['key'], 'Linux rotation')
+            local_peer, ui, reverse = port(), port(), port()
+            daemon = subprocess.Popen(command + ['serve', '--listen', f'127.0.0.1:{local_peer}', '--ui', f'127.0.0.1:{ui}'],
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            lines = [daemon.stdout.readline() for _ in range(3)]
+            assert 'Local controls:' in lines[-1], 'Local LAN daemon did not start'
+            forward = port()
+            tunnel = subprocess.Popen(ssh[:-1] + ['-o', 'ExitOnForwardFailure=yes', '-N',
+                '-L', f"127.0.0.1:{forward}:127.0.0.1:{peer['port']}",
+                '-R', f"127.0.0.1:{peer['reverse_port']}:127.0.0.1:{local_peer}", ssh[-1]],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            deadline = time.monotonic() + 10
+            while True:
+                if tunnel.poll() is not None:
+                    raise RuntimeError('SSH forward failed: ' + tunnel.stderr.read())
+                try:
+                    with socket.create_connection(('127.0.0.1', forward), timeout=.2):
+                        break
+                except OSError:
+                    if time.monotonic() > deadline:
+                        raise RuntimeError('SSH forward did not become ready')
+                    time.sleep(.05)
+            address = f"127.0.0.1:{forward}"
+            marker = 'linux-rotation-' + os.urandom(8).hex()
+            assert json.loads(cli('ping', address, peer['key'], marker))['message'] == marker
+            server.stdin.write(json.dumps({'address': f"127.0.0.1:{peer['reverse_port']}", 'message': marker}) + '\n')
+            server.stdin.flush()
+            assert json.loads(server.stdout.readline())['message'] == marker
+            run = json.loads(cli('start', address, peer['key'], peer['cwd'], 'fixture', 'SLOW'))
+            ident = run['record']['spec']['id']
+            watch = subprocess.Popen(command + ['watch', address, peer['key'], ident, '--once'],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            events, first_output = [], None
+            try:
+                for line in watch.stdout:
+                    event = json.loads(line)
+                    events.append(event)
+                    if first_output is None and event['data'].get('method') == 'item/commandExecution/outputDelta':
+                        first_output = time.monotonic()
+                assert watch.wait(timeout=10) == 0, watch.stderr.read()
+                assert first_output is not None and time.monotonic() - first_output > .5, 'LAN output was not observed before completion'
+            finally:
+                if watch.poll() is None:
+                    watch.terminate()
+                    watch.wait(timeout=10)
+            assert any(e['data'].get('method') == 'item/commandExecution/outputDelta' for e in events)
+            assert any(e['kind'] == 'status' and e['data']['status'] == 'completed' for e in events)
+            assert [e['seq'] for e in events] == list(range(1, len(events) + 1))
+            replay = [json.loads(line) for line in cli('watch', address, peer['key'], ident, '--once').splitlines()]
+            assert replay == events
+            return {'ok': True, 'transport': 'ssh_forwarded_tcp', 'direct_lan_verified': False, 'bidirectional_ping': True, 'linux_workload': 'controlled Codex fixture',
+                    'events': len(events), 'streamed_before_completion': True, 'gap_free_replay': True}
+        finally:
+            server.stdin.close()
+            try:
+                assert server.wait(timeout=15) == 0, server.stderr.read()
+            finally:
+                if tunnel:
+                    tunnel.terminate()
+                    tunnel.wait(timeout=10)
+                if daemon:
+                    daemon.terminate()
+                    daemon.wait(timeout=10)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('host', nargs='?', default='chad@resident-host.lan')
+    parser.add_argument('--binary', type=pathlib.Path, default=pathlib.Path('target/cosmo/release/boxen.com'))
+    parser.add_argument('--output', type=pathlib.Path, help='Local report directory (default work/linux/TIMESTAMP)')
+    parser.add_argument('--cross-host-server', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--trust-key', help=argparse.SUPPRESS)
+    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.cross_host_server:
+        return cross_host_server(args.binary.resolve(), args.trust_key)
+    if args.worker:
+        return worker(args.binary.resolve())
+    root = pathlib.Path(__file__).resolve().parent.parent
+    binary = args.binary.resolve()
+    if not binary.is_file() or binary.suffix != '.com':
+        parser.error('--binary is a built portable .com executable')
+    # Probe tests are part of this rotation rather than silently skipped.
+    help_text = subprocess.check_output(['/bin/bash', str(binary), '--help'], text=True, timeout=10)
+    if 'inference-probe' not in help_text:
+        parser.error('this rotation needs an APE built with --features ape,inference-probe')
+    if args.host.startswith('-'):
+        parser.error('host cannot start with an option prefix')
+    output = args.output or root / 'work/linux' / datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    output.mkdir(parents=True, exist_ok=True)
+    ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', args.host]
+    remote = subprocess.check_output(ssh + ['umask 077; mktemp -d /tmp/boxen-linux-XXXXXXXX'], text=True, timeout=20).strip()
+    if not re.fullmatch(r'/tmp/boxen-linux-[A-Za-z0-9]+', remote):
+        raise RuntimeError('unexpected remote temporary directory')
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    report = {"host": args.host, "binary_sha256": digest, "ok": False}
+    try:
+        with tempfile.TemporaryFile() as bundle:
+            with tarfile.open(fileobj=bundle, mode='w') as archive:
+                archive.add(binary, arcname='boxen.com')
+                archive.add(pathlib.Path(__file__).resolve(), arcname='scripts/test-linux.py')
+                for suite in SUITES:
+                    name = 'smoke.py' if suite == 'smoke' else suite + '-smoke.py'
+                    archive.add(root / 'scripts' / name, arcname='scripts/' + name)
+                archive.add(root / 'tests/fake-codex.py', arcname='tests/fake-codex.py')
+            bundle.seek(0)
+            subprocess.run(ssh + ['tar -xf - -C ' + shlex.quote(remote)], stdin=bundle, check=True, timeout=60)
+        cmd = 'cd ' + shlex.quote(remote) + ' && python3 scripts/test-linux.py --worker --binary ./boxen.com'
+        with (output / 'suites.log').open('w') as log:
+            process = subprocess.Popen(ssh + [cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            for line in process.stdout:
+                print(line, end='', flush=True)
+                log.write(line)
+                log.flush()
+            status = process.wait()
+        raw = subprocess.check_output(ssh + ['cat ' + shlex.quote(remote + '/result.json')], text=True, timeout=20)
+        report.update(json.loads(raw))
+        if report['ok'] and status == 0:
+            report['cross_host'] = cross_host_check(ssh, remote, binary)
+            print(json.dumps({'cross_host_result': report['cross_host']}), flush=True)
+        report['ssh_exit_code'] = status
+        report['ok'] = report['ok'] and status == 0 and report['environment']['binary_sha256'] == digest and report.get('cross_host', {}).get('ok', False)
+    except BaseException as error:
+        report['ok'] = False
+        report['error'] = str(error)
+        raise
+    finally:
+        cleanup = subprocess.run(ssh + ['rm -rf -- ' + shlex.quote(remote)], timeout=20)
+        report['remote_cleanup_ok'] = cleanup.returncode == 0
+        report['ok'] = report['ok'] and report['remote_cleanup_ok']
+        (output / 'result.json').write_text(json.dumps(report, indent=2) + '\n')
+        print('Linux report: ' + str(output / 'result.json'), flush=True)
+    return 0 if report['ok'] else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
