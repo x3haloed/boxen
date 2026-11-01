@@ -387,7 +387,7 @@ pub struct Jobs {
 
 impl Jobs {
     pub fn runtime_info(&self) -> Value {
-        json!({"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text"],"tools":true,"full_access":true}]})
+        json!({"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"model_provider_support_required":true,"tools":true,"full_access":true}]})
     }
 
     pub fn machine_id(&self) -> &str {

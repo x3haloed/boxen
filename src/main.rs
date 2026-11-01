@@ -10,6 +10,7 @@ mod inference_probe;
 mod jobs;
 mod logging;
 mod mailbox;
+mod media;
 mod platform;
 mod protocol;
 mod residents;

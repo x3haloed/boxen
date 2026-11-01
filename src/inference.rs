@@ -1,9 +1,9 @@
-//! Built-in text/tool runtime. Jobs owns runs, history, delivery and recovery.
+//! Built-in multimodal/tool runtime. Jobs owns runs, history, delivery and recovery.
 use crate::{
     Result, agent_tools, chat,
     jobs::{Control, History, Jobs, Run, Spec},
     logging::Level,
-    platform,
+    media, platform,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -69,10 +69,10 @@ impl Config {
 pub fn worker() -> Result<()> {
     let mut bytes = Vec::new();
     std::io::stdin()
-        .take(1024 * 1024 + 1)
+        .take((media::REQUEST_LIMIT + 1) as u64)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > 1024 * 1024 {
-        return Err("inference request exceeds 1 MiB".into());
+    if bytes.len() > media::REQUEST_LIMIT {
+        return Err("inference request exceeds 24 MiB".into());
     }
     let input: Value = serde_json::from_slice(&bytes)?;
     let config: Config = serde_json::from_value(input["config"].clone())?;
@@ -194,8 +194,8 @@ fn exchange(
     pending: &mut Vec<String>,
 ) -> Result<Option<Value>> {
     let payload = serde_json::to_vec(&json!({"config":config,"body":body}))?;
-    if payload.len() > 1024 * 1024 {
-        return Err("inference request exceeds 1 MiB; full history remains retained".into());
+    if payload.len() > media::REQUEST_LIMIT {
+        return Err("inference request exceeds 24 MiB; full history remains retained".into());
     }
     run.append("inference_attempt",json!({"step":step,"model":body["model"],"endpoint":config.endpoint,"request_bytes":payload.len()}))?;
     run.diagnostic(
@@ -587,6 +587,7 @@ pub fn execute(
     let mut tools = vec![
         json!({"type":"function","function":{"name":"boxen_shell","description":"This tool executes a shell command with Full access in the workload's working directory. It returns combined text output and an exit code. Output is limited to 256 KiB, and timeout_ms is 1–120000 (default 30000). Cancellation, timeout, or failure can leave file or external effects uncertain. The command is not automatically retried.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000}},"required":["command"],"additionalProperties":false}}}),
     ];
+    tools.push(media::tool());
     if resident.is_some() {
         for tool in agent_tools::resident_tools() {
             tools.push(json!({"type":"function","function":{"name":tool["name"],"description":tool["description"],"parameters":tool["inputSchema"]}}));
@@ -612,7 +613,20 @@ pub fn execute(
             return Ok(());
         }
         apply_steering(&run, &mut pending, &mut messages)?;
-        let body = json!({"model":model,"messages":messages,"tools":tools,"stream":true,"stream_options":{"include_usage":true},"max_tokens":2048,"provider":{"require_parameters":true},"reasoning":{"enabled":false}});
+        let (wire_messages, pdf, missing) = media::project(history.journal_directory(), &messages)?;
+        if missing > 0 {
+            run.append("artifact_unavailable", json!({"step":step,"count":missing,"detail":"Missing or damaged snapshots were replaced by explicit unavailability notices; source files were not reread"}))?;
+            run.diagnostic(
+                Level::Warn,
+                "inference.media.unavailable",
+                || json!({"step":step,"count":missing}),
+                || Value::Null,
+            );
+        }
+        let mut body = json!({"model":model,"messages":wire_messages,"tools":tools,"stream":true,"stream_options":{"include_usage":true},"max_tokens":2048,"provider":{"require_parameters":true}});
+        if pdf {
+            body["plugins"] = json!([{"id":"file-parser","pdf":{"engine":"native"}}]);
+        }
         let Some(projection) = exchange(
             &run,
             &jobs.inference,
@@ -708,6 +722,8 @@ pub fn execute(
                 let args: Value = serde_json::from_str(args)?;
                 if name == "boxen_shell" {
                     shell(&run, spec, &id, args, &controls_rx, &mut pending)
+                } else if name == "boxen_read" {
+                    media::read(history.journal_directory(), &spec.cwd, &spec.id, args).map(Some)
                 } else if let Some(r) = &resident {
                     agent_tools::resident_tool(&jobs, r, &spec.id, &id, name, args).map(Some)
                 } else {
@@ -719,7 +735,10 @@ pub fn execute(
                 Ok(None) => return Ok(()),
                 Err(error) => (json!({"ok":false,"error":error.to_string()}), false),
             };
-            let message = json!({"role":"tool","tool_call_id":wire_id,"content":serde_json::to_string(&result)?});
+            let mut message = json!({"role":"tool","tool_call_id":wire_id,"content":serde_json::to_string(&result)?});
+            if let Some(artifact) = result.get("artifact") {
+                message["boxen_artifact"] = artifact.clone();
+            }
             run.append("inference_message", message.clone())?;
             messages.push(message);
             run.append(

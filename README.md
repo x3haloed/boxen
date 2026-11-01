@@ -6,7 +6,7 @@ Boxen brings agent runtimes, inference providers, and granted compute together s
 
 The spirit: **All your box are belong to us.**
 
-Boxen is in early development. Paired LAN machines can execute Codex threads and built-in OpenRouter text/tool workloads with live messages, backend-exposed thinking summaries, tool activity, and command output. Detaching the viewer leaves execution running; reconnecting replays missed events.
+Boxen is in early development. Paired LAN machines can execute Codex threads and built-in OpenRouter text/tool and native media-reading workloads with live messages, backend-exposed thinking summaries, tool activity, and command output. Detaching the viewer leaves execution running; reconnecting replays missed events.
 
 ## Try the LAN prototype
 
@@ -52,7 +52,7 @@ Create a named resident without assigning a job. It has one canonical conversati
 
 See [the first resident](docs/residents.md) for continuity and [mailboxes](docs/mailboxes.md) for communication, activation, tools, CLI/API, and current limits. This first implementation stays on one selected host; synchronization and movement come later.
 
-The [built-in inference runtime](docs/inference.md) now supports OpenRouter text/tool workloads and mailbox residents alongside Codex. Select OpenRouter in the GUI or pass `--backend openrouter` to `start` or `resident-create`. The executing daemon reads its own OpenRouter key from `~/.boxen/credentials/openrouter.key`; credentials are not automatically distributed to peers.
+The [built-in inference runtime](docs/inference.md) now supports OpenRouter text/tool and native media-reading workloads and mailbox residents alongside Codex. Select OpenRouter in the GUI or pass `--backend openrouter` to `start` or `resident-create`. The executing daemon reads its own OpenRouter key from `~/.boxen/credentials/openrouter.key`; credentials are not automatically distributed to peers.
 
 The [compaction research](docs/research/compaction.md) investigates context reduction that preserves original voice, including a required optional mode without summarization. Policy and defaults remain under design.
 
