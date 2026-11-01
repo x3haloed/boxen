@@ -37,7 +37,7 @@ The built-in inference runtime follows to test the shared contract. Resident con
 
 - Separate agent definitions, threads, runs, triggers, and domains.
 - Start with one durable scheduling authority per domain.
-- Use versioned process protocols for extensions.
+- Extend the [agreed external observation adapter boundary](events.md) to broader extension kinds, with concrete versioning and upgrade rules still open.
 - Use typed content and artifact references across runtime boundaries.
 
 These are starting hypotheses. They must not silently become requirements merely because they were suggested first.
