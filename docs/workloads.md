@@ -6,7 +6,7 @@ The executing daemon owns the run. It retains each ordered event before publishi
 
 ## Usage
 
-Start each daemon with `boxen serve`. Use `--codex /absolute/path/to/codex` or `BOXEN_CODEX` when needed. Boxen can locate the bundled ChatGPT macOS CLI and common Apple Silicon npm installations; other installations can use `codex` on PATH or an explicit path. The executing machine uses its own existing Codex sign-in and configuration. Credentials are not copied from the requesting machine.
+Start each daemon with `boxen serve`. Use `--codex /absolute/path/to/codex` or `BOXEN_CODEX` when needed. Boxen can locate the bundled ChatGPT macOS CLI, executables on PATH, standalone `~/.local/bin/codex` / `~/.cargo/bin/codex`, and common native npm installations for the executing OS and architecture (including Linux x86-64). Explicit paths remain supported. The executing machine uses its own existing Codex sign-in and configuration. Credentials are not copied from the requesting machine.
 
 In the local control page, select a machine, enter its LAN address, and connect. Supply an absolute directory that exists on that machine, select Codex and a model (or leave the model at its configured default), and send a message. After completion, sending another message resumes the same backend conversation with a new Boxen run ID. During execution, sending a message requests steering instead. The working directory stays fixed for that thread.
 
@@ -68,4 +68,88 @@ Verified on October 31, 2026 using native macOS ARM64 builds and the identical-f
 - In the actual browser UI, a follow-up resumed that conversation and rendered an exposed thinking summary, commentary, tool output, and final text. A subsequent timed command visibly streamed while running. The viewer detached, refreshed, recovered the conversation, and continued showing new output. Local cancellation produced a backend-confirmed cancelled state, and the test process was no longer present on the executing machine.
 - Formatting, unit tests, Clippy with warnings denied, native/APE transport smoke tests, and native/APE workload smoke tests are the development checks for this slice.
 
-The implementation follows the [official Codex app-server protocol](https://developers.openai.com/codex/app-server), with the installed runtime's generated schema used to check parameter shapes. Reasoning and tool events are backend-dependent; uniform transport does not create capabilities absent from the selected runtime. The [Linux rotation](testing.md) now checks the same APE on Debian 13 x86-64 with the controlled Codex fixture; a real Codex installation on Linux remains unverified. Windows, other untested OS/architecture combinations, and fresh-machine installation remain open.
+The implementation follows the [official Codex app-server protocol](https://developers.openai.com/codex/app-server), with the installed runtime's generated schema used to check parameter shapes. Reasoning and tool events are backend-dependent; uniform transport does not create capabilities absent from the selected runtime. The [Linux rotation](testing.md) now checks the same APE on Debian 13 x86-64 with the controlled Codex fixture; the standalone Linux Codex CLI has also passed real workloads and resident communication, as described below. Windows, other untested OS/architecture combinations, and fresh-machine installation remain open.
+
+
+## Headless Codex on Linux
+
+The desktop app is not required. The standalone Codex CLI includes
+`codex app-server --listen stdio://`, which is the same integration Boxen already
+uses on macOS. The [official app-server documentation](https://developers.openai.com/codex/app-server)
+describes this child-process protocol, and the [CLI installation guide](https://developers.openai.com/codex/cli)
+covers Linux installation. An SDK adapter is not required for Linux support.
+Boxen remains Rust and adds no Node or TypeScript SDK requirement.
+
+After the CLI is installed and signed in on the executing Linux host:
+
+```sh
+codex --version
+codex app-server --help
+boxen serve --codex /absolute/path/to/codex
+```
+
+`serve --codex PATH` takes precedence over `BOXEN_CODEX`, which takes precedence
+over default discovery. For default discovery, the existing macOS app bundle
+keeps its preference on macOS; other candidates are PATH executables, standalone
+home-directory locations, then native npm layouts under common global prefixes
+and NVM installations. Linux npm lookup selects the Linux package and musl target,
+not the previous hard-coded macOS ARM64 package. Non-executable Unix files are
+skipped. Discovery locates executables; it does not certify a CLI version,
+authentication state, account entitlement, or every OS/architecture combination.
+A failed app-server launch remains an explicit run incident, without a hidden
+protocol switch or replay of accepted work.
+
+Each runtime uses its host-local Codex configuration, credentials and native
+session store. RPC stays on child stdio; Boxen's authenticated encrypted peer
+connection carries remote observations and controls. Signing in on one host does
+not distribute credentials to another. No persistent Linux Boxen service or
+backend auto-installer is introduced by these tests.
+
+Optional live verification:
+
+```sh
+# From the development Mac, with an existing Codex CLI on Linux:
+python3 scripts/test-linux.py --codex /absolute/linux/path/to/codex --codex-model gpt-6-luna
+# On a signed-in host, testing its local runtime through two paired test daemons:
+python3 scripts/codex-runtime-live.py target/cosmo/release/boxen.com --codex /absolute/path/to/codex --model gpt-6-luna
+```
+
+The selected model needs account access; these opt-in tests consume real runtime
+usage. The ordinary Linux rotation continues to use controlled providers and the
+Codex fixture. The live LAN check verifies an actual shell-file effect, early
+command activity, streamed final text, contiguous replay, and a subsequent run
+that resumes the same native Codex thread without reconstruction. The four-run
+resident check verifies explicit selective mail, private narration, no-send
+completion and native thread identity across app-server process restarts.
+
+### Linux live evidence
+
+On October 31, 2026, Debian 13 x86-64 ran official native Codex CLI 0.166.0 from
+an integrity-checked npm platform artifact, with the host's existing Codex sign-in
+and `gpt-6-luna` selected from its model catalog. Actual completed turns established
+model access beyond the catalog declaration. No desktop app, SDK or copied
+credential participated.
+
+The APE performed a real direct-LAN workload and follow-up; the first run retained
+57 events, and the follow-up resumed the same backend thread. A separate Linux
+four-run test, with the native CLI on PATH and Boxen's default executable discovery,
+passed shell execution, same-thread follow-up, selective resident mail and no-send
+completion, retaining 182 events. All test Boxen stores were disposable. Codex's
+own session records remain in its normal host-local native session store.
+
+The observed CLI runs emitted command-start/completion items and aggregated
+command output but no `item/commandExecution/outputDelta` notifications. An
+initial test requiring those deltas failed despite successful execution. The live
+proof now records that distinction and verifies command activity before turn
+completion; the controlled fixture separately tests incremental output transport.
+Boxen retains and forwards backend-exposed events rather than inventing deltas.
+Windows and other untested OS/architecture combinations remain unverified.
+
+The final shipping APE, SHA-256
+`994a1f8b03b7b48c5c60424358a18b2eeb1b3b778d17fcd3d3a37f80869e98d6`,
+passed the combined Linux rotation: all ten controlled suites plus the real
+`gpt-6-luna` direct-LAN command and native-session follow-up. That final command
+run retained and exactly replayed 62 events, with early command activity and no
+command-output deltas. Fourteen Rust tests, Clippy and native/APE macOS blocking
+checks also passed. The temporary CLI package and test peers were removed after
+verification; the default rotation remains independent of a real Codex install.

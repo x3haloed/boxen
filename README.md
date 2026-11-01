@@ -101,6 +101,10 @@ same portable file on `chad@resident-host.lan`, including isolated regression
 suites and a direct cross-host streaming check on Linux TCP port 42426. See [platform testing](docs/testing.md) for
 requirements, retained evidence, and verification limits.
 
+Codex also runs headlessly on Linux through the standalone CLI's `app-server`
+subcommand; the desktop app and a Node SDK are not required. See
+[Linux Codex setup and live checks](docs/workloads.md#headless-codex-on-linux).
+
 ## Design
 
 - [Product principles](docs/vision.md)

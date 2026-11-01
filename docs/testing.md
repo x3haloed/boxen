@@ -19,6 +19,14 @@ Python 3, Bash, tar and OpenSSL. Rust, Cargo, Node, an installed Boxen service,
 Codex, and model credentials are not prerequisites. The runner checks for the
 optional probe commands before uploading rather than silently skipping tests.
 
+An optional `--codex /absolute/linux/path/to/codex --codex-model MODEL` keeps the
+ten controlled suites and changes the final direct-LAN check to a real Codex
+app-server workload and native thread follow-up. This opt-in path uses the Linux
+host's existing sign-in and consumes real model usage. The test does not install
+a CLI or copy authentication material. Its report distinguishes real Codex from
+the controlled fixture and records whether command-output deltas were observed.
+See [headless Codex setup and live evidence](workloads.md#headless-codex-on-linux).
+
 Only the binary, selected test scripts, and controlled Codex fixture are copied
 to a private `/tmp/boxen-linux-*` directory. The worker records the actual OS,
 architecture, kernel, distribution, Python version, binary SHA-256, suite exit
@@ -84,10 +92,12 @@ observed 200 ms condition-variable/channel timeouts, one notification wake, and
 about 0.007 seconds of CPU during 0.46 seconds of wall time. The native and APE
 macOS recovery/blocking checks, Rust unit tests, formatting and Clippy also passed.
 
-This adds Linux x86-64 APE evidence. It does not certify every Linux distribution,
-Linux ARM64, Windows, macOS x86-64, native Linux Rust builds, installed real Codex
-on Linux, or live inference providers on Linux. Model perception tests previously
-run on macOS remain separate from these exact-wire Linux fixture checks.
+Those initial checks added Linux x86-64 APE fixture evidence. They did not verify
+real Codex model execution; the subsequent [headless Codex live checks](workloads.md#linux-live-evidence)
+now cover that path. Other Linux distributions, Linux ARM64, Windows, macOS
+x86-64, native Linux Rust builds, and live OpenRouter execution on Linux remain
+unverified. Model perception tests previously run on macOS remain separate from
+the exact-wire Linux media fixture checks.
 
 The first direct cross-host probe also found that inbound temporary TCP listeners
 on Linux were unreachable from the Mac. A plain Python listener on `0.0.0.0`

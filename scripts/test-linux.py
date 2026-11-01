@@ -63,7 +63,7 @@ def port():
         return sock.getsockname()[1]
 
 
-def cross_host_server(binary, key, peer):
+def cross_host_server(binary, key, peer, codex):
     command = ['/bin/bash', str(binary), '--data-dir', str(pathlib.Path('lan-data').resolve())]
     cli = lambda *args: subprocess.check_output(command + list(args), text=True, timeout=15).strip()
     public = cli('identity')
@@ -72,7 +72,7 @@ def cross_host_server(binary, key, peer):
     while ui == peer:
         ui = port()
     daemon = subprocess.Popen(command + ['serve', '--listen', f'0.0.0.0:{peer}', '--ui', f'127.0.0.1:{ui}',
-                                        '--codex', str(pathlib.Path('tests/fake-codex.py').resolve())],
+                                        '--codex', codex or str(pathlib.Path('tests/fake-codex.py').resolve())],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         lines = [daemon.stdout.readline() for _ in range(3)]
@@ -88,7 +88,7 @@ def cross_host_server(binary, key, peer):
     return 0
 
 
-def cross_host_check(ssh, remote, binary, peer_port):
+def cross_host_check(ssh, remote, binary, peer_port, codex, model):
     """Direct authenticated LAN traffic; SSH only bootstraps and controls test processes."""
     host_ip = socket.gethostbyname(ssh[-1].rsplit('@', 1)[-1])
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
@@ -99,7 +99,7 @@ def cross_host_check(ssh, remote, binary, peer_port):
         cli = lambda *args: subprocess.check_output(command + list(args), text=True, timeout=30).strip()
         key = cli('identity')
         remote_command = 'cd ' + shlex.quote(remote) + ' && ' + shlex.join([
-            'python3', 'scripts/test-linux.py', '--cross-host-server', '--binary', './boxen.com', '--trust-key', key, '--peer-port', str(peer_port)])
+            'python3', 'scripts/test-linux.py', '--cross-host-server', '--binary', './boxen.com', '--trust-key', key, '--peer-port', str(peer_port)] + (['--codex', codex] if codex else []))
         server = subprocess.Popen(ssh + [remote_command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, text=True)
         daemon = None
@@ -117,30 +117,48 @@ def cross_host_check(ssh, remote, binary, peer_port):
             server.stdin.write(json.dumps({'address': f'{local_ip}:{local_peer}', 'message': marker}) + '\n')
             server.stdin.flush()
             assert json.loads(server.stdout.readline())['message'] == marker
-            run = json.loads(cli('start', address, peer['key'], peer['cwd'], 'fixture', 'SLOW'))
+            prompt = (f'Please run the shell command `printf {marker}; sleep 1; printf {marker} > proof.txt`, then reply with the exact marker.' if codex else 'SLOW')
+            run = json.loads(cli('start', address, peer['key'], peer['cwd'], model if codex else 'fixture', prompt))
             ident = run['record']['spec']['id']
             watch = subprocess.Popen(command + ['watch', address, peer['key'], ident, '--once'],
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            events, first_output = [], None
+            events, first_output, first_command = [], None, None
             try:
                 for line in watch.stdout:
                     event = json.loads(line)
                     events.append(event)
+                    if first_command is None and event['data'].get('method') == 'item/started' and event['data'].get('params',{}).get('item',{}).get('type')=='commandExecution':
+                        first_command = time.monotonic()
                     if first_output is None and event['data'].get('method') == 'item/commandExecution/outputDelta':
                         first_output = time.monotonic()
                 assert watch.wait(timeout=10) == 0, watch.stderr.read()
-                assert first_output is not None and time.monotonic() - first_output > .5, 'LAN output was not observed before completion'
+                terminal = [e['data'] for e in events if e['kind']=='status']
+                assert terminal and terminal[-1]['status']=='completed', terminal
+                observed = first_command if codex else first_output
+                assert observed is not None and time.monotonic() - observed > .5, 'LAN tool activity was not observed before completion'
             finally:
                 if watch.poll() is None:
                     watch.terminate()
                     watch.wait(timeout=10)
-            assert any(e['data'].get('method') == 'item/commandExecution/outputDelta' for e in events)
+            if not codex:
+                assert any(e['data'].get('method') == 'item/commandExecution/outputDelta' for e in events)
             assert any(e['kind'] == 'status' and e['data']['status'] == 'completed' for e in events)
             assert [e['seq'] for e in events] == list(range(1, len(events) + 1))
             replay = [json.loads(line) for line in cli('watch', address, peer['key'], ident, '--once').splitlines()]
             assert replay == events
-            return {'ok': True, 'transport': 'direct_tcp', 'direct_lan_verified': True, 'linux_address': address, 'local_address': f'{local_ip}:{local_peer}', 'bidirectional_ping': True, 'linux_workload': 'controlled Codex fixture',
-                    'events': len(events), 'streamed_before_completion': True, 'gap_free_replay': True}
+            if codex:
+                effect = subprocess.check_output(ssh + ['cat ' + shlex.quote(remote + '/proof.txt')], text=True, timeout=15)
+                assert effect == marker
+                assert marker in json.loads(cli('thread-result', address, peer['key'], ident))['response']
+                follow = json.loads(cli('start', address, peer['key'], peer['cwd'], model,
+                    'What exact marker did the earlier command write? Please answer from the conversation without tools.', '--thread', run['record']['spec']['thread_id']))
+                more = [json.loads(line) for line in cli('watch', address, peer['key'], follow['record']['spec']['id'], '--once').splitlines()]
+                assert marker in json.loads(cli('thread-result', address, peer['key'], follow['record']['spec']['id']))['response']
+                original = next(e['data']['id'] for e in events if e['kind']=='backend_thread')
+                resumed = next(e['data']['id'] for e in more if e['kind']=='backend_thread')
+                assert original == resumed and not any(e['kind']=='backend_session_rebuilt' for e in more)
+            return {'ok': True, 'transport': 'direct_tcp', 'direct_lan_verified': True, 'linux_address': address, 'local_address': f'{local_ip}:{local_peer}', 'bidirectional_ping': True, 'linux_workload': 'real Codex app-server' if codex else 'controlled Codex fixture', 'real_shell_effect_and_resume': bool(codex),
+                    'events': len(events), 'streamed_before_completion': True, 'command_output_deltas': first_output is not None, 'gap_free_replay': True}
         finally:
             server.stdin.close()
             try:
@@ -155,6 +173,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('host', nargs='?', default='chad@resident-host.lan')
     parser.add_argument('--binary', type=pathlib.Path, default=pathlib.Path('target/cosmo/release/boxen.com'))
+    parser.add_argument('--codex', help='Optional existing Linux Codex executable for a real authenticated LAN workload')
+    parser.add_argument('--codex-model', default='-', help='Model for optional live Codex check (default runtime choice)')
     parser.add_argument('--peer-port', type=int, default=42426, help='Linux direct test listener port (default 42426)')
     parser.add_argument('--output', type=pathlib.Path, help='Local report directory (default work/linux/TIMESTAMP)')
     parser.add_argument('--cross-host-server', action='store_true', help=argparse.SUPPRESS)
@@ -164,7 +184,7 @@ def main():
     if not 1024 <= args.peer_port <= 65535:
         parser.error('--peer-port is in 1024–65535')
     if args.cross_host_server:
-        return cross_host_server(args.binary.resolve(), args.trust_key, args.peer_port)
+        return cross_host_server(args.binary.resolve(), args.trust_key, args.peer_port, args.codex)
     if args.worker:
         return worker(args.binary.resolve())
     root = pathlib.Path(__file__).resolve().parent.parent
@@ -207,7 +227,7 @@ def main():
         raw = subprocess.check_output(ssh + ['cat ' + shlex.quote(remote + '/result.json')], text=True, timeout=20)
         report.update(json.loads(raw))
         if report['ok'] and status == 0:
-            report['cross_host'] = cross_host_check(ssh, remote, binary, args.peer_port)
+            report['cross_host'] = cross_host_check(ssh, remote, binary, args.peer_port, args.codex, args.codex_model)
             print(json.dumps({'cross_host_result': report['cross_host']}), flush=True)
         report['ssh_exit_code'] = status
         report['ok'] = report['ok'] and status == 0 and report['environment']['binary_sha256'] == digest and report.get('cross_host', {}).get('ok', False)
