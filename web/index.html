@@ -78,6 +78,10 @@
 <button id="refreshSchedules" type="button">Refresh schedules</button>
 <p id="scheduleStatus" role="status"></p><div id="scheduleList"></div>
 </details>
+<details><summary>Observation sources</summary>
+<p class="meta">Source health and subscriptions on the selected machine. External adapters and subscription controls are available through the authenticated API and CLI.</p>
+<button id="refreshObservations" type="button">Refresh observations</button><pre id="observationStatus"></pre>
+</details>
 <p id="runStatus" role="status" aria-live="polite"></p>
 <p class="meta" id="location"></p>
 <section id="messagesView" hidden aria-label="Mailbox messages">
@@ -128,6 +132,7 @@ async function operation(request, destination=target) {
   return response.json();
 }
 function controls() {
+  $('refreshObservations').disabled=!connected;
   $('saveSchedule').disabled=!connected||scheduleBusy||(!selectedThread&&!editingSchedule&&!pendingSchedule);
   $('refreshSchedules').disabled=!connected||scheduleBusy;
   $('scheduleTarget').textContent='Target: '+(editingSchedule?.definition.target.id||pendingSchedule?.request.spec?.target.id||selectedThread||'An existing thread or resident');
@@ -450,7 +455,7 @@ async function connect() {
 }
 $('connect').onsubmit=event=>{event.preventDefault();connect();};
 $('threads').onchange=()=>showThread($('threads').value,true);
-$('peer').onchange=()=>{editingSchedule=null;pendingSchedule=null;$('scheduleList').replaceChildren();$('saveSchedule').textContent='Create schedule';detach();connected=false;selectedThread='';currentRun=null;pendingStart=null;records=[];residents=[];mailMessages.clear();$('messagesView').hidden=true;$('mailMessages').replaceChildren();updateThreads();$('transcript').replaceChildren();$('residentDetails').hidden=true;target={peer:$('peer').value,address:$('address').value};$('addressLabel').hidden=$('peer').value===identity;controls();};
+$('peer').onchange=()=>{$('observationStatus').textContent='';editingSchedule=null;pendingSchedule=null;$('scheduleList').replaceChildren();$('saveSchedule').textContent='Create schedule';detach();connected=false;selectedThread='';currentRun=null;pendingStart=null;records=[];residents=[];mailMessages.clear();$('messagesView').hidden=true;$('mailMessages').replaceChildren();updateThreads();$('transcript').replaceChildren();$('residentDetails').hidden=true;target={peer:$('peer').value,address:$('address').value};$('addressLabel').hidden=$('peer').value===identity;controls();};
 $('work').onsubmit=async event=>{
   event.preventDefault();if(!connected||syncing)return;
   const gen=generation,destination={...target};
@@ -515,6 +520,7 @@ $('autoActivate').onchange=async()=>{
   try{const updated=await operation({op:'resident_update',id:resident.id,patch:{expected_revision:resident.revision,auto_activate:$('autoActivate').checked}});residents=residents.map(r=>r.id===updated.id?updated:r);if(editorRevision===resident.revision)editorRevision=updated.revision;controls();}catch(error){$('mailStatus').textContent=error.message;controls();}
 };
 
+$('refreshObservations').onclick=async()=>{const gen=generation;try{const value=await operation({op:'events',args:{action:'list'}});if(gen!==generation)return;$('observationStatus').textContent=JSON.stringify(value,null,2);}catch(error){$('observationStatus').textContent=error.message;}};
 function localScheduleTime(ms){return new Date(ms-new Date(ms).getTimezoneOffset()*60000).toISOString().slice(0,19);}
 $('scheduleAt').value=localScheduleTime(Date.now()+60000);
 async function refreshSchedules(){
@@ -522,7 +528,7 @@ async function refreshSchedules(){
  do {const page=await operation({op:'schedule',args:{action:'list',after_id:after,limit:20}},destination);if(gen!==generation)return;jobs.push(...page.jobs);if(!after)issues=page.issues||[];if(page.jobs.length<20)break;after=page.next_after_id;}while(after);
  $('scheduleList').replaceChildren();
  for(const issue of issues){const row=document.createElement('p');row.textContent='Schedule '+issue.id+' unavailable · '+issue.detail;$('scheduleList').append(row);}
- for(const job of jobs){const row=document.createElement('p');row.append(document.createTextNode(job.definition.name+' · '+job.definition.target.type+' '+job.definition.target.id.slice(0,10)+' · '+(job.deleted?'deleted':job.enabled?'enabled':'paused/completed')+' · next '+(job.next_at_ms?new Date(job.next_at_ms).toLocaleString():'none')+' · last '+(job.last?.outcome||'none')+(job.unavailable?' · '+job.unavailable:'')));
+ for(const job of jobs.filter(j=>['resident','thread'].includes(j.definition.target.type))){const row=document.createElement('p');row.append(document.createTextNode(job.definition.name+' · '+job.definition.target.type+' '+job.definition.target.id.slice(0,10)+' · '+(job.deleted?'deleted':job.enabled?'enabled':'paused/completed')+' · next '+(job.next_at_ms?new Date(job.next_at_ms).toLocaleString():'none')+' · last '+(job.last?.outcome||'none')+(job.unavailable?' · '+job.unavailable:'')));
   if(!job.deleted){
    const edit=document.createElement('button');edit.type='button';edit.textContent='Edit';edit.onclick=async()=>{scheduleBusy=true;controls();try{const current=await operation({op:'schedule',args:{action:'get',id:job.definition.id}},destination);if(gen!==generation)return;editingSchedule=current;pendingSchedule=null;$('scheduleName').value=current.definition.name;$('scheduleAt').value=localScheduleTime(current.next_at_ms||Date.now()+60000);editingSchedule.editorAt=$('scheduleAt').value;$('scheduleInterval').value=(current.definition.interval_ms||0)/1000;$('scheduleDirections').value=current.definition.directions;$('saveSchedule').textContent=current.next_at_ms?'Save schedule':'Schedule again';$('scheduleStatus').textContent='Editing revision '+current.revision;controls();}catch(e){$('scheduleStatus').textContent=e.message;}finally{scheduleBusy=false;controls();}};row.append(edit);
    for(const [label,patch] of [...(job.next_at_ms?[[job.enabled?'Pause':'Resume',{enabled:!job.enabled}]]:[]),['Delete',{delete:true}]]){const button=document.createElement('button');button.type='button';button.textContent=label;button.onclick=async()=>{try{await operation({op:'schedule',args:{action:'update',id:job.definition.id,patch:{expected_revision:job.revision,...patch}}},destination);await refreshSchedules();}catch(e){$('scheduleStatus').textContent=e.message;}};row.append(button);}

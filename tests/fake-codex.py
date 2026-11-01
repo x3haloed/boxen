@@ -52,6 +52,24 @@ def work(prompt):
             pass
         notification("serverRequest/resolved", {"requestId": "approval-1"})
     answer = "Fixture result"
+    if prompt.startswith('EVENT_GAME:'):
+        settings=json.loads(prompt.split(':',1)[1]);sub=settings['subscription_id'];generation=settings['source_generation']
+        response,listed=invoke('boxen_observations',{'action':'list'},190);assert response['success'] and any(s['spec']['id']==sub for s in listed['subscriptions'])
+        response,batch=invoke('boxen_observations',{'action':'read','id':sub},191);assert response['success']
+        response,look=invoke('boxen_adapter',{'subscription_id':sub,'source_generation':generation,'tool':'look','arguments':{}},192)
+        assert response['success'] and not look.get('unknown'),look
+        revision=look['response']['observations'][0]['payload']['revision']
+        for number,direction in enumerate(['east','east','south','south']):
+            response,result=invoke('boxen_adapter',{'subscription_id':sub,'source_generation':generation,'tool':'move','arguments':{'direction':direction,'revision':revision}},193+number)
+            assert response['success'] and result['response']['result']['accepted'],result
+            revision=result['response']['observations'][0]['payload']['revision']
+        assert result['response']['observations'][0]['payload']['won']
+        response,stale=invoke('boxen_adapter',{'subscription_id':sub,'source_generation':generation,'tool':'move','arguments':{'direction':'north','revision':1}},198)
+        assert response['success'] and not stale['response']['result']['accepted']
+        answer='EXTERNAL_GAME_WON'
+    if prompt.startswith('EVENT_CALL:'):
+        response,result=invoke('boxen_adapter',json.loads(prompt.split(':',1)[1]),199)
+        assert response['success'];answer=json.dumps(result)
     if "RESIDENT_" in prompt:
         assert resident_context is not None
         response, state = continuity({"action":"read"}, 1)

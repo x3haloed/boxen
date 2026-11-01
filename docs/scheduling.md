@@ -10,7 +10,7 @@ when available, subject to the existing explicit reconstruction limits.
 
 ## Handlers and communication
 
-Two handlers are implemented:
+Two user workload handlers are implemented:
 
 - `{"type":"resident","id":"…"}` activates an existing resident, including
   with an empty inbox. Pending mail is presented as the usual activation batch;
@@ -163,3 +163,9 @@ trigger, and resident activation without mail. The Linux scheduling evidence
 uses the controlled Codex fixture; it does not establish real-model scheduling on
 Linux. Windows and other untested platforms remain unverified. No Aster migration
 or production schedule was created by these checks.
+
+Internal source-collection and batch-readiness handlers now reuse the same timing
+authority for [observation subscriptions](events-runtime.md). Their read-only timing
+journals checkpoint every 32 records with monotonic sequence IDs and an explicit
+coalesced-history marker. User workload journals and accepted execution records
+retain their existing authority and history; this checkpoint is not effect replay.

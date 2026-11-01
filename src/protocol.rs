@@ -349,6 +349,7 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 request["thread_id"].as_str().ok_or("thread_id required")?,
                 request["args"].clone(),
             ),
+            "events" => jobs.event_operation(owner, request["args"].clone()),
             "schedule" => jobs.schedule_operation(owner, request["args"].clone()),
             "runtime_info" => Ok(jobs.runtime_info()),
             "mailbox_status" => Ok(jobs.mailboxes.status()),

@@ -5,6 +5,7 @@ mod agent_tools;
 mod chat;
 mod codex;
 mod context;
+mod events;
 mod inference;
 #[cfg(feature = "inference-probe")]
 mod inference_probe;
@@ -54,6 +55,7 @@ boxen [--data-dir PATH] peers\n\
 boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--codex PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
 boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|openrouter] [--context JSON]\n\
+boxen [--data-dir PATH] events HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] schedule HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] context HOST:PORT PUBLIC_KEY THREAD_ID JSON\n\
 boxen [--data-dir PATH] runs HOST:PORT PUBLIC_KEY\n\
@@ -340,14 +342,14 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 )?
             );
         }
-        "schedule" if args.len() == 3 => {
+        "events" | "schedule" if args.len() == 3 => {
             println!(
                 "{}",
                 protocol::request(
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"schedule","args":serde_json::from_str::<serde_json::Value>(&args[2])?})
+                    serde_json::json!({"op":command,"args":serde_json::from_str::<serde_json::Value>(&args[2])?})
                 )?
             );
         }

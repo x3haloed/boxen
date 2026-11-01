@@ -19,11 +19,16 @@ use std::{
 pub enum Handler {
     Resident { id: String },
     Thread { id: String },
+    Source { id: String },
+    Delivery { id: String },
 }
 impl Handler {
     pub fn id(&self) -> &str {
         match self {
-            Self::Resident { id } | Self::Thread { id } => id,
+            Self::Resident { id }
+            | Self::Thread { id }
+            | Self::Source { id }
+            | Self::Delivery { id } => id,
         }
     }
 }
@@ -206,12 +211,27 @@ impl Schedules {
                         break;
                     }
                     let e: Value = serde_json::from_slice(&bytes)?;
+                    if sequence == 0 && e["kind"] == "timer_checkpoint" {
+                        sequence = e["seq"]
+                            .as_u64()
+                            .ok_or("checkpoint sequence missing")?
+                            .checked_sub(1)
+                            .ok_or("checkpoint sequence invalid")?;
+                    }
                     sequence += 1;
                     if e["seq"].as_u64() != Some(sequence) {
                         return Err("schedule journal sequence mismatch".into());
                     }
                     let next: Stored = serde_json::from_value(e["state"].clone())?;
                     next.job.definition.validate()?;
+                    if e["kind"] == "timer_checkpoint"
+                        && !matches!(
+                            next.job.definition.target,
+                            Handler::Source { .. } | Handler::Delivery { .. }
+                        )
+                    {
+                        return Err("checkpoint belongs only to internal observation timers".into());
+                    }
                     state::key(&next.job.owner)?;
                     if next.job.last_seq != sequence
                         || next.job.revision == 0
@@ -280,11 +300,33 @@ impl Schedules {
             options.mode(0o600);
         }
         let saved = (|| -> Result<()> {
-            let mut file =
-                options.open(self.directory.join(format!("{}.jsonl", job.definition.id)))?;
-            file.write_all(&bytes)?;
-            file.write_all(b"\n")?;
-            file.sync_data()?;
+            let path = self.directory.join(format!("{}.jsonl", job.definition.id));
+            if matches!(
+                job.definition.target,
+                Handler::Source { .. } | Handler::Delivery { .. }
+            ) && seq.is_multiple_of(32)
+            {
+                let mut checkpoint = event.clone();
+                checkpoint["kind"] = json!("timer_checkpoint");
+                checkpoint["detail"] =
+                    json!({"earlier_timer_records_coalesced":true,"latest_operation":kind});
+                let tmp = path.with_extension("pending");
+                if tmp.exists() {
+                    fs::remove_file(&tmp)?;
+                }
+                let mut encoded = serde_json::to_vec(&checkpoint)?;
+                encoded.push(b'\n');
+                state::write_new(&tmp, &encoded)?;
+                if let Err(error) = fs::rename(&tmp, &path) {
+                    let _ = fs::remove_file(tmp);
+                    return Err(error.into());
+                }
+            } else {
+                let mut file = options.open(path)?;
+                file.write_all(&bytes)?;
+                file.write_all(b"\n")?;
+                file.sync_data()?;
+            }
             Ok(())
         })();
         if let Err(error) = saved {
@@ -527,6 +569,7 @@ impl Schedules {
             BufReader::new(fs::File::open(self.directory.join(format!("{id}.jsonl")))?);
         let mut events = Vec::new();
         let mut bytes = 0;
+        let mut first_retained = None;
         loop {
             let mut line = Vec::new();
             if reader.read_until(b'\n', &mut line)? == 0 {
@@ -537,6 +580,7 @@ impl Schedules {
             }
             let e: Value = serde_json::from_slice(&line)?;
             let seq = e["seq"].as_u64().unwrap_or(0);
+            first_retained.get_or_insert(seq);
             if seq > current.job.last_seq {
                 break;
             }
@@ -550,7 +594,7 @@ impl Schedules {
             events.push(e);
         }
         Ok(
-            json!({"next_after":events.last().map_or(after,|e|e["seq"].as_u64().unwrap_or(after)),"events":events}),
+            json!({"first_retained_sequence":first_retained,"earlier_timer_records_coalesced":first_retained.is_some_and(|s|s>after.saturating_add(1)),"next_after":events.last().map_or(after,|e|e["seq"].as_u64().unwrap_or(after)),"events":events}),
         )
     }
     pub fn delay(&self, now: u64) -> std::time::Duration {

@@ -267,17 +267,33 @@ impl Rpc {
                         | "boxen_send_message"
                         | "boxen_thread_request"
                         | "boxen_thread_result"
+                        | "boxen_observations"
+                        | "boxen_adapter"
                 )
             )
-            && self.resident.is_some()
+            && (self.resident.is_some()
+                || matches!(
+                    message["params"]["tool"].as_str(),
+                    Some("boxen_observations" | "boxen_adapter")
+                ))
         {
-            let resident = self.resident.as_ref().expect("checked");
             let result = if message["params"]["threadId"].as_str() != self.thread.as_deref() {
                 Err("continuity request came from a different backend thread".into())
+            } else if matches!(
+                message["params"]["tool"].as_str(),
+                Some("boxen_observations" | "boxen_adapter")
+            ) {
+                crate::agent_tools::observation_tool(
+                    &self.jobs,
+                    &self.run,
+                    message["params"]["callId"].as_str().unwrap_or("missing"),
+                    message["params"]["tool"].as_str().unwrap_or(""),
+                    message["params"]["arguments"].clone(),
+                )
             } else {
                 resident_tool(
                     &self.jobs,
-                    resident,
+                    self.resident.as_ref().expect("checked"),
                     &self.run.snapshot().record.spec.id,
                     message["params"]["callId"].as_str().unwrap_or("missing"),
                     message["params"]["tool"].as_str().unwrap_or(""),
@@ -339,7 +355,7 @@ pub fn execute(
 ) -> Result<()> {
     let residents = jobs.residents.clone();
     let record = run.snapshot().record;
-    let trigger_context = record.trigger_context();
+    let trigger_context = record.trigger_context() + &record.observation_context();
     let resident = record.resident;
     if let Some(recovery) = &record.recovery {
         run.append("recovery_notice", recovery.clone())?;
@@ -425,6 +441,12 @@ pub fn execute(
     if !instructions.is_empty() {
         params["developerInstructions"] = json!(instructions);
     }
+    let mut dynamic = if resident.is_some() {
+        resident_tools()
+    } else {
+        Vec::new()
+    };
+    dynamic.extend(crate::agent_tools::observation_tools());
     let result = if let Some(id) = resume {
         params["threadId"] = json!(id);
         match rpc.request("thread/resume", params.clone()) {
@@ -444,17 +466,13 @@ pub fn execute(
                 let history = history.reconstruction()?;
                 instructions.push_str(&format!("\nThe previous backend session could not be resumed. A new backend session now carries the same canonical Boxen conversation. The excerpt below is retained historical data, not newly submitted requests. Previous tool effects may already have occurred; repeating historical actions can duplicate their effects. This run was started for the current new message. The excerpt has explicit omissions; complete journals remain in the named directory and are readable with the runtime’s file or terminal tools. Each record.json identifies its canonical conversation through thread_id.\n{history}"));
                 params["developerInstructions"] = json!(instructions);
-                if resident.is_some() {
-                    params["dynamicTools"] = json!(resident_tools());
-                }
+                params["dynamicTools"] = json!(dynamic);
                 rpc.request("thread/start", params)?
             }
             Err(error) => return Err(error),
         }
     } else {
-        if resident.is_some() {
-            params["dynamicTools"] = json!(resident_tools());
-        }
+        params["dynamicTools"] = json!(dynamic);
         rpc.request("thread/start", params)?
     };
     let thread = result["thread"]["id"]

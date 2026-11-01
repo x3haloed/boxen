@@ -67,3 +67,22 @@ Diagnostic subscriptions and file control are separately documented in [logging]
 The authenticated operation `{"op":"runtime_info"}` reports available runtime kinds and configuration readiness without returning credentials. OpenRouter threads use the existing start/list/control/watch operations; resident creation adds optional `backend` (default `codex`). See [inference](inference.md) for configuration, lifecycle, limits and verification.
 
 Built-in event kinds include `inference_attempt`, `inference_frame` (step plus native event), `inference_exchange_completed` (finish reason and usage), `inference_message` (accepted provider message), `assistant_delta`, `reasoning_delta`, `assistant_message`, `tool_arguments_delta`, `tool_started`, `tool_output`, `tool_result`, `tool_outcome_unknown`, and `context_projection`. Text deltas have an item `id` and `text`; a completed `assistant_message` replaces that item's text instead of appending a second copy. Reasoning items have distinct IDs. Tool events carry a run-scoped call ID; raw provider IDs are scoped by step. Unknown native frames can be retained without becoming accepted context. Resident assistant content remains private activity regardless of event kind.
+
+## Observation sources and external adapters
+
+`{"op":"events","args":{"action":"list"}}` reports owned source health,
+subscription positions/lifetimes, and any pending-store incident. Registration,
+publication, lifecycle controls, bounded preview, and the optional agent query/action
+tools are documented in [the observation implementation](events-runtime.md).
+`runtime_info.observations` declares the protocol, JSON input boundary, delivery
+paths, pending-store bound, and native-session tool-registration limitation.
+
+Accepted run records optionally include `observations`, containing exact prepared
+batches with source/subscription generations, timestamps, sequence ranges,
+health, explicit gaps, and source-authored data. The shared run stream additionally
+retains `observation_batch`, `adapter_call_started`, `adapter_call_result`, and any
+`observation_incident`. Missing adapter results remain unknown, not commands to
+replay. Anonymous responses and resident private narration keep their existing
+contracts. Internal collection/batch timers are inspectable scheduler records;
+source/subscription controls manage their policy rather than ordinary schedule
+editing. [Scheduling](scheduling.md) remains available independently of streams.

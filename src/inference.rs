@@ -544,6 +544,7 @@ pub fn execute(
 ) -> Result<()> {
     let record = run.snapshot().record;
     let trigger_context = record.trigger_context();
+    let observation_context = record.observation_context();
     let resident = record.resident;
     if let Some(recovery) = &record.recovery {
         run.append("recovery_notice", recovery.clone())?;
@@ -583,7 +584,7 @@ pub fn execute(
     if let Some(recovery) = &record.recovery {
         system.push_str(&format!("\nRecovery incident: {recovery}"));
     }
-    let input = json!({"role":"user","content":spec.prompt});
+    let input = json!({"role":"user","content":format!("{}{}",spec.prompt,observation_context)});
     run.append("inference_message", input.clone())?;
 
     let mut tools = vec![
@@ -591,6 +592,9 @@ pub fn execute(
     ];
     tools.push(media::tool());
     tools.push(context::tool());
+    for tool in agent_tools::observation_tools() {
+        tools.push(json!({"type":"function","function":{"name":tool["name"],"description":tool["description"],"parameters":tool["inputSchema"]}}));
+    }
     if resident.is_some() {
         for tool in agent_tools::resident_tools() {
             tools.push(json!({"type":"function","function":{"name":tool["name"],"description":tool["description"],"parameters":tool["inputSchema"]}}));
@@ -841,6 +845,8 @@ pub fn execute(
                             (view.settings.budget_bytes / 16).clamp(2048, 4096),
                         )
                         .map(Some)
+                } else if matches!(name, "boxen_observations" | "boxen_adapter") {
+                    agent_tools::observation_tool(&jobs, &run, &id, name, args).map(Some)
                 } else if let Some(r) = &resident {
                     agent_tools::resident_tool(&jobs, r, &spec.id, &id, name, args).map(Some)
                 } else {

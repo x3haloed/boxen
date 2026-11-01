@@ -1,10 +1,6 @@
 # Observations, subscriptions, and event delivery
 
-Agreed design, November 1, 2026. This document describes planned behavior. The
-existing scheduler, mailbox, runtime, media, and execution journals are
-implemented; observation sources, subscriptions, and external adapters described
-here are not yet implemented. Protocol syntax, numeric defaults, and the open
-questions below remain to be designed.
+Agreed design, November 1, 2026. The first [host-local JSON implementation](events-runtime.md) now provides sources, subscriptions, scheduled batching with optional waking, bounded health, lifetime controls, and external query/action adapters. That implementation contract records numeric bounds, actual runtime support, and verification. This document preserves the broader design; native stream-media projection, cross-machine source mobility, and other open capabilities below are not implied implemented.
 
 ## Purpose and boundaries
 

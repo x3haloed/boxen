@@ -22,7 +22,7 @@ import tempfile
 import time
 
 SUITES = ["platform", "smoke", "workload", "recovery", "resident", "mailbox",
-          "logging", "scheduler", "inference-runtime", "compaction", "media", "inference-probe"]
+          "logging", "scheduler", "events", "inference-runtime", "compaction", "media", "inference-probe"]
 
 
 def worker(binary):
@@ -169,6 +169,23 @@ def cross_host_check(ssh, remote, binary, peer_port, codex, model):
                 assert [e['seq'] for e in scheduled_events] == list(range(1,len(scheduled_events)+1))
                 assert [json.loads(line) for line in cli('watch',address,peer['key'],scheduled_id,'--once').splitlines()] == scheduled_events
                 scheduled_wake = True
+                source_id,subscription_id=os.urandom(32).hex(),os.urandom(32).hex()
+                def observation(action,**args):
+                    return json.loads(cli('events',address,peer['key'],json.dumps({'action':action,**args})))
+                observation('create_source',spec={'id':source_id,'name':'Direct LAN observations','cwd':peer['cwd']})
+                observation('subscribe',spec={'id':subscription_id,'source':source_id,'target':{'type':'thread','id':run['record']['spec']['thread_id']},'interval_ms':1000,'waking':False,'lifetime':'until','expires_at_ms':int(time.time()*1000)+60000})
+                observation('publish',id=source_id,generation=1,sequence=1,response={'protocol':'boxen-adapter-v1','observations':[{'id':marker,'observed_at_ms':int(time.time()*1000),'payload':{'proof':marker}}]})
+                deadline=time.monotonic()+10
+                while time.monotonic()<deadline:
+                    if observation('subscription',id=subscription_id)['cutoff']==1:break
+                    time.sleep(.05)
+                else:raise AssertionError('direct LAN observation batch did not become ready')
+                with_input=json.loads(cli('start',address,peer['key'],peer['cwd'],'fixture','SLOW observation follow-up','--thread',run['record']['spec']['thread_id']))
+                assert with_input['record']['observations'][0]['observations'][0]['payload']['proof']==marker
+                received=[json.loads(line) for line in cli('watch',address,peer['key'],with_input['record']['spec']['id'],'--once').splitlines()]
+                assert any(e['kind']=='status' and e['data']['status']=='completed' for e in received)
+                assert observation('subscription',id=subscription_id)['cursor']==1
+
             if codex:
                 effect = subprocess.check_output(ssh + ['cat ' + shlex.quote(remote + '/proof.txt')], text=True, timeout=15)
                 assert effect == marker
@@ -181,7 +198,7 @@ def cross_host_check(ssh, remote, binary, peer_port, codex, model):
                 resumed = next(e['data']['id'] for e in more if e['kind']=='backend_thread')
                 assert original == resumed and not any(e['kind']=='backend_session_rebuilt' for e in more)
             return {'ok': True, 'transport': 'direct_tcp', 'direct_lan_verified': True, 'linux_address': address, 'local_address': f'{local_ip}:{local_peer}', 'bidirectional_ping': True, 'linux_workload': 'real Codex app-server' if codex else 'controlled Codex fixture', 'real_shell_effect_and_resume': bool(codex),
-                    'scheduled_thread_wake_and_replay': scheduled_wake, 'events': len(events), 'streamed_before_completion': True, 'command_output_deltas': first_output is not None, 'gap_free_replay': True}
+                    'observation_batch_transfer':not bool(codex),'scheduled_thread_wake_and_replay': scheduled_wake, 'events': len(events), 'streamed_before_completion': True, 'command_output_deltas': first_output is not None, 'gap_free_replay': True}
         finally:
             server.stdin.close()
             try:
@@ -237,6 +254,9 @@ def main():
                     name = 'smoke.py' if suite == 'smoke' else suite + '-smoke.py'
                     archive.add(root / 'scripts' / name, arcname='scripts/' + name)
                 archive.add(root / 'tests/fake-codex.py', arcname='tests/fake-codex.py')
+                archive.add(root / 'tests/event-adapter.py', arcname='tests/event-adapter.py')
+                for name in ['usgs.py','grid-game.py']:
+                    archive.add(root/'examples/adapters'/name,arcname='examples/adapters/'+name)
             bundle.seek(0)
             subprocess.run(ssh + ['tar -xf - -C ' + shlex.quote(remote)], stdin=bundle, check=True, timeout=60)
         cmd = 'cd ' + shlex.quote(remote) + ' && python3 scripts/test-linux.py --worker --binary ./boxen.com'
