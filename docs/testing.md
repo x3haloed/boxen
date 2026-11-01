@@ -12,9 +12,10 @@ python3 scripts/test-linux.py
 ```
 
 The runner defaults to `chad@resident-host.lan`; another SSH target can be supplied
-as its first argument. `--binary PATH` selects another built APE, and `--output
-PATH` selects the local evidence directory. The host needs passwordless SSH,
-Python 3, Bash, tar and OpenSSL, plus SSH TCP forwarding for the cross-host proof. Rust, Cargo, Node, an installed Boxen service,
+as its first argument. `--binary PATH` selects another built APE, `--peer-port PORT`
+selects the Linux direct-test port (default 42426), and `--output PATH` selects the
+local evidence directory. The host needs passwordless SSH,
+Python 3, Bash, tar and OpenSSL. Rust, Cargo, Node, an installed Boxen service,
 Codex, and model credentials are not prerequisites. The runner checks for the
 optional probe commands before uploading rather than silently skipping tests.
 
@@ -39,17 +40,28 @@ nonzero status. A suite has a 180-second deadline. This is a controlled-provider
 rotation: it does not copy OpenRouter keys or make paid model requests.
 
 After the Linux suites pass, temporary peers on the development machine and
-Linux exchange authenticated messages in both directions through loopback-bound SSH TCP forwards across the LAN.
+Linux exchange authenticated messages in both directions directly over the LAN.
+The Linux test peer listens on IPv4 TCP 42426; the Mac peer listens on its routed
+LAN IPv4 address and a temporary port. The runner fails if direct connectivity
+fails; it does not fall back to SSH forwarding.
 The development machine then submits a controlled Codex-fixture workload to
 Linux, observes command output before completion, and checks contiguous event
 sequences and exact replay. Only public pairing information crosses the SSH
 control stream; temporary GUI control tokens are not printed or retained in
-logs. Test listeners and forwards use temporary ports, bound to loopback. Production daemons, identities and
-pairing files are not changed. The temporary peers stop and the remote bundle is
+logs. GUI listeners stay on loopback at temporary ports. SSH transfers the bundle
+and controls test-process lifetime, but does not carry Boxen peer traffic.
+Production daemons, identities and pairing files are not changed. The temporary peers stop and the remote bundle is
 removed; cleanup status is included in the result.
 
+For the current trusted LAN, the user configured UFW to allow TCP 42424 (normal
+Boxen peers) and TCP 42426 (direct tests) from `192.168.128.0/24`. The runner does
+not alter firewall rules or start a persistent daemon on 42424. A different host
+or test port needs an appropriate existing rule and an available listener port.
+The GUI port does not need an inbound firewall exception.
+
 Evidence is saved locally under `work/linux/UTC_TIMESTAMP/{suites.log,result.json}`.
-The JSON includes Linux suite results and the cross-host result, explicitly labeled `ssh_forwarded_tcp`. A matching
+The JSON includes Linux suite results and the cross-host result, explicitly labeled `direct_tcp` with
+`direct_lan_verified: true` only after successful verification. A matching
 binary hash establishes that the tested Linux x86-64 executable is the same file
 used by the macOS ARM64 tests, rather than a separate Linux build.
 
@@ -80,9 +92,9 @@ run on macOS remain separate from these exact-wire Linux fixture checks.
 The first direct cross-host probe also found that inbound temporary TCP listeners
 on Linux were unreachable from the Mac. A plain Python listener on `0.0.0.0`
 timed out too, so this is not established as a Boxen transport defect. The
-rotation leaves host network policy alone and uses explicit SSH forwards for its
-cross-host proof. Direct Mac-to-Linux LAN reachability remains unverified; a
-successful tunneled result does not claim otherwise.
+initial rotation left host network policy alone and used explicit SSH forwards
+for its cross-host proof. That first tunneled result did not verify direct
+Mac-to-Linux LAN reachability.
 
 The completed rotation used APE SHA-256
 `551ee61602e0f7a8f04d443bd6711ccefb644b166ce0937b67b36e13c384df51`.
@@ -90,3 +102,15 @@ Both-direction messages and the Linux fixture workload passed over the explicit
 SSH forwards. The Mac observed tool output before completion and exactly replayed
 all 46 retained events. The report marked remote cleanup successful. The
 production Boxen installation and the Linux host's network policy were unchanged.
+
+## Direct LAN verification after the firewall exception
+
+After the user added the trusted-LAN UFW exceptions, the rotation switched to
+Linux TCP 42426 and direct peer traffic. The same APE passed all ten suites,
+bidirectional authenticated messages between `192.168.128.116` and
+`192.168.128.91:42426`, streamed Linux fixture output before completion, and exact
+replay of all 46 events. The result recorded `transport: direct_tcp` and
+`direct_lan_verified: true`. SSH handled setup and process control only; no
+forwarded connections or automatic tunnel fallback participated. Temporary peers
+and the remote bundle were cleaned up. The normal daemon port 42424 is separate
+from this disposable test listener; no permanent Linux service was installed.

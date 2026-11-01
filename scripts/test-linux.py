@@ -63,20 +63,22 @@ def port():
         return sock.getsockname()[1]
 
 
-def cross_host_server(binary, key):
+def cross_host_server(binary, key, peer):
     command = ['/bin/bash', str(binary), '--data-dir', str(pathlib.Path('lan-data').resolve())]
     cli = lambda *args: subprocess.check_output(command + list(args), text=True, timeout=15).strip()
     public = cli('identity')
     cli('trust', key, 'Rotation client')
-    peer, ui, reverse = port(), port(), port()
-    daemon = subprocess.Popen(command + ['serve', '--listen', f'127.0.0.1:{peer}', '--ui', f'127.0.0.1:{ui}',
+    ui = port()
+    while ui == peer:
+        ui = port()
+    daemon = subprocess.Popen(command + ['serve', '--listen', f'0.0.0.0:{peer}', '--ui', f'127.0.0.1:{ui}',
                                         '--codex', str(pathlib.Path('tests/fake-codex.py').resolve())],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         lines = [daemon.stdout.readline() for _ in range(3)]
         assert 'Local controls:' in lines[-1], 'Linux LAN daemon did not start'
         # Only public connection information leaves this process; no control token.
-        print(json.dumps({'key': public, 'port': peer, 'reverse_port': reverse, 'cwd': str(pathlib.Path.cwd())}), flush=True)
+        print(json.dumps({'key': public, 'port': peer, 'cwd': str(pathlib.Path.cwd())}), flush=True)
         for line in sys.stdin:
             request = json.loads(line)
             print(json.dumps(json.loads(cli('ping', request['address'], key, request['message']))), flush=True)
@@ -86,45 +88,33 @@ def cross_host_server(binary, key):
     return 0
 
 
-def cross_host_check(ssh, remote, binary):
-    """Actual cross-OS traffic over SSH forwards, using disposable identities."""
+def cross_host_check(ssh, remote, binary, peer_port):
+    """Direct authenticated LAN traffic; SSH only bootstraps and controls test processes."""
+    host_ip = socket.gethostbyname(ssh[-1].rsplit('@', 1)[-1])
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+        route.connect((host_ip, peer_port))
+        local_ip = route.getsockname()[0]
     with tempfile.TemporaryDirectory(prefix='boxen-linux-lan-') as directory:
         command = ['/bin/bash', str(binary), '--data-dir', directory]
         cli = lambda *args: subprocess.check_output(command + list(args), text=True, timeout=30).strip()
         key = cli('identity')
         remote_command = 'cd ' + shlex.quote(remote) + ' && ' + shlex.join([
-            'python3', 'scripts/test-linux.py', '--cross-host-server', '--binary', './boxen.com', '--trust-key', key])
+            'python3', 'scripts/test-linux.py', '--cross-host-server', '--binary', './boxen.com', '--trust-key', key, '--peer-port', str(peer_port)])
         server = subprocess.Popen(ssh + [remote_command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, text=True)
-        daemon, tunnel = None, None
+        daemon = None
         try:
             peer = json.loads(server.stdout.readline())
             cli('trust', peer['key'], 'Linux rotation')
-            local_peer, ui, reverse = port(), port(), port()
-            daemon = subprocess.Popen(command + ['serve', '--listen', f'127.0.0.1:{local_peer}', '--ui', f'127.0.0.1:{ui}'],
+            local_peer, ui = port(), port()
+            daemon = subprocess.Popen(command + ['serve', '--listen', f'{local_ip}:{local_peer}', '--ui', f'127.0.0.1:{ui}'],
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             lines = [daemon.stdout.readline() for _ in range(3)]
             assert 'Local controls:' in lines[-1], 'Local LAN daemon did not start'
-            forward = port()
-            tunnel = subprocess.Popen(ssh[:-1] + ['-o', 'ExitOnForwardFailure=yes', '-N',
-                '-L', f"127.0.0.1:{forward}:127.0.0.1:{peer['port']}",
-                '-R', f"127.0.0.1:{peer['reverse_port']}:127.0.0.1:{local_peer}", ssh[-1]],
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-            deadline = time.monotonic() + 10
-            while True:
-                if tunnel.poll() is not None:
-                    raise RuntimeError('SSH forward failed: ' + tunnel.stderr.read())
-                try:
-                    with socket.create_connection(('127.0.0.1', forward), timeout=.2):
-                        break
-                except OSError:
-                    if time.monotonic() > deadline:
-                        raise RuntimeError('SSH forward did not become ready')
-                    time.sleep(.05)
-            address = f"127.0.0.1:{forward}"
+            address = f"{host_ip}:{peer['port']}"
             marker = 'linux-rotation-' + os.urandom(8).hex()
             assert json.loads(cli('ping', address, peer['key'], marker))['message'] == marker
-            server.stdin.write(json.dumps({'address': f"127.0.0.1:{peer['reverse_port']}", 'message': marker}) + '\n')
+            server.stdin.write(json.dumps({'address': f'{local_ip}:{local_peer}', 'message': marker}) + '\n')
             server.stdin.flush()
             assert json.loads(server.stdout.readline())['message'] == marker
             run = json.loads(cli('start', address, peer['key'], peer['cwd'], 'fixture', 'SLOW'))
@@ -149,16 +139,13 @@ def cross_host_check(ssh, remote, binary):
             assert [e['seq'] for e in events] == list(range(1, len(events) + 1))
             replay = [json.loads(line) for line in cli('watch', address, peer['key'], ident, '--once').splitlines()]
             assert replay == events
-            return {'ok': True, 'transport': 'ssh_forwarded_tcp', 'direct_lan_verified': False, 'bidirectional_ping': True, 'linux_workload': 'controlled Codex fixture',
+            return {'ok': True, 'transport': 'direct_tcp', 'direct_lan_verified': True, 'linux_address': address, 'local_address': f'{local_ip}:{local_peer}', 'bidirectional_ping': True, 'linux_workload': 'controlled Codex fixture',
                     'events': len(events), 'streamed_before_completion': True, 'gap_free_replay': True}
         finally:
             server.stdin.close()
             try:
                 assert server.wait(timeout=15) == 0, server.stderr.read()
             finally:
-                if tunnel:
-                    tunnel.terminate()
-                    tunnel.wait(timeout=10)
                 if daemon:
                     daemon.terminate()
                     daemon.wait(timeout=10)
@@ -168,13 +155,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('host', nargs='?', default='chad@resident-host.lan')
     parser.add_argument('--binary', type=pathlib.Path, default=pathlib.Path('target/cosmo/release/boxen.com'))
+    parser.add_argument('--peer-port', type=int, default=42426, help='Linux direct test listener port (default 42426)')
     parser.add_argument('--output', type=pathlib.Path, help='Local report directory (default work/linux/TIMESTAMP)')
     parser.add_argument('--cross-host-server', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--trust-key', help=argparse.SUPPRESS)
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if not 1024 <= args.peer_port <= 65535:
+        parser.error('--peer-port is in 1024–65535')
     if args.cross_host_server:
-        return cross_host_server(args.binary.resolve(), args.trust_key)
+        return cross_host_server(args.binary.resolve(), args.trust_key, args.peer_port)
     if args.worker:
         return worker(args.binary.resolve())
     root = pathlib.Path(__file__).resolve().parent.parent
@@ -217,7 +207,7 @@ def main():
         raw = subprocess.check_output(ssh + ['cat ' + shlex.quote(remote + '/result.json')], text=True, timeout=20)
         report.update(json.loads(raw))
         if report['ok'] and status == 0:
-            report['cross_host'] = cross_host_check(ssh, remote, binary)
+            report['cross_host'] = cross_host_check(ssh, remote, binary, args.peer_port)
             print(json.dumps({'cross_host_result': report['cross_host']}), flush=True)
         report['ssh_exit_code'] = status
         report['ok'] = report['ok'] and status == 0 and report['environment']['binary_sha256'] == digest and report.get('cross_host', {}).get('ok', False)
