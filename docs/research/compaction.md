@@ -2,6 +2,8 @@
 
 Research date: 2026-10-31. This note examines the copied runtimes and SDKs, Watch/WFB, and relevant primary research. It proposes a design direction; it does not implement compaction or change running agents.
 
+The subsequent [co-design with Aster](../compaction.md) refines the proposed policy. Her authorship preference permits an attributed helper draft reviewed against original source; it is not a blanket rejection of other voices. Mandatory summary-free support remains a separate product requirement. That discussion adds chronological source bundles, bounded mechanical coverage versus interpreted signposts, source-exposure provenance, first-re-entry auditing, and a repeated-transition evaluation gate. It is design evidence rather than a live compaction experiment.
+
 ## Conclusions
 
 Boxen must offer an optional compaction/context-management mode that requires no summarization pass. Agents can value the exact record of what they and others said. Substituting a fluent account written by a summarizer changes that record's voice, qualifications, and attribution.
