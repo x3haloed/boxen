@@ -283,9 +283,9 @@ impl Store {
         ensure!(
             matches!(
                 input["context"]["decision"].as_str(),
-                Some("new_implementation" | "return_to_coder")
+                Some("new_implementation" | "return_to_coder" | "investigate")
             ),
-            "An explicit implementation/context decision is required"
+            "An explicit implementation or bounded-investigation decision is required"
         );
         ensure!(
             input["context"]["evidence"]
@@ -294,6 +294,25 @@ impl Store {
             "Context decision needs attributed evidence references"
         );
         let assignment = &input["assignment"];
+        let investigation = input["context"]["decision"] == "investigate";
+        if investigation {
+            ensure!(
+                assignment["task"]["mode"] == "investigation"
+                    && matches!(
+                        assignment["task"]["validation"].as_str(),
+                        Some("read_only" | "isolated_synthetic")
+                    )
+                    && assignment["task"]["production_edits"] == false
+                    && assignment["task"]["external_writes"] == false,
+                "Investigation names read_only/isolated_synthetic validation with production edits and external writes false"
+            );
+            ensure!(
+                input["context"]["investigation_rationale"]
+                    .as_str()
+                    .is_some_and(|v| !v.trim().is_empty()),
+                "Investigation rationale identifies useful work independent of unanswered questions"
+            );
+        }
         for field in [
             "job_id",
             "assignment_revision",
@@ -360,12 +379,21 @@ impl Store {
         if legacy["decision"]["kind"] == "wait_for_clarification"
             || legacy["job"]["state"] == "awaiting_clarification"
         {
-            ensure!(
-                input["context"]["authoritative_answers"]
-                    .as_array()
-                    .is_some_and(|v| !v.is_empty()),
-                "Existing clarification hold needs attributed answers before implementation"
-            );
+            if investigation {
+                ensure!(
+                    input["context"]["open_questions"]
+                        .as_array()
+                        .is_some_and(|v| !v.is_empty()),
+                    "Investigation retains unresolved questions; it does not release implementation holds"
+                );
+            } else {
+                ensure!(
+                    input["context"]["authoritative_answers"]
+                        .as_array()
+                        .is_some_and(|v| !v.is_empty()),
+                    "Existing clarification hold needs attributed answers before implementation"
+                );
+            }
         }
         let old: Option<(String, String, i64, i64)> = tx
             .query_row(

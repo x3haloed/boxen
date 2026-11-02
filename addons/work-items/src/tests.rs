@@ -270,3 +270,39 @@ fn large_source_retained_in_immutable_file_without_silent_mail_truncation() {
             < 32768
     );
 }
+
+#[test]
+fn investigation_preserves_open_questions_and_existing_owner_without_fake_answers() {
+    let f = Fixture::new();
+    let source = ado::config(&f.s).unwrap().source();
+    let c = f.s.connect().unwrap();
+    c.execute("INSERT INTO legacy_records VALUES(?1,1,'ownership',?2)",params![source,json!({"lifecycle":"unfinished","coder_thread_id":"11111111-1111-4111-8111-111111111111"}).to_string()]).unwrap();
+    c.execute("INSERT INTO legacy_records VALUES(?1,1,'decision',?2)",params![source,json!({"kind":"wait_for_clarification","questions":["Original failure evidence missing"]}).to_string()]).unwrap();
+    let mut input = f.input(1);
+    input["new_copy"] = json!(false);
+    input["coder_id"] = json!(hash("existing coder"));
+    input["legacy_reconciliation"] = json!("Same prior owner; incident cause stays unknown");
+    // An implementation continuation still cannot bypass the unresolved question.
+    assert!(f.s.assign(&f.cfg, &input).is_err());
+    input["context"]["decision"] = json!("investigate");
+    input["context"]["investigation_rationale"] = json!(
+        "Synthetic tests can measure the actual method without claiming incident attribution"
+    );
+    input["context"]["open_questions"] = json!(["Original failure evidence missing"]);
+    input["assignment"]["task"]["mode"] = json!("investigation");
+    input["assignment"]["task"]["validation"] = json!("isolated_synthetic");
+    input["assignment"]["task"]["production_edits"] = json!(false);
+    input["assignment"]["task"]["external_writes"] = json!(true);
+    assert!(f.s.assign(&f.cfg, &input).is_err());
+    input["assignment"]["task"]["external_writes"] = json!(false);
+    let r = f.s.assign(&f.cfg, &input).unwrap();
+    assert_eq!(r["coder_id"], input["coder_id"]);
+    assert_eq!(
+        f.s.packet(1).unwrap()["legacy"]["decision"]["kind"],
+        "wait_for_clarification"
+    );
+    let mut duplicate = input;
+    duplicate["idempotency_key"] = json!("duplicate new copy");
+    duplicate["new_copy"] = json!(true);
+    assert!(f.s.assign(&f.cfg, &duplicate).is_err());
+}

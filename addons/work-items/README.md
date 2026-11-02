@@ -126,6 +126,17 @@ then checks its recorded native thread. A normal existing Boxen copy must match 
 configured coder definition. References and cleanup assertions are operator records,
 not independent authentication/verification of human answers or resource cleanup.
 
+An explicit `context.decision: "investigate"` supports useful work independent of
+unanswered questions. It requires a nonempty `investigation_rationale` and retains
+`open_questions` when legacy clarification is pending. Its task names
+`mode: "investigation"`, `validation: "read_only"` or `"isolated_synthetic"`, and
+`production_edits: false`, `external_writes: false`. Publication remains disabled,
+existing coder ownership remains binding, and no legacy question is marked answered.
+The accepted scope directs the trusted Full Access worker; it is not an OS sandbox.
+Finishing such an assignment is an investigation handoff, not proof of the reported
+incident's cause, an implemented fix or work-item completion. Later implementation
+still requires its applicable answers/evidence and a new explicit assignment.
+
 The transaction accepts one work record per source/item, an immutable assignment
 version and frozen packet, deterministic coder creation/message IDs and pending
 dispatch. Repeating the exact key returns that accepted version; changed reuse
