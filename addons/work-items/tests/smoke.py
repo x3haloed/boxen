@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Real Boxen HTTP + workflow process, controlled Codex; no Azure/model/product effects."""
+import argparse,json,pathlib,subprocess,tempfile,time,socket,sqlite3,hashlib,os,sys,urllib.request
+from contextlib import contextmanager
+@contextmanager
+def database(path):
+    c=sqlite3.connect(path)
+    try:
+        with c:yield c
+    finally:c.close()
+p=argparse.ArgumentParser(description=__doc__);p.add_argument('--boxen',required=True,type=pathlib.Path);p.add_argument('--service',required=True,type=pathlib.Path);a=p.parse_args();boxen=a.boxen.resolve();service=a.service.resolve();repo=pathlib.Path(__file__).resolve().parents[3]
+def port():
+    with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
+def digest(s):return hashlib.sha256(s.encode()).hexdigest()
+with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
+    root=pathlib.Path(tmp);home=root/'workflow';legacy_home=root/'legacy';boxen_home=root/'boxen';pack=root/'pack';pack.mkdir();(pack/'scripts').mkdir()
+    worker=None;daemon=None;peer_port=port();ui=port()
+    fixture=root/'fake-codex.py';fixture.write_text((repo/'tests/fake-codex.py').read_text().replace('m["body"].startswith("REPLY")','m["body"].startswith("[Work-item service")'),encoding='utf-8')
+    wrapper=root/'codex.cmd';wrapper.write_text('@echo off\n"'+sys.executable+'" "'+str(fixture)+'" %*\n');codex=wrapper if os.name=='nt' else fixture
+    if os.name!='nt':fixture.chmod(0o755)
+    manifest=digest('fixture pack');definition=digest('fixture coder');client=digest('workflow client')
+    (pack/'scripts/Inspect-Assignment.ps1').write_text('param([string]$AssignmentPath,[string]$PackRoot)\n@{assignment_inputs_valid=$true;pack=@{manifest_sha256="'+manifest+'"}} | ConvertTo-Json -Depth 4\n')
+    def command(*parts,which=home,check=True):
+        r=subprocess.run([str(service),'--home',str(which),*parts],capture_output=True,text=True,timeout=70)
+        if check:assert r.returncode==0,(r.returncode,r.stderr,r.stdout)
+        return r
+    def start_boxen():
+        global daemon,owner,token
+        daemon=subprocess.Popen([str(boxen),'--data-dir',str(boxen_home),'serve','--listen',f'127.0.0.1:{peer_port}','--ui',f'127.0.0.1:{ui}','--codex',str(codex)],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+        lines=[daemon.stdout.readline().strip() for _ in range(3)];assert 'Local controls:' in lines[-1]
+        owner=lines[0].split(': ',1)[1];token=lines[-1].split('#')[1]
+    def api(request):
+        r=urllib.request.Request(f'http://127.0.0.1:{ui}/api/operation',data=json.dumps({'peer':owner,'address':'','request':request}).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+        return json.load(urllib.request.urlopen(r,timeout=15))
+    def start_worker():
+        global worker
+        worker=subprocess.Popen([str(service),'--home',str(home),'run'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+    def stop(process):
+        if process and process.poll() is None:process.terminate();process.wait(timeout=10)
+    def wait(predicate):
+        deadline=time.monotonic()+40
+        while time.monotonic()<deadline:
+            value=predicate()
+            if value:return value
+            time.sleep(.2)
+        raise AssertionError('Timed out waiting for workflow condition')
+    def state(job):
+        with database(home/'work-items.sqlite3') as c:return c.execute('select state from work where id=?',(job,)).fetchone()[0]
+    def idle():return all(r['status'] in ('completed','failed','interrupted','cancelled') for r in api({'op':'list'}))
+    def request_file(name,v):
+        path=root/(name+'.json');path.write_text(json.dumps(v),encoding='utf-8');return str(path)
+    try:
+        start_boxen()
+        api({'op':'resident_definition','args':{'action':'create','spec':{'id':definition,'name':'coder','identity':'RESIDENT_READ','cwd':str(pack),'model':'fixture','auto_activate':True}}})
+        command('status',which=legacy_home,check=False)
+        cfg={'enabled':False,'organization':'https://dev.azure.com/example','project':'Example','project_id':'11111111-1111-4111-8111-111111111111','assignee':'operator@example.invalid','marker':'Implementation: V2','board_column_field':'Example.Column','board_done_field':'Example.Done','interval_minutes':15};source=cfg['organization']+'|'+cfg['project_id']
+        with database(legacy_home/'work-items.sqlite3') as c:
+            c.execute('insert into ado_config values(1,?)',(json.dumps(cfg),))
+            c.executescript('create table interpretation_ownership(source,item,json);create table interpretation_requests(source,item,decision,state,seq);create table jobs(source,item,id,state,actor,version,commit_sha,worktree,branch);')
+            for item in [1,2]:c.execute('insert into ado_items values(?,?,1,?,?,1,?,?,?)',(source,item,'Synthetic work','Doing','Eligible',json.dumps({'id':item,'rev':1,'fields':{'System.Title':'Synthetic work'}}),int(time.time()*1000)))
+        config={'boxen_home':str(boxen_home),'url':f'http://127.0.0.1:{ui}','owner':owner,'client_id':client,'definition_id':definition,'definition_revision':1,'pack_root':str(pack),'pack_hash':manifest,'capacity':1}
+        command('init','--config-file',request_file('config',config),'--legacy-db',str(legacy_home/'work-items.sqlite3'))
+        # No real Azure calls belong to this controlled suite.
+        with database(home/'work-items.sqlite3') as c:
+            cfg['enabled']=False;c.execute('update ado_config set json=?',(json.dumps(cfg),))
+        def assignment(item,key=None,new=True):
+            packet=json.loads(command('packet',str(item)).stdout);d=packet['source_digest'];wt=root/('worktree-'+str(item));wt.mkdir(exist_ok=True)
+            return {'item':item,'idempotency_key':key or 'assign-'+str(item),'source_digest':d,'new_copy':new,'context':{'decision':'new_implementation','evidence':['Explicit synthetic operator assignment']},'assignment':{'job_id':'fixture-'+str(item),'assignment_revision':'1','repository_root':str(root),'worktree':str(wt),'branch':'fixture','base_commit':'1'*40,'evidence_dir':str(root/'evidence'),'project_pack':{'manifest_sha256':manifest},'work_item':{'id':item,'revision':1,'source_digest':d},'task':{'request':'Controlled assignment transport check','acceptance_criteria':['One explicit mailbox reply']},'delivery':{f:False for f in ['push','create_or_update_pr','merge','deploy','autocomplete']},'runtime':{'required':False}}}
+        first=assignment(1);file1=request_file('first',first);r1=json.loads(command('assign','--request-file',file1).stdout)
+        inspector=pack/'scripts/Inspect-Assignment.ps1';original=inspector.read_bytes();inspector.write_text('throw "Readiness changed after accepted assignment"')
+        assert json.loads(command('assign','--request-file',file1).stdout)['idempotent']
+        inspector.write_bytes(original)
+        start_worker();wait(lambda:state(r1['job_id'])=='delivered');wait(idle)
+        r2=json.loads(command('assign','--request-file',request_file('second',assignment(2))).stdout)
+        time.sleep(2.5);assert state(r2['job_id'])=='queued' and len(api({'op':'resident_list'}))==1
+        stop(worker);start_worker();time.sleep(2.5);assert state(r2['job_id'])=='queued' and len(api({'op':'resident_list'}))==1
+        assert len(api({'op':'list'}))==1,'Restart replayed accepted assignment'
+        release={'job_id':r1['job_id'],'outcome':'finished','resources_cleaned':True,'note':'Controlled fixture is idle; no runtime resources created'}
+        command('release','--request-file',request_file('release-first',release))
+        wait(lambda:state(r2['job_id'])=='delivered');wait(idle)
+        release['job_id']=r2['job_id'];command('release','--request-file',request_file('release-second',release))
+        continued=assignment(1,'continue-first',False);r3=json.loads(command('assign','--request-file',request_file('continued',continued)).stdout);assert r3['coder_id']==r1['coder_id'] and r3['version']==2
+        wait(lambda:state(r1['job_id'])=='delivered');wait(idle)
+        replies=json.loads(command('messages').stdout)['messages'];assert len(replies)==3 and all(m['body']=='DELIVERED_EXPLICIT_REPLY' for m in replies)
+        assert len(api({'op':'resident_list'}))==2 and len(api({'op':'list'}))==3
+        packet=home/'evidence'/r1['job_id']/'2/packet.json';assert packet.exists()
+        with database(home/'work-items.sqlite3') as c:assert c.execute('pragma integrity_check').fetchone()[0]=='ok'
+        print('PASS real Boxen create/send/activation/reply, durable migration, exact retries, restart without replay, capacity queue/release, same-coder continuation, immutable packets and private final isolation')
+    finally:
+        stop(worker);stop(daemon)
+        if daemon:daemon.stdout.close()

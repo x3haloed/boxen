@@ -1,0 +1,32 @@
+[package]
+name = "boxen-work-items"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Durable Azure DevOps mirror and explicitly assigned Boxen coder work"
+
+[[bin]]
+name = "boxen-work-items"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+fs2 = "0.4"
+rusqlite = { version = "0.38", features = ["bundled"] }
+scraper = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+ureq = { version = "=3.5.0", default-features = false, features = ["json"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
