@@ -61,8 +61,8 @@ See [remote workloads and live streaming](docs/workloads.md) for ownership, reco
 
 Existing host-local Codex conversations can be [imported](docs/thread-import.md)
 through `boxen import-codex`. Import retains visible history and the original
-native thread binding without starting inference or creating a resident. GUI
-import controls and resident promotion are separate work.
+native thread binding without starting inference or creating a resident. [Resident promotion](docs/resident-promotion.md) attaches identity and a mailbox in
+a separate explicit operation. GUI import/promotion controls remain separate work.
 
 ## Residents
 

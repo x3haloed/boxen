@@ -41,6 +41,8 @@ pub struct Create {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Resident {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<Promotion>,
     #[serde(default = "crate::context::Settings::resident")]
     pub context: crate::context::Settings,
     pub id: String,
@@ -79,11 +81,22 @@ impl Resident {
             revision: 1,
             created_at: jobs::now(),
             definition: None,
+            promotion: None,
         }
     }
     pub(crate) fn validate(&self) -> Result<()> {
         self.context.validate()?;
         jobs::valid_id(&self.id)?;
+        if let Some(p) = &self.promotion {
+            jobs::valid_id(&p.source_run_id)?;
+            if self.backend != "codex"
+                || p.request.thread_id != self.id
+                || p.backend_thread_id.is_empty()
+                || p.backend_thread_id.len() > 256
+            {
+                return Err("resident promotion provenance does not match its canonical native conversation".into());
+            }
+        }
         if !matches!(self.backend.as_str(), "codex" | "openrouter") {
             return Err("unsupported resident backend".into());
         }
@@ -129,6 +142,28 @@ struct Stored {
     resident: Resident,
     #[serde(default)]
     instantiation: Option<crate::resident_definitions::Instantiate>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Promote {
+    pub thread_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub identity: String,
+    #[serde(default)]
+    pub memory: String,
+    #[serde(default = "default_quota")]
+    pub quota_bytes: usize,
+    #[serde(default = "default_auto")]
+    pub auto_activate: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Promotion {
+    pub request: Promote,
+    pub backend_thread_id: String,
+    pub source_run_id: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -275,7 +310,7 @@ impl Residents {
         list
     }
     pub fn create(&self, owner: &str, initial: Create) -> Result<Resident> {
-        self.create_with_origin(owner, initial, None, None)
+        self.create_with_origin(owner, initial, None, None, None)
     }
     pub fn create_with_origin(
         &self,
@@ -283,12 +318,15 @@ impl Residents {
         initial: Create,
         instantiation: Option<crate::resident_definitions::Instantiate>,
         origin: Option<crate::resident_definitions::Origin>,
+        promotion: Option<Promotion>,
     ) -> Result<Resident> {
         let mut entries = self.entries.lock().unwrap();
         if let Some(prior) = entries.get(&initial.id) {
             if prior.resident.owner == owner
                 && prior.initial == initial
                 && prior.instantiation == instantiation
+                && prior.resident.promotion.as_ref().map(|p| &p.request)
+                    == promotion.as_ref().map(|p| &p.request)
             {
                 return Ok(prior.resident.clone());
             }
@@ -296,6 +334,7 @@ impl Residents {
         }
         let mut resident = Resident::prototype(owner, &self.machine_id, &initial);
         resident.definition = origin;
+        resident.promotion = promotion;
         resident.validate()?;
         if !std::path::Path::new(&resident.cwd).is_absolute()
             || !std::path::Path::new(&resident.cwd).is_dir()
@@ -346,6 +385,25 @@ impl Residents {
                         .into(),
                 )
             };
+        }
+        Ok(None)
+    }
+
+    pub fn existing_promotion(&self, owner: &str, request: &Promote) -> Result<Option<Resident>> {
+        let entries = self.entries.lock().unwrap();
+        if let Some(stored) = entries.get(&request.thread_id) {
+            if stored.resident.owner == owner
+                && stored
+                    .resident
+                    .promotion
+                    .as_ref()
+                    .is_some_and(|p| p.request == *request)
+            {
+                return Ok(Some(stored.resident.clone()));
+            }
+            return Err(
+                "thread already has a resident with another promotion input or owner".into(),
+            );
         }
         Ok(None)
     }

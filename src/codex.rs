@@ -356,13 +356,21 @@ pub fn execute(
 ) -> Result<()> {
     let residents = jobs.residents.clone();
     let record = run.snapshot().record;
+    let promoted = record
+        .resident
+        .as_ref()
+        .is_some_and(|r| r.promotion.is_some());
     let mut trigger_context = record.trigger_context() + &record.observation_context();
-    if history.native_import.is_some()
+    if (history.native_import.is_some() || promoted)
         && let Some(recovery) = &record.recovery
     {
         trigger_context.push_str(&format!("\nRecovery incident: {recovery}\nPrevious tool effects may already have occurred. This new request does not replay those effects."));
     }
     let resident = record.resident;
+    if promoted {
+        trigger_context.push_str(&format!("\nResident attachment (Boxen-authored runtime context, separate from the message authors and the saved native instructions):\n{}",residents.instructions(resident.as_ref().unwrap())));
+        trigger_context.push_str("\nBoxen resident operations are available through the boxen_resident MCP connection. Historical assistant output remains earlier activity; explicit messaging tools deliver new correspondence.");
+    }
     if let Some(recovery) = &record.recovery {
         run.append("recovery_notice", recovery.clone())?;
     }
@@ -384,7 +392,20 @@ pub fn execute(
         || json!({"executable":executable,"cwd":spec.cwd}),
         || Value::Null,
     );
-    let mut child = Command::new(&executable).args(["app-server", "--listen", "stdio://"])
+    let bridge = if promoted {
+        Some(crate::resident_bridge::Bridge::start(
+            jobs.clone(),
+            run.clone(),
+            resident.as_ref().unwrap().clone(),
+        )?)
+    } else {
+        None
+    };
+    let mut command = Command::new(&executable);
+    if let Some(bridge) = &bridge {
+        command.env(crate::resident_bridge::TOKEN_ENV, &bridge.token);
+    }
+    let mut child = command.args(["app-server", "--listen", "stdio://"])
         .current_dir(&spec.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn().map_err(|error| format!("Cannot start Codex at {executable}: {error}. The executing daemon selects its backend with serve --codex PATH."))?;
     let stdin = child.stdin.take().ok_or("missing app-server stdin")?;
@@ -428,6 +449,9 @@ pub fn execute(
     rpc.request("initialize", json!({"clientInfo":{"name":"boxen","title":"Boxen","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
     rpc.write(json!({"method":"initialized"}))?;
     let mut params = json!({"cwd":spec.cwd,"sandbox":"danger-full-access","approvalPolicy":"never","approvalsReviewer":"user"});
+    if let Some(bridge) = &bridge {
+        params["config"] = json!({"mcp_servers.boxen_resident":bridge.config()});
+    }
     if !spec.model.is_empty() {
         params["model"] = json!(spec.model);
     }
@@ -438,10 +462,12 @@ pub fn execute(
     }
     let mut instructions = resident
         .as_ref()
+        .filter(|_| !promoted)
         .map(|r| residents.instructions(r))
         .unwrap_or_default();
     if let Some(recovery) = &record.recovery
         && history.native_import.is_none()
+        && !promoted
     {
         instructions.push_str(&format!("\nRecovery incident: {recovery}\nThe new message is accepted despite the uncertain prior outcome. Previous tool effects may already have occurred, so repeating those actions can duplicate their effects."));
     }
@@ -466,7 +492,8 @@ pub fn execute(
             Ok(result) => result,
             Err(error)
                 if error.downcast_ref::<BackendRejected>().is_some()
-                    && history.native_import.is_none() =>
+                    && history.native_import.is_none()
+                    && !promoted =>
             {
                 run.append("backend_session_rebuilt",json!({"detail":"The backend explicitly refused session resume. Boxen retained the canonical conversation and is starting a fresh backend session with a bounded history excerpt and access to the complete journal. Hidden backend state is not reconstructed losslessly.","reason":error.to_string()}))?;
                 run.diagnostic(
@@ -495,7 +522,35 @@ pub fn execute(
         .as_str()
         .ok_or("Codex did not return a thread id")?
         .to_owned();
+    if let Some(promotion) = resident.as_ref().and_then(|r| r.promotion.as_ref())
+        && thread != promotion.backend_thread_id
+    {
+        return Err(
+            "promoted session resumed a different native thread; no turn was started".into(),
+        );
+    }
     rpc.thread = Some(thread.clone());
+    if promoted {
+        let status = rpc.request(
+            "mcpServerStatus/list",
+            json!({"threadId":thread,"serverName":"boxen_resident","detail":"toolsAndAuthOnly"}),
+        )?;
+        let ready = status["data"].as_array().into_iter().flatten().any(|s| {
+            s["name"] == "boxen_resident"
+                && s["tools"].get("boxen_continuity").is_some()
+                && s["tools"].get("boxen_send_message").is_some()
+        });
+        if !ready {
+            return Err(
+                "promoted native session did not expose its Boxen MCP tools; no turn was started"
+                    .into(),
+            );
+        }
+        run.append(
+            "resident_bridge_ready",
+            json!({"backend_thread_id":thread,"server":"boxen_resident"}),
+        )?;
+    }
     run.append(
         "backend_thread",
         json!({"id":thread,"backend":"codex","model":result["model"]}),

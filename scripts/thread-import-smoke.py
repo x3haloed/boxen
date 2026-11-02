@@ -126,6 +126,12 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-import-') as temporary:
         assert len(operation(0,{'op':'list'}))==1
         print('PASS complete paginated native snapshot, historical provenance, replay and daemon restart')
 
+        if os.environ.get('BOXEN_PROMOTION_PROBE')=='1':
+            sys.path.insert(0,str(ROOT/'tests'))
+            from promotion_checks import check_promotion
+            check_promotion(globals())
+            sys.exit(0)
+
         follow=operation(0,{'op':'start','spec':{'id':secrets.token_hex(32),'thread_id':ident,'backend':'codex','cwd':str(workspace),'model':'fixture','prompt':'New request after import'}})
         follow_id=follow['record']['spec']['id']
         received=[json.loads(line) for line in cli(0,'watch',f'127.0.0.1:{peers[1]}',keys[1],follow_id,'--once').stdout.splitlines()]

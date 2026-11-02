@@ -17,6 +17,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "promotion.rs"]
+pub mod promotion;
 #[path = "thread_import.rs"]
 pub mod thread_import;
 
@@ -473,6 +475,9 @@ enum ActivationCause {
 impl Jobs {
     fn scheduled_thread(&self, owner: &str, id: &str) -> Result<Spec> {
         valid_id(id)?;
+        if self.residents.get(owner, id).is_ok() {
+            return Err("resident schedules and subscriptions address a resident target, not an anonymous thread target".into());
+        }
         let mut records: Vec<_> = self
             .runs
             .lock()
@@ -932,7 +937,7 @@ impl Jobs {
         result
     }
     pub fn runtime_info(&self) -> Value {
-        json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":false},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]})
+        json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]})
     }
 
     pub fn machine_id(&self) -> &str {
@@ -1565,6 +1570,7 @@ impl Jobs {
                         initial,
                         Some(request.clone()),
                         Some(origin),
+                        None,
                     )?;
                     self.mailboxes.register(owner, &resident.id)?;
                     logging::record(
@@ -1765,7 +1771,7 @@ impl Jobs {
             native_import: previous.iter().find_map(|r| r.record.imported.clone()),
             directory: self.directory.clone(),
             thread_id: spec.thread_id.clone(),
-            rebuild_reason:previous.iter().rev().find(|r|r.backend_thread.is_some()).filter(|r|spec.resident_id.is_some()&&r.record.mailbox.is_none()).map(|_|"Resident communication migrated from direct turns to mailbox activations; tools are registered in a new backend session beneath the same canonical conversation.".into()),
+            rebuild_reason:previous.iter().rev().find(|r|r.backend_thread.is_some()).filter(|r|spec.resident_id.is_some()&&r.record.mailbox.is_none()&&resident.as_ref().is_none_or(|r|r.promotion.is_none())).map(|_|"Resident communication migrated from direct turns to mailbox activations; tools are registered in a new backend session beneath the same canonical conversation.".into()),
             runs: previous
                 .iter()
                 .map(|r| runs[&r.record.spec.id].clone())

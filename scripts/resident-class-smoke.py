@@ -2,6 +2,7 @@
 """Versioned definitions, independent real resident activations and manual propagation."""
 import concurrent.futures
 import json
+import os
 import pathlib
 import secrets
 import shutil
@@ -20,11 +21,17 @@ def port():
     with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
 with tempfile.TemporaryDirectory(prefix='boxen-resident-class-') as temp:
     root=pathlib.Path(temp);homes=[root/'a',root/'b'];processes=[];peers=[port(),port()];uis=[port(),port()]
+    fixture=ROOT/'tests/fake-codex.py'
+    if os.name=='nt':
+        wrapper=root/'fake-codex.cmd'
+        wrapper.write_text('@echo off\n"'+sys.executable+'" "'+str(fixture)+'" %*\n')
+        fixture=wrapper
+    else:fixture.chmod(0o755)
     def cli(i,*parts):return subprocess.check_output(COMMAND+['--data-dir',str(homes[i]),*parts],text=True,timeout=15).strip()
     keys=[cli(i,'identity') for i in range(2)]
     for i in range(2):cli(i,'trust',keys[1-i],'Class fixture peer')
     def daemon(i):
-        p=subprocess.Popen(COMMAND+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(ROOT/'tests/fake-codex.py')],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+        p=subprocess.Popen(COMMAND+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(fixture)],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
         processes.append(p);lines=[p.stdout.readline() for _ in range(3)];assert 'Local controls:' in lines[-1],lines
         return p,lines[-1].strip().split('#')[1]
     _,t0=daemon(0);remote,t1=daemon(1)
@@ -126,6 +133,19 @@ with tempfile.TemporaryDirectory(prefix='boxen-resident-class-') as temp:
         shutil.rmtree(homes[1]/'resident-definitions');(homes[1]/'resident-definitions').write_text('unavailable definition registry')
         restart();assert classes('list')['issues'];activate(bid)
         assert get(aid)['memory']=='evolved '*40
+        # Ordinary Boxen Codex conversations can also be promoted without an import.
+        ordinary_id=secrets.token_hex(32)
+        api({'op':'start','spec':{'id':ordinary_id,'thread_id':ordinary_id,'backend':'codex','cwd':temp,'model':'fixture','prompt':'Ordinary conversation before promotion'}})
+        for _ in range(200):
+            prior=api({'op':'get','id':ordinary_id})
+            if prior['status']=='completed':break
+            time.sleep(.02)
+        assert prior['status']=='completed',prior
+        promoted=api({'op':'resident_promote','spec':{'thread_id':ordinary_id,'name':'Promoted ordinary fixture','auto_activate':False}})
+        assert promoted['id']==ordinary_id and promoted['promotion']['backend_thread_id']==prior['backend_thread']
+        continued=activate(ordinary_id,'RESIDENT_WRITE')
+        assert continued['backend_thread']==prior['backend_thread']
+        assert get(ordinary_id)['memory']=='fixture durable memory'
         text=log.read_text();assert 'resident_definition.created' in text and 'resident_definition.instantiated' in text and 'resident.definition_applied' in text
         assert 'CLASS_SEED_ORIGINAL' not in text and 'CLASS_IDENTITY_ORIGINAL' not in text
         print(json.dumps({'resident_classes':'passed','instances':3,'independent_memory_and_threads':True,'manual_field_application':True,'no_automatic_propagation':True,'immutable_revisions':True,'idempotent_creation':True,'runtime_pins':True,'quota_atomicity':True,'definition_failure_isolation':True,'backend':'controlled Codex fixture'}))

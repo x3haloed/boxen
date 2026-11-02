@@ -26,6 +26,7 @@ Operations:
 | `{"op":"get","id":"RUN_ID"}` | One owner-authorized run snapshot |
 | `{"op":"start","spec":SPEC}` | Accepted or previously accepted snapshot |
 | `{"op":"thread_import","spec":{"id":"BOXEN_ID","backend_thread_id":"CODEX_UUID"}}` | Read-only history import snapshot; no model execution or resident attachment |
+| `{"op":"resident_promote","spec":{"thread_id":"BOXEN_ID","name":"Name"}}` | Resident identity/mailbox attached to the existing conversation; no model execution |
 | `{"op":"control","id":"RUN_ID","action":{"type":"steer","text":"..."}}` | `{"accepted":true}` |
 | `{"op":"control","id":"RUN_ID","action":{"type":"cancel"}}` | `{"accepted":true}` |
 | `{"op":"control","id":"RUN_ID","action":{"type":"respond","request_id":"BACKEND_REQUEST_ID","result":{}}}` | `{"accepted":true}` |
@@ -101,3 +102,5 @@ legacy mailbox endpoints retain their original behavior.
 ## Resident definitions
 
 `resident_definition` accepts an `args` object with `action`: `list`, `get`, `history`, `create`, `update`, `instantiate`, `instances`, or `apply`. It follows the same authenticated destination envelope and owner scope as resident operations. See [resident definitions](resident-definitions.md) for exact inputs, immutable revisions, manual propagation and runtime pinning. Existing resident, mailbox, scheduling and run APIs operate on instances without a class-specific execution path.
+
+[Resident promotion](resident-promotion.md) preserves an existing native Codex conversation and supplies resident operations through a scoped MCP bridge. The new identity uses ordinary resident/mailbox APIs; historical run records remain unchanged.

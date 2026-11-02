@@ -417,6 +417,9 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
             "resident_create" => Ok(jobs
                 .create_resident(owner, serde_json::from_value(request["spec"].clone())?)?
                 .value()),
+            "resident_promote" => Ok(jobs
+                .promote(owner, serde_json::from_value(request["spec"].clone())?)?
+                .value()),
             "resident_list" => Ok(json!(
                 jobs.residents
                     .list(owner)

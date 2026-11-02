@@ -21,7 +21,7 @@ import tarfile
 import tempfile
 import time
 
-SUITES = ["platform", "smoke", "workload", "thread-import", "recovery", "resident", "resident-class", "mailbox",
+SUITES = ["platform", "smoke", "workload", "thread-import", "resident-promotion", "recovery", "resident", "resident-class", "mailbox",
           "logging", "scheduler", "events", "messaging", "inference-runtime", "compaction", "media", "inference-probe"]
 
 
@@ -254,6 +254,7 @@ def main():
                     name = 'smoke.py' if suite == 'smoke' else suite + '-smoke.py'
                     archive.add(root / 'scripts' / name, arcname='scripts/' + name)
                 archive.add(root / 'tests/fake-codex.py', arcname='tests/fake-codex.py')
+                archive.add(root / 'tests/promotion_checks.py', arcname='tests/promotion_checks.py')
                 archive.add(root / 'tests/event-adapter.py', arcname='tests/event-adapter.py')
                 for name in ['usgs.py','grid-game.py']:
                     archive.add(root/'examples/adapters'/name,arcname='examples/adapters/'+name)

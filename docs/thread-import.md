@@ -62,8 +62,8 @@ boxen start HOST:42424 PEER_KEY /original/working/directory MODEL "New message" 
 Boxen resumes the original native thread, preserving its provider selection and
 not overriding its saved developer instructions with resident framing. Full Access
 remains the execution default. Existing native tool availability is unchanged;
-import does not add dynamic tools to an older session. Resident promotion and its
-tool/instruction transition are separate future work.
+import does not add dynamic tools to an older session. [Resident promotion](resident-promotion.md) adds an identity and mailbox through
+a separate explicit operation, preserving the native session through an MCP bridge.
 
 A writer held by Codex desktop or another app-server can reject continuation. A
 missing or rejected imported native session fails visibly instead of silently
@@ -91,7 +91,7 @@ the exact ID/native-ID/owner returns the accepted snapshot without reading or
 executing the source again. Conflicting ID reuse, another owner's access, an ID
 already used by a resident, and a native thread already registered in this daemon
 are rejected. This ownership guard covers this daemon, not other daemon stores or
-external Codex clients. Promotion does not currently exist.
+external Codex clients. Promotion is a separate [resident operation](resident-promotion.md).
 
 All metadata/history is captured before publication. Complete synced staging files
 are renamed into the authoritative run directory together; interrupted staging is

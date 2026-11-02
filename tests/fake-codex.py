@@ -7,6 +7,7 @@ import secrets
 import sys
 import threading
 import time
+import urllib.request
 
 lock = threading.Lock()
 cancel = threading.Event()
@@ -19,8 +20,24 @@ if import_root:
 responses = {}
 response_ready = threading.Condition()
 resident_context = None
+promoted_bridge = None
+
+def mcp_call(method,params=None,ident=1):
+    payload={'jsonrpc':'2.0','id':ident,'method':method,'params':params or {}}
+    r=urllib.request.Request(promoted_bridge['url'],data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+os.environ[promoted_bridge['bearer_token_env_var']]})
+    with urllib.request.urlopen(r,timeout=15) as response:return json.load(response)
 
 def invoke(tool, arguments, number):
+    if promoted_bridge:
+        response=mcp_call('tools/call',{'name':tool,'arguments':arguments},ident=number)
+        assert 'result' in response,response
+        repeated=mcp_call('tools/call',{'name':tool,'arguments':arguments},ident=number)
+        assert repeated==response,'MCP retry repeated an effect or changed its retained result'
+        if tool=='boxen_continuity' and arguments.get('action')=='write':
+            conflict=mcp_call('tools/call',{'name':tool,'arguments':{**arguments,'memory':'conflicting retry'}},ident=number)
+            assert 'error' in conflict,'conflicting MCP ID reuse was accepted'
+        result=response['result'];value=json.loads(result['content'][0]['text'])
+        return {'success':not result.get('isError',False),'contentItems':[{'type':'inputText','text':json.dumps(value)}]},value
     request_id = "tool-"+str(number)
     item_id = "tool-item-"+str(number)
     notification("item/started", {"item":{"id":item_id,"type":"dynamicToolCall","tool":tool,"arguments":arguments,"status":"inProgress"}})
@@ -186,6 +203,17 @@ for line in sys.stdin:
             # A metadata recheck sees a different cwd after the first page.
             (import_root/'fixture-mismatch-id').touch()
     elif method in ["thread/start", "thread/resume"]:
+        if 'mcp_servers.boxen_resident' in request['params'].get('config',{}):
+            assert method=='thread/resume'
+            assert 'developerInstructions' not in request['params']
+            promoted_bridge=request['params']['config']['mcp_servers.boxen_resident']
+            try:
+                urllib.request.urlopen(urllib.request.Request(promoted_bridge['url'],data=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',headers={'Content-Type':'application/json'}),timeout=2)
+                raise AssertionError('bridge accepted an unauthenticated client')
+            except urllib.error.HTTPError as error:
+                assert error.code==401,error.code
+            initialized=mcp_call('initialize',{'protocolVersion':'2025-03-26','capabilities':{},'clientInfo':{'name':'fixture','version':'1'}})
+            assert initialized['result']['capabilities']['tools']
         if import_root:
             assert method=='thread/resume', 'imported native thread was silently replaced'
             assert request['params']['threadId']==native_import_id
@@ -209,6 +237,11 @@ for line in sys.stdin:
                 assert "RESIDENT_" in request["params"]["developerInstructions"]
         result = {"thread": {"id": thread}, "model": "fixture"}
     elif method == "turn/start":
+        if promoted_bridge:
+            context=request['params']['input'][1]['text']
+            resident_context=json.loads(context.split('Saved continuity snapshot at turn acceptance (JSON):\n',1)[1].split('\n',1)[0])
+            denied=mcp_call('tools/call',{'name':'boxen_continuity','arguments':{'action':'read','resident_id':'f'*64}},ident=9999)
+            assert denied['result']['isError'],'bridge let a caller select another resident'
         result = {"turn": {"id": "fixture-turn", "status": "inProgress"}}
         emit({"id": request["id"], "result": result})
         threading.Thread(target=work, args=(request["params"]["input"][0]["text"],), daemon=True).start()
@@ -218,6 +251,9 @@ for line in sys.stdin:
         result = {}
     elif method == "turn/steer":
         result = {"turnId": "fixture-turn"}
+    elif method == 'mcpServerStatus/list' and promoted_bridge:
+        listed=mcp_call('tools/list')['result']['tools']
+        result={'data':[{'name':'boxen_resident','tools':{t['name']:t for t in listed}}]}
     else:
         raise AssertionError(method)
     emit({"id": request["id"], "result": result})

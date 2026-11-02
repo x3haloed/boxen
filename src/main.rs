@@ -17,6 +17,7 @@ mod media;
 mod messaging;
 mod platform;
 mod protocol;
+mod resident_bridge;
 mod resident_definitions;
 mod residents;
 mod scheduler;
@@ -74,6 +75,7 @@ boxen [--data-dir PATH] log-file HOST:PORT PUBLIC_KEY /absolute/daemon/path.json
 boxen [--data-dir PATH] log-status HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] log-off HOST:PORT PUBLIC_KEY\n\n\
 boxen residents HOST:PORT PUBLIC_KEY\n\
+boxen resident-promote HOST:PORT PUBLIC_KEY JSON_SPEC\n\
 boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|openrouter] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-class HOST:PORT PUBLIC_KEY JSON\n\
 boxen resident-get HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
@@ -186,6 +188,18 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
             let web_jobs = jobs.clone();
             std::thread::spawn(move || web::serve(ui_listener, web_state, web_jobs, token));
             protocol::serve(peer_listener, state, jobs);
+        }
+        "resident-promote" if args.len() == 3 => {
+            let spec: residents::Promote = serde_json::from_str(&args[2])?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"resident_promote","spec":spec})
+                )?)?
+            );
         }
         "residents" if args.len() == 2 => {
             println!(
