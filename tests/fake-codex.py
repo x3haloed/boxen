@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic app-server fixture. Never used by Boxen outside tests."""
 import json
+import os
 import pathlib
 import secrets
 import sys
@@ -11,6 +12,10 @@ lock = threading.Lock()
 cancel = threading.Event()
 approved = threading.Event()
 thread = "fixture-thread"
+import_root = pathlib.Path(os.environ["BOXEN_IMPORT_FIXTURE"]) if os.environ.get("BOXEN_IMPORT_FIXTURE") else None
+native_import_id = "019a0000-0000-7000-8000-000000000001"
+if import_root:
+    thread = native_import_id
 responses = {}
 response_ready = threading.Condition()
 resident_context = None
@@ -147,6 +152,9 @@ def work(prompt):
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
+    if import_root:
+        with (import_root / 'requests.jsonl').open('a', encoding='utf-8') as log:
+            log.write(json.dumps(request)+'\n')
     if method is None:
         if request.get("id") == "approval-1": approved.set()
         else:
@@ -158,7 +166,31 @@ for line in sys.stdin:
         continue
     if method == "initialize":
         result = {"userAgent": "fixture"}
+    elif method == "thread/read" and import_root:
+        assert request['params'].get('includeTurns') is False
+        if request['params']['threadId'] != native_import_id:
+            emit({'id':request['id'],'error':{'code':-32602,'message':'fixture native thread missing'}})
+            continue
+        result = {'thread':{'id':thread,'cwd':str(import_root),'model':'fixture','modelProvider':'fixture-provider','name':'Imported fixture','preview':'Old source prompt','turns':[],'status':{'type':'notLoaded'}}}
+        if (import_root/'fixture-mismatch-id').exists():result['thread']['id']='wrong-native-thread'
+    elif method == "thread/turns/list" and import_root:
+        assert request['params']['threadId']==native_import_id and request['params']['itemsView']=='full'
+        assert request['params']['sortDirection']=='asc'
+        cursor=request['params'].get('cursor')
+        result={'data':[{'id':'old-turn-1' if cursor is None else 'old-turn-2','status':'completed','items':[{'type':'userMessage','id':'old-user-'+str(cursor),'content':[{'type':'text','text':'Original source question'}]},{'type':'commandExecution','id':'old-tool-'+str(cursor),'command':'historical tool, not executed by import','aggregatedOutput':'Original source output','status':'completed'},{'type':'agentMessage','id':'old-answer-'+str(cursor),'text':'Native historical answer 🐈'}]}],'nextCursor':'page-two' if cursor is None else None}
+        if (import_root/'fixture-in-progress').exists():result['data'][0]['status']='inProgress'
+        if (import_root/'fixture-partial-items').exists():result['data'][0]['itemsView']='summary'
+        if (import_root/'fixture-repeat-cursor').exists():result['data'][0]['id']='old-turn-'+str(len(list(import_root.glob('cursor-*'))));(import_root/('cursor-'+secrets.token_hex(4))).touch();result['nextCursor']='page-two'
+        if (import_root/'fixture-large-item').exists():result['data'][0]['items'][0]['content'][0]['text']='x'*(4*1024*1024)
+        if (import_root/'fixture-changing-source').exists():
+            # A metadata recheck sees a different cwd after the first page.
+            (import_root/'fixture-mismatch-id').touch()
     elif method in ["thread/start", "thread/resume"]:
+        if import_root:
+            assert method=='thread/resume', 'imported native thread was silently replaced'
+            assert request['params']['threadId']==native_import_id
+            assert request['params']['modelProvider']=='fixture-provider'
+            assert 'developerInstructions' not in request['params'], 'import overwrote native instructions'
         assert request["params"]["sandbox"] == "danger-full-access"
         assert request["params"]["approvalPolicy"] == "never"
         missing=pathlib.Path(request["params"]["cwd"])/"fixture-forget-session"

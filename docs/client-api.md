@@ -25,6 +25,7 @@ Operations:
 | `{"op":"list"}` | Array of run snapshots in stable acceptance order |
 | `{"op":"get","id":"RUN_ID"}` | One owner-authorized run snapshot |
 | `{"op":"start","spec":SPEC}` | Accepted or previously accepted snapshot |
+| `{"op":"thread_import","spec":{"id":"BOXEN_ID","backend_thread_id":"CODEX_UUID"}}` | Read-only history import snapshot; no model execution or resident attachment |
 | `{"op":"control","id":"RUN_ID","action":{"type":"steer","text":"..."}}` | `{"accepted":true}` |
 | `{"op":"control","id":"RUN_ID","action":{"type":"cancel"}}` | `{"accepted":true}` |
 | `{"op":"control","id":"RUN_ID","action":{"type":"respond","request_id":"BACKEND_REQUEST_ID","result":{}}}` | `{"accepted":true}` |

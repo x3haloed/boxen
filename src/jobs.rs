@@ -17,6 +17,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "thread_import.rs"]
+pub mod thread_import;
+
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -37,6 +40,7 @@ mod tests {
         let id = state::random_hex().unwrap();
         state::private_dir(&path.join(&id)).unwrap();
         let record = Record {
+            imported: None,
             observations: Vec::new(),
             scheduled: None,
             owner: owner.clone(),
@@ -113,6 +117,8 @@ pub struct Event {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Record {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported: Option<thread_import::Provenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observations: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -378,6 +384,7 @@ pub struct History {
     thread_id: String,
     runs: Vec<Arc<Run>>,
     pub rebuild_reason: Option<String>,
+    pub native_import: Option<thread_import::Provenance>,
 }
 impl History {
     pub fn journal_directory(&self) -> &std::path::Path {
@@ -924,7 +931,7 @@ impl Jobs {
         result
     }
     pub fn runtime_info(&self) -> Value {
-        json!({"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]})
+        json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":false},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]})
     }
 
     pub fn machine_id(&self) -> &str {
@@ -1595,6 +1602,7 @@ impl Jobs {
         let resume = previous.iter().rev().find_map(|s| s.backend_thread.clone());
         let recovery = previous.last().filter(|r|r.status=="interrupted").map(|r|json!({"prior_run_id":r.record.spec.id,"detail":"Previous execution and tool effects are uncertain. This run continues the canonical conversation with a new message. Boxen has not resubmitted the previous prompt or replayed its tool actions; repeating those actions can duplicate effects that already occurred."}));
         let history = History {
+            native_import: previous.iter().find_map(|r| r.record.imported.clone()),
             directory: self.directory.clone(),
             thread_id: spec.thread_id.clone(),
             rebuild_reason:previous.iter().rev().find(|r|r.backend_thread.is_some()).filter(|r|spec.resident_id.is_some()&&r.record.mailbox.is_none()).map(|_|"Resident communication migrated from direct turns to mailbox activations; tools are registered in a new backend session beneath the same canonical conversation.".into()),
@@ -1606,6 +1614,7 @@ impl Jobs {
         let path = self.directory.join(&spec.id);
         state::private_dir(&path)?;
         let record = Record {
+            imported: None,
             observations: self.observations.batches(owner, &spec.thread_id),
             scheduled,
             spec: spec.clone(),

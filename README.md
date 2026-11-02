@@ -59,6 +59,11 @@ Use `--thread THREAD_ID` on `start` for a follow-up, `--id RUN_ID` for a retry-s
 
 See [remote workloads and live streaming](docs/workloads.md) for ownership, recovery, and verification, and [the client API](docs/client-api.md) for building an alternative GUI. Shell watchers automatically reconnect after transport loss; `--once` disables retry.
 
+Existing host-local Codex conversations can be [imported](docs/thread-import.md)
+through `boxen import-codex`. Import retains visible history and the original
+native thread binding without starting inference or creating a resident. GUI
+import controls and resident promotion are separate work.
+
 ## Residents
 
 Create a named resident without assigning a job. It has one canonical conversation and a separate revisioned identity/memory store with an enforced configurable quota. It can maintain its own continuity through a daemon-serviced tool. Each resident has a durable mailbox with default automatic activation, batched input, and explicit sending. Final assistant text remains private activity; anonymous threads retain ordinary request/response. Interrupted work leaves a visible incident while the resident stays available for its next message.

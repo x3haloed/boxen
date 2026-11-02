@@ -63,6 +63,7 @@ boxen [--data-dir PATH] events HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] schedule HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] context HOST:PORT PUBLIC_KEY THREAD_ID JSON\n\
 boxen [--data-dir PATH] runs HOST:PORT PUBLIC_KEY\n\
+boxen [--data-dir PATH] import-codex HOST:PORT PUBLIC_KEY NATIVE_THREAD_ID [--id BOXEN_ID]\n\
 boxen [--data-dir PATH] watch HOST:PORT PUBLIC_KEY RUN_ID [--after SEQUENCE] [--once]\n\
 boxen [--data-dir PATH] cancel HOST:PORT PUBLIC_KEY RUN_ID\n\n\
 boxen [--data-dir PATH] steer HOST:PORT PUBLIC_KEY RUN_ID MESSAGE\n\
@@ -414,6 +415,21 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &args[0],
                     &args[1],
                     serde_json::json!({"op":"start","spec":spec})
+                )?)?
+            );
+        }
+        "import-codex" => {
+            let id = take_option(&mut args, "--id")?.unwrap_or(state::random_hex()?);
+            if args.len() != 3 {
+                return Err("import-codex accepts HOST:PORT PUBLIC_KEY NATIVE_THREAD_ID and optional --id BOXEN_ID".into());
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"thread_import","spec":{"id":id,"backend_thread_id":args[2]}})
                 )?)?
             );
         }

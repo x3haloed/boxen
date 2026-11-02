@@ -356,7 +356,12 @@ pub fn execute(
 ) -> Result<()> {
     let residents = jobs.residents.clone();
     let record = run.snapshot().record;
-    let trigger_context = record.trigger_context() + &record.observation_context();
+    let mut trigger_context = record.trigger_context() + &record.observation_context();
+    if history.native_import.is_some()
+        && let Some(recovery) = &record.recovery
+    {
+        trigger_context.push_str(&format!("\nRecovery incident: {recovery}\nPrevious tool effects may already have occurred. This new request does not replay those effects."));
+    }
     let resident = record.resident;
     if let Some(recovery) = &record.recovery {
         run.append("recovery_notice", recovery.clone())?;
@@ -426,11 +431,18 @@ pub fn execute(
     if !spec.model.is_empty() {
         params["model"] = json!(spec.model);
     }
+    if let Some(imported) = &history.native_import
+        && let Some(provider) = imported.metadata["modelProvider"].as_str()
+    {
+        params["modelProvider"] = json!(provider);
+    }
     let mut instructions = resident
         .as_ref()
         .map(|r| residents.instructions(r))
         .unwrap_or_default();
-    if let Some(recovery) = &record.recovery {
+    if let Some(recovery) = &record.recovery
+        && history.native_import.is_none()
+    {
         instructions.push_str(&format!("\nRecovery incident: {recovery}\nThe new message is accepted despite the uncertain prior outcome. Previous tool effects may already have occurred, so repeating those actions can duplicate their effects."));
     }
     if let Some(reason) = &history.rebuild_reason {
@@ -452,7 +464,10 @@ pub fn execute(
         params["threadId"] = json!(id);
         match rpc.request("thread/resume", params.clone()) {
             Ok(result) => result,
-            Err(error) if error.downcast_ref::<BackendRejected>().is_some() => {
+            Err(error)
+                if error.downcast_ref::<BackendRejected>().is_some()
+                    && history.native_import.is_none() =>
+            {
                 run.append("backend_session_rebuilt",json!({"detail":"The backend explicitly refused session resume. Boxen retained the canonical conversation and is starting a fresh backend session with a bounded history excerpt and access to the complete journal. Hidden backend state is not reconstructed losslessly.","reason":error.to_string()}))?;
                 run.diagnostic(
                     Level::Warn,
@@ -504,7 +519,7 @@ pub fn execute(
     Ok(())
 }
 
-fn resolve(configured: &str) -> String {
+pub(crate) fn resolve(configured: &str) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let search = std::env::var_os("PATH");
     resolve_on(
@@ -620,8 +635,8 @@ mod discovery_tests {
             std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         assert_eq!(
-            resolve_on("codex", "linux", "x86_64", Some(&root), None),
-            binary.to_str().unwrap()
+            PathBuf::from(resolve_on("codex", "linux", "x86_64", Some(&root), None)),
+            binary
         );
         assert_eq!(
             resolve_on("/explicit/backend", "linux", "x86_64", Some(&root), None),
@@ -637,8 +652,8 @@ mod discovery_tests {
             std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         assert_eq!(
-            resolve_on("codex", "linux", "x86_64", Some(&root), None),
-            binary.to_str().unwrap()
+            PathBuf::from(resolve_on("codex", "linux", "x86_64", Some(&root), None)),
+            binary
         );
         std::fs::remove_dir_all(root).unwrap();
     }
