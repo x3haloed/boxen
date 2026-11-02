@@ -161,3 +161,7 @@ Dual licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE).
 [Observation sources and external adapters](docs/events-runtime.md) provide bounded
 JSON batches with optional waking for residents and ordinary threads. USGS and a
 small external game are included as [optional adapter examples](examples/adapters/README.md).
+
+[Resident preparation](docs/resident-preparation.md) covers durable Linux services,
+operator provider/output settings, per-run outgoing message budgets and staged
+migration without starting inference.

@@ -147,6 +147,7 @@ impl Jobs {
                 .saturating_add(1),
         );
         let record = Record {
+            runtime_policy: Default::default(),
             imported: Some(Provenance {
                 backend_thread_id: spec.backend_thread_id.clone(),
                 metadata,

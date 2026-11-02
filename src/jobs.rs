@@ -42,6 +42,7 @@ mod tests {
         let id = state::random_hex().unwrap();
         state::private_dir(&path.join(&id)).unwrap();
         let record = Record {
+            runtime_policy: Default::default(),
             imported: None,
             observations: Vec::new(),
             scheduled: None,
@@ -119,6 +120,8 @@ pub struct Event {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Record {
+    #[serde(default)]
+    pub runtime_policy: crate::runtime_policy::Policy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported: Option<thread_import::Provenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -272,6 +275,9 @@ impl Run {
     }
     pub fn append(&self, kind: &str, data: Value) -> Result<Event> {
         let mut inner = self.inner.lock().unwrap();
+        self.append_locked(&mut inner, kind, data)
+    }
+    fn append_locked(&self, inner: &mut Inner, kind: &str, data: Value) -> Result<Event> {
         let event = Event {
             seq: inner.snapshot.last_seq + 1,
             at: now(),
@@ -303,6 +309,59 @@ impl Run {
             || serde_json::to_value(&event).unwrap_or(Value::Null),
         );
         Ok(event)
+    }
+    pub fn reserve_message(&self, call_id: &str, fingerprint: &str) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if terminal(&inner.snapshot.status) {
+            return Err("ended runs cannot accept new message attempts".into());
+        }
+        if let Some(prior) = inner
+            .events
+            .iter()
+            .find(|e| e.kind == "message_send_reserved" && e.data["call_id"] == call_id)
+        {
+            return if prior.data["fingerprint"] == fingerprint {
+                Ok(())
+            } else {
+                Err("message call ID already identifies different input".into())
+            };
+        }
+        let count = inner
+            .events
+            .iter()
+            .filter(|e| e.kind == "message_send_reserved")
+            .count();
+        let limit = inner.snapshot.record.runtime_policy.max_message_sends;
+        if count >= limit as usize {
+            if !inner
+                .events
+                .iter()
+                .any(|e| e.kind == "message_send_limited")
+            {
+                self.append_locked(&mut inner, "message_send_limited", json!({"limit":limit,"detail":"Further new message attempts in this run are paused. Accepted messages remain accepted; a later activation has a new budget."}))?;
+            }
+            drop(inner);
+            self.diagnostic(
+                Level::Warn,
+                "agent.message_rejected",
+                || json!({"limit":limit,"reason":"run_budget"}),
+                || Value::Null,
+            );
+            return Err("this run's outgoing message-attempt budget is exhausted; no new message was sent. Other tools remain available; a later activation has its own budget".into());
+        }
+        self.append_locked(
+            &mut inner,
+            "message_send_reserved",
+            json!({"call_id":call_id,"fingerprint":fingerprint,"attempt":count+1,"limit":limit}),
+        )?;
+        drop(inner);
+        self.diagnostic(
+            Level::Debug,
+            "agent.message_reserved",
+            || json!({"call_id":call_id,"attempt":count+1,"limit":limit}),
+            || Value::Null,
+        );
+        Ok(())
     }
     pub fn status(&self, status: &str, detail: &str) -> Result<()> {
         self.append("status", json!({"status":status,"detail":detail}))?;
@@ -1777,9 +1836,13 @@ impl Jobs {
                 .map(|r| runs[&r.record.spec.id].clone())
                 .collect(),
         };
+        let runtime_policy = crate::runtime_policy::Policy::load(
+            self.directory.parent().ok_or("run directory has no home")?,
+        )?;
         let path = self.directory.join(&spec.id);
         state::private_dir(&path)?;
         let record = Record {
+            runtime_policy,
             imported: None,
             observations: self.observations.batches(owner, &spec.thread_id),
             scheduled,
@@ -1835,7 +1898,7 @@ impl Jobs {
             Target::Workload,
             "submission.accepted",
             Context::run(&spec.id, &spec.thread_id, owner),
-            || json!({"backend":spec.backend,"cwd":spec.cwd}),
+            || json!({"backend":spec.backend,"cwd":spec.cwd,"runtime_policy":snapshot.record.runtime_policy}),
             || Value::Null,
         );
         let binary = self.codex_path.clone();

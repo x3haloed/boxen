@@ -20,6 +20,7 @@ mod protocol;
 mod resident_bridge;
 mod resident_definitions;
 mod residents;
+mod runtime_policy;
 mod scheduler;
 mod state;
 mod web;

@@ -16,6 +16,17 @@ pub fn resident_tool(
     args: Value,
 ) -> Result<Value> {
     let owner = &resident.owner;
+    if tool == "boxen_send_message" || (tool == "boxen_messages" && args["action"] == "send") {
+        use sha2::Digest;
+        let fingerprint = format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(
+                &serde_json::json!({"tool":tool,"arguments":args})
+            )?)
+        );
+        jobs.get(owner, run_id)?
+            .reserve_message(call_id, &fingerprint)?;
+    }
     match tool {
         "boxen_schedule" => {
             let mut args = args;

@@ -27,7 +27,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
         messages=body['messages'];last_user=max(i for i,m in enumerate(messages) if m['role']=='user')
         prompt=messages[last_user]['content'];after=messages[last_user+1:]
         tools=[m for m in after if m['role']=='tool']
-        self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+        self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('X-Provider-Name','fixture-only');self.send_header('X-Generation-Id','fixture-generation');self.end_headers()
         def emit(value):
             self.wfile.write(('data: '+json.dumps(value)+'\n\n').encode());self.wfile.flush()
         def call(name,args,finish='tool_calls'):
@@ -44,7 +44,22 @@ class Provider(http.server.BaseHTTPRequestHandler):
             if prompt.startswith(('Mailbox activation.','Message activation.')):
                 batch=json.loads(prompt.split('\n',1)[1]);direction=batch['directions']
                 reply=next((m for m in batch['messages'] if m['body'].startswith('REPLY')),None)
-                if direction=='CONTINUITY' and len(tools)==0:call('boxen_continuity',{'action':'read'})
+                if direction=='BURST' and not tools:
+                    assert body['provider']=={'only':['fixture-only'],'order':['fixture-only'],'allow_fallbacks':False,'require_parameters':True},body['provider']
+                    assert body['max_tokens']==8192
+                    address=batch['messages'][0]['reply_to']
+                    calls=[]
+                    for i in range(4):
+                        generic=i%2==1
+                        args={'action':'send','to':{'instance':'boxen','conversation':'client:'+address['machine']+':'+address['id']},'subject':'Budget proof','body':'BUDGET_'+str(i)} if generic else {'to':address,'subject':'Budget proof','body':'BUDGET_'+str(i)}
+                        calls.append({'index':i,'id':'budget-'+str(i),'type':'function','function':{'name':'boxen_messages' if generic else 'boxen_send_message','arguments':json.dumps(args)}})
+                    emit(frame({'tool_calls':calls}));emit(frame(finish='tool_calls'))
+                elif direction=='BURST':
+                    assert len(tools)==4
+                    outputs=[json.loads(m['content']) for m in tools]
+                    assert all('error' in o for o in outputs[2:]),outputs
+                    text('PRIVATE_BUDGET_COMPLETE')
+                elif direction=='CONTINUITY' and len(tools)==0:call('boxen_continuity',{'action':'read'})
                 elif direction=='CONTINUITY' and len(tools)==1:
                     current=json.loads(tools[-1]['content']);call('boxen_continuity',{'action':'write','expected_revision':current['revision'],'memory':'inference-memory-proof'})
                 elif direction.startswith('THREAD:') and not tools:
@@ -174,6 +189,30 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         available=activate(unconfigured,'EMPTY');assert collect(available)[1]['status']=='completed'
         print('PASS idle resident creation without credentials, legible failed activation and continued availability after configuration recovery')
         print('PASS structured opt-in inference diagnostics; existing daemon/journal authority retained')
+        policy=data[1]/'runtime-policy.json'
+        setting={'providers':['fixture-only'],'allow_fallbacks':False,'max_output_tokens':8192,'max_message_sends':2}
+        policy.write_text(json.dumps(setting))
+        limited=resident();send(limited,'BUDGET_INPUT');before=len(inbox())
+        burst=activate(limited,'BURST');assert burst['record']['runtime_policy']==setting
+        events,done=collect(burst);assert done['status']=='completed',done
+        assert len(inbox())==before+2
+        assert sum(e['kind']=='message_send_reserved' for e in events)==2
+        assert sum(e['kind']=='message_send_limited' for e in events)==1
+        headers=[e for e in events if e['kind']=='inference_frame' and e['data']['event'].get('type')=='response_headers']
+        assert headers and headers[0]['data']['event']['provider']=='fixture-only' and headers[0]['data']['event']['generation_id']=='fixture-generation',headers
+        processes[-1].kill();processes[-1].wait(timeout=5);tokens[1]=daemon(1)
+        replay,_=collect(burst);assert replay==events
+        send(limited,'BUDGET_INPUT');again=activate(limited,'BURST');assert collect(again)[1]['status']=='completed'
+        assert len(inbox())==before+4
+        policy.write_text('{broken')
+        try:start('POLICY_REJECTION')
+        except urllib.error.HTTPError as e:assert e.code==422
+        else:raise AssertionError('invalid operator policy was silently ignored')
+        policy.unlink()
+        processes[-1].kill();processes[-1].wait(timeout=5);tokens[1]=daemon(1)
+        assert collect(start('POLICY_RECOVERED'))[1]['status']=='completed'
+        print('PASS captured provider pin/fallback/output settings, bounded legacy/generic mail attempts, private continuation, producer metadata, restart replay, fresh-run budget and configuration recovery')
+
     finally:
         for p in processes:
             if p.poll() is None:p.kill()

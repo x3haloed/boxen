@@ -29,7 +29,17 @@ pub fn exchange(
         .send_json(body)
         .map_err(|_| "inference transport failed (details suppressed)")?;
     let status = response.status().as_u16();
-    emit(json!({"type":"response_headers","status":status}))?;
+    let metadata = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| v.len() <= 256)
+            .map(str::to_owned)
+    };
+    emit(
+        json!({"type":"response_headers","status":status,"provider":metadata("x-provider-name"),"generation_id":metadata("x-generation-id")}),
+    )?;
     if status != 200 {
         return Err("inference HTTP status was not 200 (body suppressed)".into());
     }

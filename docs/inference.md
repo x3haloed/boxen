@@ -213,3 +213,7 @@ correctly identified four green squares, and streamed 93 contiguous events back
 to the mini. The retained snapshot matched the original bytes. Existing journals,
 resident definitions, and control capabilities were retained; diagnostics restarted
 off. The GUI continues to show metadata rather than inline media previews.
+
+Operator provider restrictions, output limits and shared resident message budgets
+are described in [resident preparation](resident-preparation.md). Accepted runs
+retain their policy independently of later daemon configuration changes.
