@@ -15,7 +15,7 @@ import subprocess
 import time
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("host", help="SSH destination, e.g. chad@machine.lan")
+parser.add_argument("host", help="SSH destination, e.g. user@example-host")
 parser.add_argument("--binary", default="target/cosmo/release/boxen.com")
 parser.add_argument("--local-address", help="LAN address the remote machine can reach")
 parser.add_argument("--port", type=int, default=42424)

@@ -6,7 +6,7 @@ Agreed design, November 1, 2026. The first [host-local JSON implementation](even
 
 An agent can subscribe to a stream of observations, receive bounded batches at a
 chosen interval, and independently choose whether a ready batch requests an
-activation. This covers passive interests, such as Aster's USGS earthquake feed,
+activation. This covers passive interests, such as the resident's USGS earthquake feed,
 and ongoing feedback for games or other interactive environments.
 
 A subscription can remain unattended without making the agent responsible for
@@ -182,7 +182,7 @@ Verification also needs bursts, slow/busy consumers, multiple subscribers,
 retention loss, restart boundaries, duplicate producer deliveries, stale state,
 uncertain effects, and the existing resident/thread communication split. Agent
 interest and successful participation are separate observations from engineering
-correctness. No Aster contact, migration, or game input is authorized by this
+correctness. No contact with existing residents, migration, or game input is authorized by this
 design record alone.
 
 ## Remaining decisions

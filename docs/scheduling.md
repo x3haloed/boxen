@@ -139,7 +139,7 @@ actual APE binaries; the Linux rotation includes the same suite.
 uses existing local credentials/sign-in for four disposable real-model runs:
 seed effect, scheduled append plus recall, a manual follow-up checking trigger
 metadata, and an empty-inbox resident activation. It can consume usage and does
-not contact Aster or install production jobs. Controlled fixture success alone
+not contact existing residents or install production jobs. Controlled fixture success alone
 is not evidence of provider compatibility or real model behavior.
 
 Cross-host job transfer, execution-owner relocation, arbitrary pluggable handlers,
@@ -161,7 +161,7 @@ That APE also passed four disposable real-model runs each through OpenRouter
 conversation continuity, one scheduled shell effect, the subsequent ordinary
 trigger, and resident activation without mail. The Linux scheduling evidence
 uses the controlled Codex fixture; it does not establish real-model scheduling on
-Linux. Windows and other untested platforms remain unverified. No Aster migration
+Linux. Windows and other untested platforms remain unverified. No migration of existing residents
 or production schedule was created by these checks.
 
 Internal source-collection and batch-readiness handlers now reuse the same timing

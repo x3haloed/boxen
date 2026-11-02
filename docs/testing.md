@@ -1,18 +1,18 @@
 # Platform testing rotation
 
-Runtime and packaging changes are checked on the development Mac (native and
-portable builds) and the authorized Linux test host, `chad@resident-host.lan`.
-The Mac mini remains available for additional macOS LAN/deployment checks.
+Runtime and packaging changes are checked with native and portable builds on
+authorized development hosts. Hostnames, accounts and machine inventory belong
+in private local configuration.
 
 Build the same portable file with the optional transport probe enabled:
 
 ```sh
 COSMO_HOME="$PWD/work/cosmo" cargo build --locked --release --features ape,inference-probe
-python3 scripts/test-linux.py
+python3 scripts/test-linux.py user@example-host
 ```
 
-The runner defaults to `chad@resident-host.lan`; another SSH target can be supplied
-as its first argument. `--binary PATH` selects another built APE, `--peer-port PORT`
+The SSH target is supplied as the first argument or through the local
+`BOXEN_TEST_LINUX_HOST` environment variable. No deployment host is built in. `--binary PATH` selects another built APE, `--peer-port PORT`
 selects the Linux direct-test port (default 42426), and `--output PATH` selects the
 local evidence directory. The host needs passwordless SSH,
 Python 3, Bash, tar and OpenSSL. Rust, Cargo, Node, an installed Boxen service,

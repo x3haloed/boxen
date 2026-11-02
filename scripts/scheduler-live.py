@@ -2,7 +2,7 @@
 """Paid/existing-sign-in scheduled execution through two paired daemons.
 
 Usage: scheduler-live.py [BINARY] [openrouter|codex] [MODEL] [CODEX_PATH]
-Only disposable identities/workspaces are used. No Aster or production jobs.
+Only disposable identities/workspaces are used. No existing residents or production jobs.
 """
 import json,pathlib,secrets,socket,subprocess,sys,tempfile,time,urllib.request
 binary=pathlib.Path(sys.argv[1] if len(sys.argv)>1 else 'target/release/boxen').resolve()

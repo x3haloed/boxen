@@ -211,7 +211,7 @@ def cross_host_check(ssh, remote, binary, peer_port, codex, model):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('host', nargs='?', default='chad@resident-host.lan')
+    parser.add_argument('host', nargs='?', default=os.environ.get('BOXEN_TEST_LINUX_HOST'), help='SSH target, or local BOXEN_TEST_LINUX_HOST setting')
     parser.add_argument('--binary', type=pathlib.Path, default=pathlib.Path('target/cosmo/release/boxen.com'))
     parser.add_argument('--codex', help='Optional existing Linux Codex executable for a real authenticated LAN workload')
     parser.add_argument('--codex-model', default='-', help='Model for optional live Codex check (default runtime choice)')
@@ -227,6 +227,8 @@ def main():
         return cross_host_server(args.binary.resolve(), args.trust_key, args.peer_port, args.codex)
     if args.worker:
         return worker(args.binary.resolve())
+    if not args.host:
+        parser.error('SSH host required as an argument or BOXEN_TEST_LINUX_HOST setting')
     root = pathlib.Path(__file__).resolve().parent.parent
     binary = args.binary.resolve()
     if not binary.is_file() or binary.suffix != '.com':

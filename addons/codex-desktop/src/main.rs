@@ -35,7 +35,7 @@ fn execute() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args.iter().any(|v| v == "--help") {
         println!(
-            "boxen-support --config ABSOLUTE_PATH init CODEX_THREAD_UUID [--codex PATH] [--boxen-home PATH] [--url http://127.0.0.1:42425] [--label relay-dev] [--peer KEY --address HOST:PORT]\nboxen-support --config PATH run [--once]\nboxen-support --config PATH status\nboxen-support --config PATH --rpc OP JSON_ARGS\nboxen-support --config PATH --request-file UTF8_JSON_FILE\n\nScoped operations: snapshot, inspect, reply, send, disposition, reply_status, redeliver.\nTheir CODEX_THREAD_ID matches the configured desktop thread. Local replies work offline.\nThe config contains paths/public routing only; Boxen's capability is read from its private control-token file."
+            "boxen-support --config ABSOLUTE_PATH init CODEX_THREAD_UUID [--codex PATH] [--boxen-home PATH] [--url http://127.0.0.1:42425] [--label support] [--peer KEY --address HOST:PORT]\nboxen-support --config PATH run [--once]\nboxen-support --config PATH status\nboxen-support --config PATH --rpc OP JSON_ARGS\nboxen-support --config PATH --request-file UTF8_JSON_FILE\n\nScoped operations: snapshot, inspect, reply, send, disposition, reply_status, redeliver.\nTheir CODEX_THREAD_ID matches the configured desktop thread. Local replies work offline.\nThe config contains paths/public routing only; Boxen's capability is read from its private control-token file."
         );
         return Ok(());
     }
@@ -52,7 +52,7 @@ fn execute() -> Result<()> {
             .map(PathBuf::from)
             .unwrap_or(home()?.join(".boxen"));
         let url = option(&mut args, "--url")?.unwrap_or_else(|| "http://127.0.0.1:42425".into());
-        let label = option(&mut args, "--label")?.unwrap_or_else(|| "relay-dev".into());
+        let label = option(&mut args, "--label")?.unwrap_or_else(|| "support".into());
         let peer = option(&mut args, "--peer")?;
         let address = option(&mut args, "--address")?.unwrap_or_default();
         ensure!(

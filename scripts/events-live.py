@@ -2,7 +2,7 @@
 """Paid/existing-sign-in observation and external adapter execution through two paired daemons.
 
 Usage: events-live.py [BINARY] [openrouter|codex] [MODEL] [CODEX_PATH]
-Only disposable identities/workspaces are used. No Aster or production jobs.
+Only disposable identities/workspaces are used. No existing residents or production jobs.
 """
 import json,pathlib,secrets,socket,subprocess,sys,tempfile,time,urllib.request,hashlib
 from event_proof import reports_input_fact

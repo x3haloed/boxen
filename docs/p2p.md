@@ -31,7 +31,7 @@ Both sides must trust each other. The initiator also pins the selected server id
 
 ```sh
 bash scripts/build-ape.sh
-python3 scripts/pair-lan.py chad@machine.lan
+python3 scripts/pair-lan.py user@example-host
 ```
 
 The helper requires SSH key authentication and unused peer/control ports on both hosts. It copies the binary to `~/.boxen/bin/` on the destination, exchanges public keys, records mutual trust, starts both daemons, and verifies direct exchanges in both directions. Use `--binary`, `--local-address`, `--port`, and `--ui-port` as needed. The remote probe uses `lsof`; this helper targets macOS/Linux development hosts, not Windows installation.

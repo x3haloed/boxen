@@ -129,8 +129,8 @@ python3 scripts/platform-smoke.py target/cosmo/release/boxen.com
 ```
 
 Linux is part of the runtime testing rotation. After building with
-`--features ape,inference-probe`, run `python3 scripts/test-linux.py` to test the
-same portable file on `chad@resident-host.lan`, including isolated regression
+`--features ape,inference-probe`, run `python3 scripts/test-linux.py user@example-host` to test the
+same portable file on an explicitly configured Linux host, including isolated regression
 suites and a direct cross-host streaming check on Linux TCP port 42426. See [platform testing](docs/testing.md) for
 requirements, retained evidence, and verification limits.
 

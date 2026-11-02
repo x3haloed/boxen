@@ -10,7 +10,7 @@ This is the first manual loop slice. **Polling never creates an assignment.**
 Only the local operator `assign` command accepts implementation work. New copies
 require `new_copy: true`; updates/returns for existing work retain its coder.
 Publication is disabled: all delivery flags must be false. Structured clarification,
-independent review gates, publication intent/readback and automatic Meridian/ADO
+independent review gates, publication intent/readback and automatic context-agent/ADO
 dispatch remain separate work. Mail bodies are not parsed into operator commands.
 
 ## Configuration and installation
@@ -118,7 +118,7 @@ before a new request is accepted. The helper must report the pinned manifest and
 valid inputs. The service never runs an assignment-supplied executable.
 
 Context decisions are explicitly supplied by the operator for this slice; they are
-not a claim that a Meridian decision tool or attributed answer authority exists.
+not a claim that a context-agent decision tool or attributed answer authority exists.
 Existing clarification holds require supplied authoritative-answer references.
 Historical unfinished ownership prohibits a fresh copy. An adopted legacy coder
 must first be imported/promoted by the operator: `new_copy: false` plus `coder_id`

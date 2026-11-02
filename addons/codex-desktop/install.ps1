@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)][string]$ThreadId,
-    [string]$Label='relay-dev',
+    [string]$Label='support',
     [string]$InstallRoot=(Join-Path $env:USERPROFILE '.boxen-support'),
     [string]$BoxenHome=(Join-Path $env:USERPROFILE '.boxen'),
     [string]$Url='http://127.0.0.1:42425',

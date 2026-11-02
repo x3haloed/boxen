@@ -2,7 +2,7 @@
 """Paid OpenRouter checks of repeated cuts against invented non-leading continuity tasks.
 
 Usage: compaction-live.py [BINARY] [MODEL]. Uses only temporary paired identities.
-No Aster/Watch state is accessed. Reports raw outcomes separately from exact retention.
+No existing resident/Watch state is accessed. Reports raw outcomes separately from exact retention.
 """
 import json
 import pathlib

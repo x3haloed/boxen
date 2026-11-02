@@ -1,5 +1,7 @@
 # Working on Boxen
 
+Public repository content uses generic roles and example configuration. Personal names, agent deployment identities, local paths, real routing IDs, organization details and host/account details belong in ignored local configuration or private operational notes, not tracked code or documentation. Public source citations retain their attribution.
+
 Read `docs/vision.md`, `docs/decisions.md`, and the documentation relevant to the current slice. Preserve agreed beta requirements even when implementing a simpler early case. Commit and push coherent, verified slices unless the user directs otherwise.
 
 ## Daemon diagnostic logging is a maintained capability
@@ -73,7 +75,7 @@ Maintain `scripts/media-smoke.py` against native and APE artifacts for exact wir
 
 ## Linux testing rotation
 
-`chad@resident-host.lan` is an authorized passwordless SSH development host (Debian 13 x86-64). After daemon/runtime, transport, or portable-packaging changes, run `python3 scripts/test-linux.py` alongside appropriate native/macOS checks. The runner uses the same APE bytes, a private remote temporary directory, the seventeen controlled regression suites, and a direct cross-host LAN streaming/replay check on Linux TCP port 42426 (configurable with `--peer-port`). Its probe suite requires an artifact built with `--features ape,inference-probe`. Reports and logs remain under ignored `work/linux/`; the remote bundle and test processes are removed. Keep installed services, production identities, pairing configuration, and credentials separate from this rotation. SSH bootstraps and controls the test processes; peer traffic travels directly over the LAN, with no tunnel fallback. The test port must be reachable from the development host; GUI controls stay on loopback. No credential distribution or paid inference is needed for the default tests. A Linux fixture pass is not evidence of real Codex installation or live provider compatibility on Linux.
+The authorized passwordless SSH development host is configured locally through `BOXEN_TEST_LINUX_HOST` or an explicit runner argument; host/account details stay outside tracked files. After daemon/runtime, transport, or portable-packaging changes, run `python3 scripts/test-linux.py` alongside appropriate native/macOS checks. The runner uses the same APE bytes, a private remote temporary directory, the seventeen controlled regression suites, and a direct cross-host LAN streaming/replay check on Linux TCP port 42426 (configurable with `--peer-port`). Its probe suite requires an artifact built with `--features ape,inference-probe`. Reports and logs remain under ignored `work/linux/`; the remote bundle and test processes are removed. Keep installed services, production identities, pairing configuration, and credentials separate from this rotation. SSH bootstraps and controls the test processes; peer traffic travels directly over the LAN, with no tunnel fallback. The test port must be reachable from the development host; GUI controls stay on loopback. No credential distribution or paid inference is needed for the default tests. A Linux fixture pass is not evidence of real Codex installation or live provider compatibility on Linux.
 
 ## Codex on headless hosts
 

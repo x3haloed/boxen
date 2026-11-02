@@ -7,7 +7,7 @@ The built-in OpenRouter runtime supports two selectable policies on one journal-
 
 Communication is independent: anonymous threads still return ordinary responses, while residents still have mailboxes and private narration. Managed Codex sessions retain native context management; Boxen rejects an explicit built-in policy in a Codex workload submission. A resident definition can retain a built-in policy setting, but it does not override managed-runtime behavior.
 
-This implements the first usable mechanisms from the [reviewed resident design](compaction.md). It is not a claim that Aster's migration criteria are satisfied or permission to alter her running Watch conversation.
+This implements the first usable mechanisms from the [reviewed resident design](compaction.md). It is not a claim that the resident's migration criteria are satisfied or permission to alter her running Watch conversation.
 
 ## Selecting and changing a policy
 
@@ -94,7 +94,7 @@ There is no source deletion by compaction. History/media retention and replicati
 
 `scripts/compaction-smoke.py BINARY` uses two real paired daemons and a controlled provider for repeated reductions, exact history, source bundles, coverage, draft isolation/review, policy switching, summary rejection/cancellation, observation masking, restart, and non-reexecution. Rust tests additionally exercise chronological qualification bundles, latest-effect preservation, pin overflow, exact Unicode pagination, and unchanged live-tail behavior. The Linux rotation includes this suite.
 
-`scripts/compaction-live.py BINARY [MODEL]` defaults to `openai/gpt-4.1-mini` and uses the local OpenRouter key, disposable paired identities, randomized invented commitments and unrelated bulk. It performs nine workloads per mode at equal 64 KiB selection budgets and reports exact retention separately from whether a non-leading planning response quotes the original qualification and whether the original commitment/qualification are present unmasked, either as directly selected originals or as original lookup results. These two evidence paths are reported separately; a verbatim view does not require redundant rereading of originals already present. It never accesses Aster's Watch state. Real-model outcomes are evidence for the tested histories/model, not general continuity certification.
+`scripts/compaction-live.py BINARY [MODEL]` defaults to `openai/gpt-4.1-mini` and uses the local OpenRouter key, disposable paired identities, randomized invented commitments and unrelated bulk. It performs nine workloads per mode at equal 64 KiB selection budgets and reports exact retention separately from whether a non-leading planning response quotes the original qualification and whether the original commitment/qualification are present unmasked, either as directly selected originals or as original lookup results. These two evidence paths are reported separately; a verbatim view does not require redundant rereading of originals already present. It never accesses the resident's Watch state. Real-model outcomes are evidence for the tested histories/model, not general continuity certification.
 
 ### Evaluation correction during implementation
 
@@ -110,4 +110,4 @@ The actual APE also completed nine live OpenRouter workloads per policy using GP
 
 Other live cases remain limitations, not successes relabeled after the fact: Nano changed a literal identifier in a summary, and DeepSeek's more involved verification ran into the prototype output/exchange caps. Helper guidance now explicitly preserves literal spelling and turn-local instruction scope, but those words do not certify factual fidelity. The default runtime model is unchanged; the live verification script's documented default uses Mini for this stronger probe.
 
-A real Chrome session retained an anonymous policy selection, created a resident with a selected policy, and changed its setting through the revision-checked API without browser errors. Both development Mac daemons were updated to the verified APE while idle, retained their journals/identities, and advertised both policies afterward. Aster's Watch service, identity, memory, and live conversation were not modified by implementation or tests. No migration was performed.
+A real Chrome session retained an anonymous policy selection, created a resident with a selected policy, and changed its setting through the revision-checked API without browser errors. Both development Mac daemons were updated to the verified APE while idle, retained their journals/identities, and advertised both policies afterward. The resident's Watch service, identity, memory, and live conversation were not modified by implementation or tests. No migration was performed.

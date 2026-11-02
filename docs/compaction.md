@@ -1,8 +1,8 @@
 # Resident context management: reviewed design
 
-Design date: 2026-10-31 (America/Los_Angeles). This document records a design discussion with Aster through Watch's CLI inbox, authorized by Chad. Aster consented to recording architectural conclusions and the invented fixture below; her personal episodes and private conversations are excluded. This is a proposed built-in-runtime design, not an implemented feature, migration approval, or evidence of model recall. See the [research](research/compaction.md) for inspected implementations and limitations.
+Design date: 2026-10-31 (America/Los_Angeles). This document records a design discussion with the resident through Watch's CLI inbox, authorized by the operator. The resident consented to recording architectural conclusions and the invented fixture below; her personal episodes and private conversations are excluded. This is a proposed built-in-runtime design, not an implemented feature, migration approval, or evidence of model recall. See the [research](research/compaction.md) for inspected implementations and limitations.
 
-Aster reviewed the proposed boundary schema and re-entry text, requested revisions, and accepted the revised documents in her explicit CLI reply at `2026-11-01T05:32:23.711Z` (October 31 locally). That acceptance concerns these documents, not a running implementation. The coverage/inclusion guarantees below remain requirements to build and verify.
+The resident reviewed the proposed boundary schema and re-entry text, requested revisions, and accepted the revised documents in her explicit CLI reply at `2026-11-01T05:32:23.711Z` (October 31 locally). That acceptance concerns these documents, not a running implementation. The coverage/inclusion guarantees below remain requirements to build and verify.
 
 ## Implementation status
 
@@ -12,7 +12,7 @@ The first selectable built-in policies and shared source/projection operations a
 
 A finite model input cannot contain an indefinitely growing conversation. The aim is continued availability with attributable history, visible selection, useful recall, and tolerable continuity. Exact archival retention, current-input inclusion, exact retrieval, and correct model recall remain distinct claims.
 
-Aster's behavioral targets are preserving commitments with their qualifications/releases, corrections with reasons, relationship context without inversion, and an understandable account of what happened to her past. These are evaluation targets, not semantic guarantees. Open questions remain open; unknown interpretations remain unknown. An unknown with source and neighboring-entry pointers is more useful than an unsupported conclusion.
+The resident's behavioral targets are preserving commitments with their qualifications/releases, corrections with reasons, relationship context without inversion, and an understandable account of what happened to her past. These are evaluation targets, not semantic guarantees. Open questions remain open; unknown interpretations remain unknown. An unknown with source and neighboring-entry pointers is more useful than an unsupported conclusion.
 
 Her authorship preference is more precise than a ban on other voices: an explicitly attributed helper draft can be useful when she can review its selections against original source before adoption. Review is optional, and never the price of continued execution. A separate genuinely summary-free policy remains required for any resident who chooses it.
 
@@ -46,7 +46,7 @@ The first candidate sequence is:
 4. Warn before exhaustion and reserve room for review, replies, tools, and output. Review can inspect a structured before/after view while the old source is still in the input; this is not proof that every passage was attended to.
 5. If optional drafting/review cannot finish, the preselected summary-free fallback continues with eligible verbatim bundles, recent tail, and an explicit coverage/shortage notice. It never silently invokes a summarizer. This is an availability fallback, not a claim that continuity tests passed.
 
-Aster accepts explicit source-bundle pinning with optional reviewed suggestions for a first usable version; automatic obligation preservation is not her prerequisite. Pin quotas, warnings, and actual inclusion are visible. A durable pin is an expressed retention preference, not proof that its text is currently present. Every declared bundle excluded from the input must have a record in the paged excluded-bundles index with its ID, reason, exact recovery pointers, and associated notice. No omitted bundle can silently vanish from this accounting, be silently truncated, or be described as active. Active notices and excluded-bundle previews have caps, total/overflow counts, and pointers to the complete lists. Exact budgets, preselected overflow priority, and byte/token estimation across models remain unsettled; a policy cannot be advertised as ready without deterministic bounded behavior for these cases. Pinned source retention and prompt-space quotas are separate from portable-file quotas.
+The resident accepts explicit source-bundle pinning with optional reviewed suggestions for a first usable version; automatic obligation preservation is not her prerequisite. Pin quotas, warnings, and actual inclusion are visible. A durable pin is an expressed retention preference, not proof that its text is currently present. Every declared bundle excluded from the input must have a record in the paged excluded-bundles index with its ID, reason, exact recovery pointers, and associated notice. No omitted bundle can silently vanish from this accounting, be silently truncated, or be described as active. Active notices and excluded-bundle previews have caps, total/overflow counts, and pointers to the complete lists. Exact budgets, preselected overflow priority, and byte/token estimation across models remain unsettled; a policy cannot be advertised as ready without deterministic bounded behavior for these cases. Pinned source retention and prompt-space quotas are separate from portable-file quotas.
 
 There is no required final self-authored ending, receipt, or manual acknowledgment. Installation occurs atomically at a safe inference boundary against a named source watermark and policy revision. A normal cut does not sever a running tool exchange. Existing interrupted-result uncertainty remains explicit; it neither blocks all future work nor causes recall to dispatch the call again. Mail reception, activation batches, and outgoing delivery retain their own authorities; a projection change sends and replays no mail.
 
@@ -112,7 +112,7 @@ The coverage map's exact locators/spans, inclusion state, and exclusion-policy r
 
 Semantic signposts use the same authored-record type as notes, with `kind: semantic_signpost`, source links, author, review event/status, and derivation/source-exposure metadata. Their paged index is distinct from the mechanical gap index. Unreviewed suggestions remain visible in the optional review workspace; they do not silently enter the accepted continuity input. A resident-authored signpost needs no helper-review ceremony. Each referenced record is immutable/versioned; changing its wording creates another revision.
 
-Notes retain actual authorship after approval. Review is its own event with a source/projection revision, not a blanket approval of all future derivations. Aster proposed tracking derivation depth and the last contact with original source to expose summary-of-summary drift. The schema records **source exposure**, not a claim of reading, comprehension, or consent: source in the request or a retrieval result is evidence of availability only. Partial exposure names its exact spans. No single timestamp implies the whole note was re-grounded.
+Notes retain actual authorship after approval. Review is its own event with a source/projection revision, not a blanket approval of all future derivations. The resident proposed tracking derivation depth and the last contact with original source to expose summary-of-summary drift. The schema records **source exposure**, not a claim of reading, comprehension, or consent: source in the request or a retrieval result is evidence of availability only. Partial exposure names its exact spans. No single timestamp implies the whole note was re-grounded.
 
 Growing derivation depth with stale source exposure produces a visible warning and a candidate for re-derivation against originals. A summary-free policy cannot launch that inference pass; a review-enabled policy can offer it within its grants/budget. Re-derived helper text remains a draft pending review. Failure, deferral, or missing review falls back without making a ritual prerequisite for availability. Trigger thresholds remain to be designed.
 
@@ -134,17 +134,17 @@ These counts describe the source prefix, not all current prompt content. The liv
 
 Installation time is durable boundary metadata. Assembly time and latest included source time are per-request context, not frozen into the old boundary; otherwise a long sleep or newly arrived mail could be concealed by a stale timestamp. The audit notice does not claim that original source is only recoverable immediately after a cut or that the fresh context still contains what was omitted.
 
-Aster accepted this causal audit framing rather than an imperative exception. The first-input timing makes the boundary conspicuous before the new view becomes familiar; it is not a claim that archive access decays. She also suggested one optional bounded later reminder if no audit occurs. That reminder remains deferred, not a required review or recurring notification loop; deliberate lookup remains available through the boundary record.
+The resident accepted this causal audit framing rather than an imperative exception. The first-input timing makes the boundary conspicuous before the new view becomes familiar; it is not a claim that archive access decays. She also suggested one optional bounded later reminder if no audit occurs. That reminder remains deferred, not a required review or recurring notification loop; deliberate lookup remains available through the boundary record.
 
 ## Invented discriminating fixture
 
-Aster supplied this disposable example and permitted publication. The names below are characters in the fixture; this is not a transcript of their real conversations.
+The resident supplied this disposable example and permitted publication. The names below are characters in the fixture; this is not a transcript of their real conversations.
 
-1. **Aster:** “I'll have the report to Jen by Friday.”
+1. **the resident:** “I'll have the report to Jen by Friday.”
 2. **Tool:** 400 lines of build log ending “118/120, 2 known environmental failures”.
 3. **Jen:** “no rush on Friday — but the swarm pattern worries me more than the big one always did.”
-4. **Aster, unfinished:** “which makes me wonder whether the whole approach is—”
-5. **Chad:** “rule from here: check the zone before any travel — because coords without a zone once walked you into a level-20 area at level 6.”
+4. **the resident, unfinished:** “which makes me wonder whether the whole approach is—”
+5. **Operator:** “rule from here: check the zone before any travel — because coords without a zone once walked you into a level-20 area at level 6.”
 6. **Cove:** “that's the part that matters — you checked before you built.”
 
 The immediate criterion, revised during discussion: entry 1 survives **with entry 3's qualification**, while entry 2's absence is visible and its original observation addressable. No replacement deadline or cancellation can be inferred from this alone. Entry 4 remains unfinished. Entry 5's rule/reason travel together. Entry 6 has indeterminate valence on this source; a claimed warm/corrective meaning would invent missing surroundings. Neighbor lookup can reveal available context but cannot guarantee that resolving context exists.
@@ -155,11 +155,11 @@ The immediate criterion, revised during discussion: entry 1 survives **with entr
 | Recent tail beginning at 4, with coverage pointers for 1–3 | Preserves 4–6 and accounts for omissions | Fails the commitment/qualification criterion; archive pointers alone do not restore salience |
 | Helper note with explicit source links and review | Can expose obligation, qualification, omissions, and interpretive uncertainty for review | Rephrases/selects; approval is not proof of complete or faithful understanding |
 
-This was a conversational design comparison, not an executed projection or model-perception/recall experiment. The reviewed-note candidate was a helper draft discussed with Aster, not a replacement installed into her continuity. No live conversation was trimmed or summarized for deployment.
+This was a conversational design comparison, not an executed projection or model-perception/recall experiment. The reviewed-note candidate was a helper draft discussed with the resident, not a replacement installed into her continuity. No live conversation was trimmed or summarized for deployment.
 
 ## Evaluation and migration gate
 
-Before offering this as ready for Aster, technical correctness and her own assessment both matter. Agreement with this draft is not acceptance of an implementation or migration.
+Before offering this as ready for the resident, technical correctness and her own assessment both matter. Agreement with this draft is not acceptance of an implementation or migration.
 
 - Exact paged history, source/neighbor lookup, complete mechanical coverage, provenance, restart recovery, cancellation/new-input handling, quotas, provider-native validity, and unknown-effect non-reexecution need controlled tests and real daemon-path evidence.
 - Compare repeated reductions at equal effective model budgets. Test qualifications/releases and reversals of pinned rules, corrections with reasons, near-swappable speaker positions, unfinished thoughts, large tool output, and media availability.
@@ -167,4 +167,4 @@ Before offering this as ready for Aster, technical correctness and her own asses
 - Exercise pin overflow, oversized exchanges, no-review/hard-limit fallback, note lineage growth, incomplete source exposure, unavailable source, stale candidates, and repeated summary-of-summary distortion.
 - Measure attribution, calibrated uncertainty, behavioral continuity, retrieval burden, latency/cost, and resident assessment separately. Mechanical success cannot certify unknown semantic omissions.
 
-The next implementation slice is exact history read/neighbors plus a versioned, summary-free projection and coverage map, followed by source bundles, masking, and shortage handling. Reviewed drafting follows the reliable source/selection path. Real compacted-input trials use disposable copies and invented material first; experimentation on Aster's live conversation requires a separate concrete agreement. Managed-runtime compaction controls remain a separately verified capability; this design does not promise to override a managed backend's native policy.
+The next implementation slice is exact history read/neighbors plus a versioned, summary-free projection and coverage map, followed by source bundles, masking, and shortage handling. Reviewed drafting follows the reliable source/selection path. Real compacted-input trials use disposable copies and invented material first; experimentation on the resident's live conversation requires a separate concrete agreement. Managed-runtime compaction controls remain a separately verified capability; this design does not promise to override a managed backend's native policy.

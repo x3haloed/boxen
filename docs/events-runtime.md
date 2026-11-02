@@ -266,5 +266,5 @@ input facts, not comprehension or complete event recall.
 
 Windows, other untested architectures, native stream-media attachment projection,
 older Codex-session tool upgrades, and long-duration resident behavior remain
-unverified or planned as described above. No Aster contact/migration or production
+unverified or planned as described above. No contact with or migration of existing residents or production
 subscription was part of verification.

@@ -19,10 +19,10 @@ pass `--resume`, start inference, or acquire the desktop writer. Only explicit
 Defaults:
 
 - Executable: `%USERPROFILE%/.boxen-support/bin/boxen-support.exe`
-- Profile: `%USERPROFILE%/.boxen-support/relay-dev/config.json`
+- Profile: `%USERPROFILE%/.boxen-support/support/config.json`
 - SQLite delivery cache/outgoing spool: `bridge.sqlite3` beside the configuration
 - Adapter events: `logs/bridge.jsonl`, rotated on worker startup above 10 MiB
-- Logon task: `Boxen-Codex-Desktop-relay-dev` (interactive user, hidden window)
+- Logon task: `Boxen-Codex-Desktop-support` (interactive user, hidden window)
 - Existing Boxen controls: `http://127.0.0.1:42425`, home `%USERPROFILE%/.boxen`
 
 The installer builds this independent Cargo package. `-NoBuild` installs an
@@ -66,7 +66,7 @@ conversation `client:OWNER_MACHINE_KEY:CLIENT_ID`. The owner is the authenticate
 requesting machine, including when mail is hosted on a peer. This is a client in
 that owner's mailbox domain, not a globally registered resident alias. Residents
 in that domain can use the ordinary client address without per-resident connector
-bindings. A human-readable `relay-dev` label alone is not a native Boxen address.
+bindings. A human-readable `support` label alone is not a native Boxen address.
 
 Notices contain IDs and scoped commands, never incoming bodies. `inspect` returns
 the original authenticated sender, reply address, causal ID and body. Neither a
