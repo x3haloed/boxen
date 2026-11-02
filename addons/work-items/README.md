@@ -33,7 +33,13 @@ An operator-authored JSON configuration supplies these fields:
   "definition_revision": 1,
   "pack_root": "C:/absolute/shared/project-pack",
   "pack_hash": "PINNED_MANIFEST_SHA256",
-  "capacity": 1
+  "capacity": 1,
+  "supervision": {
+    "notify_to": {"type":"client","machine":"OBSERVER_MACHINE_KEY","id":"OBSERVER_CLIENT_ID"},
+    "start_timeout_seconds": 300,
+    "inactivity_seconds": 1800,
+    "report_grace_seconds": 60
+  }
 }
 ```
 
@@ -164,8 +170,8 @@ are reported. Accepted Boxen mail remains owned by Boxen, not a duplicate mail D
 
 ## Capacity, resources and completion
 
-Default capacity is **one dispatched assignment**, retained until explicit operator
-release. Configuration permits 1–16 and is loaded at worker startup. A transactional
+Default capacity is **one dispatched assignment**, retained until an explicit operator
+release or a supervised handoff passes the checks below. Configuration permits 1–16 and is loaded at worker startup. A transactional
 claim prevents overbooking; pending jobs whose resources conflict do not starve
 unrelated later jobs. Canonical worktree paths are exclusive. Runtime-required
 assignments additionally claim their explicitly allocated frontend/backend ports,
@@ -196,6 +202,62 @@ after freeing the slot. A per-job lock serializes release with network dispatch.
 Uncertain effects require explicit readback and cannot be certified finished.
 Cleanup is asserted by the operator; this service never kills app processes or
 deletes databases/worktrees. Closing one turn does not automatically free its slot.
+
+## Supervised handoffs and notifications
+
+The optional `supervision` configuration enables monitoring for **new assignment
+versions**. Its destination and timeouts are frozen with each version; old assignments
+and ordinary historical mail are not retroactively interpreted as structured results.
+The destination is a configured typed observer mailbox, distinct from the report
+inbox. A desktop bridge can deliver those notifications without new GUI controls.
+
+Assignments describe explicit `boxen.work-report.v1` mail to their authenticated
+`reply_to`, linked through `in_reply_to` to the assignment or its report-only follow-up:
+
+```json
+{"protocol":"boxen.work-report.v1","job_id":"JOB_ID","assignment_version":1,
+ "outcome":"completed","summary":"Result and scope","evidence":["local artifact"],
+ "remaining":[],"cleanup":{"no_owned_runtime_resources":true}}
+```
+
+Outcomes are `completed`, `blocked`, `needs_clarification`, or `failed`. The service
+checks the authenticated resident, owner, destination, correlation and current job
+version. First valid reports remain immutable; conflicts/rejected attributed reports
+are visible. Retries are deduplicated. Progress stays ordinary mail. Accepted report
+receipts and inbox checkpoints commit atomically; private final text is never parsed.
+
+Monitoring uses assignment mail's `presented_in` run and retained run metadata.
+Default deadlines are five minutes without observed startup, thirty minutes without
+new run sequence activity, and sixty seconds after terminal execution without a
+report. Inactivity is an observation warning, not proof of failure. Completed turns
+get at most one durable report-only follow-up, explicitly excluding implementation
+or test/effect replay. Crashed/interrupted/cancelled runs and unanswered follow-ups
+remain unresolved and visible; no new coder or implementation retry is automatic.
+Late valid reports can resolve the missing-report condition. Operator pauses,
+completion and newer versions end old monitoring without erasing its record.
+
+Each condition produces a durable outbox message with a stable ID. Lost acceptance
+responses retry exactly that request; backend acceptance is distinct from human
+attention. Repeated failures update bounded health/counters rather than notifying on
+each tick. Observation failure, report receipt, unresolved outcomes and release are
+available through `status`; `supervise` runs one bounded reconciliation pass.
+`supervise --test-notification STABLE_KEY` queues an explicitly labeled diagnostic
+for the configured observer; repeating the key reuses the same message, without
+fabricating a work-item incident or starting a coder.
+The service keeps its existing loop and bounds inbox pages, watch batches and send
+batches; slow HTTP operations have deadlines. Storage has no total retention quota.
+
+Automatic release requires a valid report, an idle coder, presented assignment mail,
+`runtime.required: false` and the worker's explicit attestation of no owned runtime
+resources. This records worker attestation plus authoritative run/mail readback,
+not an invented operator confirmation or OS-wide resource inspection. Runtime-required
+or unaccounted resources stay reserved with a cleanup notification. A completed report
+with fresh source and successful terminal execution can finish the assignment;
+a completed report followed by failed execution is explicitly flagged and paused.
+Blocked/failed/clarification or stale
+source pauses it after cleanup. Neither outcome closes or edits the Azure work item.
+No notification acknowledgment gates unrelated eligible work. Source checkouts and
+evidence remain available; this service does not delete them.
 
 Revision/comment/PR-discussion changes invalidate affected assignments even when the
 ticket revision is unchanged. Invalidation retains coder ownership and any reserved
@@ -238,6 +300,10 @@ existing ownership, source invalidation, retained packets and continuation.
 The smoke suite uses real Boxen HTTP/execution and a controlled Codex backend for
 copy/send/reply, private finals, capacity release, restart, same-copy continuation
 and explicitly authorized owner replacement without replay or history deletion.
+It also covers supervised structured handoffs, automatic idle/no-runtime release,
+one report-only recovery from a silent turn, observer notifications and exact-ID
+delivery diagnostics. Unit tests cover crash/inactivity, invalid/stale/conflicting
+reports, atomic intake/checkpoints, late results, restart and outage/recovery health.
 These are distinct from real model/application evidence. The installed deployment
 also performs a live read-only Azure poll; no production coding is dispatched by
 installation. Windows native is verified; Unix paths are implemented but not yet

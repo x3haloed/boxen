@@ -233,11 +233,22 @@ pub fn release(
     cleaned: bool,
     note: &str,
 ) -> Result<Value> {
+    release_with_basis(s, api, job, outcome, cleaned, note, ("operator", None))
+}
+pub(crate) fn release_with_basis(
+    s: &Store,
+    api: &impl Boxen,
+    job: &str,
+    outcome: &str,
+    cleaned: bool,
+    note: &str,
+    basis: (&str, Option<i64>),
+) -> Result<Value> {
     let _lock = job_lock(s, job)?;
     key(job)?;
     ensure!(
         matches!(outcome, "paused" | "finished") && cleaned && !note.trim().is_empty(),
-        "Release names paused/finished, operator-confirmed resource cleanup and a note"
+        "Release requires paused/finished, confirmed cleanup with attributed basis, and a note"
     );
     let c = s.connect()?;
     let (coder, version, state): (String, i64, String) = c.query_row(
@@ -245,6 +256,10 @@ pub fn release(
         [job],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
+    ensure!(
+        basis.1.is_none_or(|expected| expected == version),
+        "Assignment changed before automatic release"
+    );
     let runs = api.call(json!({"op":"list"}))?;
     for r in runs.as_array().context("Boxen run catalog unavailable")? {
         if r["record"]["spec"]["thread_id"] == coder {
@@ -334,7 +349,7 @@ pub fn release(
         &tx,
         job,
         "capacity.released",
-        json!({"version":version,"outcome":outcome,"operator_note":note,"cleanup_confirmed_by_operator":true}),
+        json!({"version":version,"outcome":outcome,"note":note,"cleanup_basis":basis.0,"cleanup_confirmed_by_operator":basis.0=="operator"}),
     )?;
     tx.commit()?;
     Ok(json!({"job_id":job,"state":outcome,"resources_released":true}))

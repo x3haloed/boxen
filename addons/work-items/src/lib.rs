@@ -1,5 +1,6 @@
 pub mod ado;
 pub mod process;
+pub mod supervision;
 #[cfg(test)]
 mod tests;
 pub mod transport;
@@ -51,6 +52,8 @@ pub struct Config {
     pub pack_root: PathBuf,
     pub pack_hash: String,
     pub capacity: usize,
+    #[serde(default)]
+    pub supervision: Option<supervision::Settings>,
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
@@ -79,6 +82,14 @@ impl Config {
             addr.ip().is_loopback(),
             "Credentials are used only with a loopback origin"
         );
+        if let Some(settings) = &self.supervision {
+            settings.validate()?;
+            ensure!(
+                settings.notify_to
+                    != json!({"type":"client","machine":self.owner,"id":self.client_id}),
+                "Notification destination differs from the report inbox"
+            );
+        }
         Ok(())
     }
     pub fn read(home: &Path) -> Result<Self> {
@@ -113,6 +124,7 @@ impl Store {
         CREATE TABLE IF NOT EXISTS effects(job TEXT,version INTEGER,kind TEXT,state TEXT NOT NULL,detail TEXT,PRIMARY KEY(job,version,kind));
         CREATE TABLE IF NOT EXISTS workflow_events(seq INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT,kind TEXT,data TEXT,at INTEGER);")?;
         ado::migrate(&c)?;
+        supervision::migrate(&c)?;
         Ok(s)
     }
     pub fn connect(&self) -> Result<Connection> {
@@ -500,10 +512,13 @@ impl Store {
             .join(&job)
             .join(version.to_string())
             .join("packet.json");
-        let body = format!(
+        let mut body = format!(
             "[Work-item service — explicit operator assignment record; source content retains its original authors]\nJob {job}, version {version}. This service records the explicit operator request; it is not an agent-authored human message. The JSON below identifies the frozen assignment and full source/evidence file on this executing host. That file's SHA-256 verifies its exact retained bytes. Local investigation/editing/checks are scoped by the assignment. Publication is disabled for this slice. Source observations can become stale after acceptance; workflow freshness is separate from implementation success. Runtime claims coordinate this service's assignments, not arbitrary processes on the host. Explicit mailbox replies go to the authenticated reply_to address. Private narration is not a handoff.\n{}",
             json!({"assignment":assignment,"context":input["context"],"packet_path":packet_path,"packet_sha256":hash(&bundle.to_string()),"source_digest":input["source_digest"]})
         );
+        if cfg.supervision.is_some() {
+            body.push_str(&supervision::contract(&job, version, &mid));
+        }
         ensure!(
             body.len() <= 32768,
             "Assignment/source packet exceeds mailbox body bound; no partial assignment was accepted"
@@ -534,6 +549,10 @@ impl Store {
             "assignment.accepted",
             json!({"version":version,"coder":coder}),
         )?;
+        if let Some(settings) = &cfg.supervision {
+            settings.validate()?;
+            tx.execute("INSERT INTO supervision(job,version,coder,message,settings,activity) VALUES(?1,?2,?3,?4,?5,?6)",params![job,version,coder,mid,serde_json::to_string(settings)?,now()])?;
+        }
         tx.commit()?;
         Ok(
             json!({"job_id":job,"coder_id":coder,"version":version,"state":"queued","message_id":mid}),
@@ -595,7 +614,7 @@ impl Store {
         let c = self.connect()?;
         let jobs=c.prepare("SELECT id,item,coder,state,version,holds_slot,error FROM work ORDER BY created DESC LIMIT 200")?.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"item":r.get::<_,i64>(1)?,"coder":r.get::<_,String>(2)?,"state":r.get::<_,String>(3)?,"version":r.get::<_,i64>(4)?,"holds_slot":r.get::<_,bool>(5)?,"error":r.get::<_,Option<String>>(6)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(
-            json!({"mirror":ado::snapshot(self,0)?,"jobs":jobs,"automatic_assignment":false,"publication_enabled":false}),
+            json!({"mirror":ado::snapshot(self,0)?,"jobs":jobs,"supervision":supervision::snapshot(self)?,"automatic_assignment":false,"publication_enabled":false}),
         )
     }
 }

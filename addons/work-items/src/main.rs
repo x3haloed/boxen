@@ -41,6 +41,19 @@ fn read_json(path: &str) -> Result<Value> {
         fs::read_to_string(p)?.trim_start_matches('\u{feff}'),
     )?)
 }
+fn supervision_lock(home: &Path) -> Result<Option<fs::File>> {
+    match lock(home, "supervision.lock") {
+        Ok(file) => Ok(Some(file)),
+        Err(error)
+            if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                e.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+            }) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
 fn poll(s: &Store, home: &Path, item: Option<i64>) -> Result<()> {
     let _lock = lock(home, "azure-read.lock")?;
     let cfg = ado::config(s)?;
@@ -145,7 +158,7 @@ fn execute() -> Result<()> {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args.iter().any(|a| a == "--help") {
         println!(
-            "boxen-work-items --home ABS init --config-file ABS --legacy-db ABS\nboxen-work-items --home ABS run\nboxen-work-items --home ABS status\nboxen-work-items --home ABS packet ITEM\nboxen-work-items --home ABS poll [--item ITEM]\nboxen-work-items --home ABS assign --request-file ABS\nboxen-work-items --home ABS release --request-file ABS\nboxen-work-items --home ABS messages [--after SEQ]\nExplicit local operator CLI. No automatic assignment, GUI or Azure writes. Ordinary mail is not parsed into operator commands."
+            "boxen-work-items --home ABS init --config-file ABS --legacy-db ABS\nboxen-work-items --home ABS run\nboxen-work-items --home ABS status\nboxen-work-items --home ABS packet ITEM\nboxen-work-items --home ABS poll [--item ITEM]\nboxen-work-items --home ABS assign --request-file ABS\nboxen-work-items --home ABS release --request-file ABS\nboxen-work-items --home ABS messages [--after SEQ]\nboxen-work-items --home ABS supervise [--test-notification STABLE_KEY]\nExplicit local operator CLI. No automatic assignment, GUI or Azure writes. Ordinary mail is not parsed into operator commands."
         );
         return Ok(());
     }
@@ -164,7 +177,7 @@ fn execute() -> Result<()> {
         let cfgpath = home.join("config.json");
         if cfgpath.exists() {
             ensure!(
-                fs::read_to_string(&cfgpath)? == serde_json::to_string_pretty(&cfg)?,
+                serde_json::to_value(Config::read(&home)?)? == serde_json::to_value(&cfg)?,
                 "Existing service configuration differs"
             );
             println!("{}", json!({"initialized":true,"idempotent":true}));
@@ -286,6 +299,23 @@ fn execute() -> Result<()> {
                     .call(json!({"op":"client_inbox","client_id":cfg.client_id,"after":after}))?
             );
         }
+        "supervise" => {
+            let delivery_test = option(&mut args, "--test-notification")?;
+            ensure!(args.is_empty(), "Unexpected supervise arguments");
+            let _lock = lock(&home, "supervision.lock")?;
+            if let Some(key) = delivery_test {
+                supervision::delivery_test(&s, &cfg, &key)?;
+            }
+            let result =
+                Control::new(&cfg).and_then(|api| supervision::tick(&s, &cfg, &api, now()));
+            supervision::health(
+                &s,
+                &cfg,
+                result.as_ref().err().map(|e| e.to_string()).as_deref(),
+            )?;
+            result?;
+            println!("{}", supervision::snapshot(&s)?);
+        }
         "run" => {
             ensure!(args.is_empty(), "Unexpected run arguments");
             let _worker = lock(&home, "worker.lock")?;
@@ -323,7 +353,8 @@ fn execute() -> Result<()> {
                 let tick = || -> Result<()> {
                     s.reserve(cfg.capacity)?;
                     let jobs=s.connect()?.prepare("SELECT id FROM work WHERE state='reserved' AND COALESCE(CAST((SELECT v FROM meta WHERE k='retry:'||work.id) AS INTEGER),0)<=?1 ORDER BY created LIMIT 16")?.query_map([now()],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                    if !jobs.is_empty() {
+                    let supervision_pending:bool=s.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM supervision WHERE closed=0) OR EXISTS(SELECT 1 FROM supervision_outbox WHERE accepted=0)",[],|r|r.get(0))?;
+                    if !jobs.is_empty() || cfg.supervision.is_some() || supervision_pending {
                         let api = Control::new(&cfg)?;
                         for job in jobs {
                             if let Err(e) = transport::dispatch(&s, &cfg, &api, &job) {
@@ -346,12 +377,18 @@ fn execute() -> Result<()> {
                                 c.execute("INSERT INTO meta VALUES(?1,?2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",rusqlite::params![format!("retry:{job}"),(now()+15000).to_string()])?;
                             }
                         }
+                        if let Some(_supervision) = supervision_lock(&home)? {
+                            supervision::tick(&s, &cfg, &api, now())?;
+                        }
                     }
                     Ok(())
                 };
                 if let Err(e) = tick() {
+                    let _ = supervision::health(&s, &cfg, Some(&e.to_string()));
                     event("service.dispatch_error", json!({"detail":e.to_string()}));
                     thread::sleep(Duration::from_secs(15));
+                } else {
+                    let _ = supervision::health(&s, &cfg, None);
                 }
                 thread::sleep(Duration::from_secs(2));
             }
@@ -364,5 +401,23 @@ fn main() {
     if let Err(e) = execute() {
         eprintln!("boxen-work-items: {e}");
         std::process::exit(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn concurrent_one_shot_observation_is_skipped_without_reporting_service_failure() {
+        let home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("supervision-lock-{}", id()));
+        fs::create_dir_all(&home).unwrap();
+        let held = supervision_lock(&home).unwrap().unwrap();
+        assert!(supervision_lock(&home).unwrap().is_none());
+        drop(held);
+        assert!(supervision_lock(&home).unwrap().is_some());
+        fs::remove_file(home.join("supervision.lock")).unwrap();
+        fs::remove_dir(home).unwrap();
     }
 }

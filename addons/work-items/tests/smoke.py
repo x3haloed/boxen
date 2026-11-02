@@ -15,7 +15,15 @@ def digest(s):return hashlib.sha256(s.encode()).hexdigest()
 with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
     root=pathlib.Path(tmp);home=root/'workflow';legacy_home=root/'legacy';boxen_home=root/'boxen';pack=root/'pack';pack.mkdir();(pack/'scripts').mkdir()
     worker=None;daemon=None;peer_port=port();ui=port()
-    fixture=root/'fake-codex.py';fixture.write_text((repo/'tests/fake-codex.py').read_text().replace('m["body"].startswith("REPLY")','m["body"].startswith("[Work-item service")'),encoding='utf-8')
+    fixture=root/'fake-codex.py'
+    fixture_source=(repo/'tests/fake-codex.py').read_text().replace('m["body"].startswith("REPLY")','(m["body"].startswith("[Work-item service") or m["body"].startswith("The observed assignment")) and "SIMULATE_MISSING_HANDOFF" not in m["body"]')
+    fixture_source=fixture_source.replace('            response, sent=invoke("boxen_send_message",send,11)','''            if "boxen.work-report.v1" in incoming["body"]:
+                report=json.JSONDecoder().raw_decode(incoming["body"].split("Example: ",1)[1])[0]
+                report["summary"]="Controlled explicit structured handoff"
+                report["cleanup"]["no_owned_runtime_resources"]=True
+                send["body"]=json.dumps(report)
+            response, sent=invoke("boxen_send_message",send,11)''')
+    fixture.write_text(fixture_source,encoding='utf-8')
     wrapper=root/'codex.cmd';wrapper.write_text('@echo off\n"'+sys.executable+'" "'+str(fixture)+'" %*\n');codex=wrapper if os.name=='nt' else fixture
     if os.name!='nt':fixture.chmod(0o755)
     manifest=digest('fixture pack');definition=digest('fixture coder');client=digest('workflow client')
@@ -94,8 +102,37 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
         assert len(api({'op':'resident_list'}))==3 and len(api({'op':'list'}))==4
         assert len(json.loads(command('messages').stdout)['messages'])==4
         assert packet.exists() and (home/'evidence'/r1['job_id']/'1/packet.json').exists()
+        # Enable supervision for new assignments only. No old plain messages become outcomes.
+        stop(worker)
+        release['job_id']=r1['job_id'];command('release','--request-file',request_file('pause-supervised',release))
+        observer=digest('supervision observer')
+        config['supervision']={'notify_to':{'type':'client','machine':owner,'id':observer},'start_timeout_seconds':10,'inactivity_seconds':10,'report_grace_seconds':1}
+        (home/'config.json').write_text(json.dumps(config),encoding='utf-8')
+        supervised=assignment(1,'supervised-handoff',False)
+        r5=json.loads(command('assign','--request-file',request_file('supervised',supervised)).stdout)
+        start_worker();wait(lambda:state(r1['job_id'])=='finished');wait(idle)
+        def delivered_conditions():
+            return [json.loads(m['body'])['condition'] for m in api({'op':'client_inbox','client_id':observer,'after':0})['messages']]
+        wait(lambda:'report_received' in delivered_conditions() and 'allocation_released' in delivered_conditions())
+        count=len(api({'op':'list'}));stop(worker);start_worker();time.sleep(2.5)
+        assert len(api({'op':'list'}))==count,'Restart reran implementation'
+        missing=assignment(1,'supervised-missing-handoff',False)
+        missing['assignment']['task']['request']='SIMULATE_MISSING_HANDOFF'
+        r6=json.loads(command('assign','--request-file',request_file('missing-handoff',missing)).stdout)
+        wait(lambda:state(r1['job_id'])=='finished');wait(idle)
+        assert len(api({'op':'list'}))==count+2,'Missing handoff did not use exactly one report-only followup'
+        notices=api({'op':'client_inbox','client_id':observer,'after':0})['messages']
+        assert sum(json.loads(m['body'])['condition']=='missing_report' for m in notices)==1
+        with database(home/'work-items.sqlite3') as c:
+            assert c.execute("select count(*) from supervision_outbox where purpose='report_request'").fetchone()[0]==1
+            assert c.execute("select count(*) from report_receipts where accepted=1").fetchone()[0]==2
         with database(home/'work-items.sqlite3') as c:assert c.execute('pragma integrity_check').fetchone()[0]=='ok'
-        print('PASS real Boxen create/send/activation/reply, durable migration, exact retries, restart without replay, capacity queue/release, same-coder continuation, explicit owner transfer, immutable packets and private final isolation')
+        stop(worker)
+        command('supervise','--test-notification','controlled-route-proof')
+        command('supervise','--test-notification','controlled-route-proof')
+        notices=api({'op':'client_inbox','client_id':observer,'after':0})['messages']
+        assert sum(json.loads(m['body'])['condition']=='delivery_test' for m in notices)==1
+        print('PASS real Boxen create/send/activation/reply, durable migration, exact retries, restart without replay, capacity queue/release, same-coder continuation, explicit owner transfer, immutable packets, supervised handoffs, one report-only recovery, durable notifications and private final isolation')
     finally:
         stop(worker);stop(daemon)
         if daemon:daemon.stdout.close()

@@ -35,6 +35,7 @@ impl Fixture {
             pack_root: root.join("pack"),
             pack_hash: hash("pack"),
             capacity: 1,
+            supervision: None,
         };
         let f = Self { root, s, cfg };
         for item in [1, 2, 3] {
@@ -369,4 +370,340 @@ fn explicit_replacement_preserves_prior_assignments_and_retries_without_resettin
         serde_json::from_str::<Value>(&old_input).unwrap(),
         f.input(1)
     );
+}
+
+// A protocol fixture drives authoritative mail/run snapshots; no model or private text parsing.
+struct Supervised {
+    inner: Fake,
+    reports: Mutex<Vec<Value>>,
+    status: Mutex<String>,
+    seq: Mutex<i64>,
+    online: Mutex<bool>,
+}
+impl Supervised {
+    fn new(cfg: &Config) -> Self {
+        Self {
+            inner: Fake::new(cfg),
+            reports: Mutex::new(vec![]),
+            status: Mutex::new("running".into()),
+            seq: Mutex::new(1),
+            online: Mutex::new(true),
+        }
+    }
+    fn report(&self, assignment: &Value, outcome: &str, clean: bool) -> Value {
+        let coder = &assignment["coder_id"];
+        json!({"id":hash(&format!("report:{outcome}:{clean}")),"seq":1,"owner":self.inner.cfg.owner,"sender":{"type":"resident","id":coder},"to":{"type":"client","machine":self.inner.cfg.owner,"id":self.inner.cfg.client_id},"in_reply_to":assignment["message_id"],"body":json!({"protocol":"boxen.work-report.v1","job_id":assignment["job_id"],"assignment_version":assignment["version"],"outcome":outcome,"summary":"Explicit synthetic result","evidence":["local evidence"],"remaining":[],"cleanup":{"no_owned_runtime_resources":clean}}).to_string()})
+    }
+}
+impl Boxen for Supervised {
+    fn call(&self, r: Value) -> Result<Value> {
+        ensure!(
+            *self.online.lock().unwrap(),
+            "Fixture transport unavailable"
+        );
+        match r["op"].as_str().unwrap() {
+            "client_inbox" => {
+                let after = r["after"].as_i64().unwrap_or(0);
+                let rows = self
+                    .reports
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|m| m["seq"].as_i64().unwrap() > after)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                Ok(
+                    json!({"next_after":rows.last().map(|m|m["seq"].clone()).unwrap_or(json!(after)),"messages":rows}),
+                )
+            }
+            "resident_inbox" => {
+                let mut page = self.inner.call(r)?;
+                for m in page["messages"].as_array_mut().unwrap() {
+                    m["presented_in"] = json!(hash("observed run"));
+                }
+                Ok(page)
+            }
+            "get" => {
+                let coder = self
+                    .inner
+                    .created
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .next()
+                    .unwrap()
+                    .clone();
+                Ok(
+                    json!({"record":{"owner":self.inner.cfg.owner,"spec":{"thread_id":coder,"id":hash("observed run")}},"status":*self.status.lock().unwrap(),"last_seq":*self.seq.lock().unwrap()}),
+                )
+            }
+            "list" => {
+                let coder = self
+                    .inner
+                    .created
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .next()
+                    .unwrap()
+                    .clone();
+                Ok(
+                    json!([{"record":{"spec":{"thread_id":coder}},"status":*self.status.lock().unwrap()}]),
+                )
+            }
+            _ => self.inner.call(r),
+        }
+    }
+}
+fn supervised_fixture() -> (Fixture, Supervised, Value) {
+    let mut f = Fixture::new();
+    f.cfg.supervision = Some(supervision::Settings {
+        notify_to: json!({"type":"client","machine":f.cfg.owner,"id":hash("observer")}),
+        start_timeout_seconds: 2,
+        inactivity_seconds: 3,
+        report_grace_seconds: 1,
+    });
+    let api = Supervised::new(&f.cfg);
+    let a = f.s.assign(&f.cfg, &f.input(1)).unwrap();
+    f.s.reserve(1).unwrap();
+    dispatch(&f.s, &f.cfg, &api, a["job_id"].as_str().unwrap()).unwrap();
+    (f, api, a)
+}
+#[test]
+fn authenticated_handoff_waits_for_idle_and_releases_without_closing_ticket() {
+    let (f, api, a) = supervised_fixture();
+    let t = now();
+    api.reports
+        .lock()
+        .unwrap()
+        .push(api.report(&a, "completed", true));
+    supervision::tick(&f.s, &f.cfg, &api, t).unwrap();
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["holds_slot"], true);
+    *api.status.lock().unwrap() = "completed".into();
+    // Reopen represents supervisor process restart; report/cursor and outbox survive.
+    let reopened = Store::open(&f.s.path).unwrap();
+    supervision::tick(&reopened, &f.cfg, &api, t + 100).unwrap();
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["state"], "finished");
+    let notices = api.inner.mail.lock().unwrap().len();
+    supervision::tick(&reopened, &f.cfg, &api, t + 5000).unwrap();
+    assert_eq!(api.inner.mail.lock().unwrap().len(), notices);
+    assert_eq!(reopened.packet(1).unwrap()["eligible"], true);
+}
+#[test]
+fn forged_stale_malformed_and_conflicting_reports_cannot_complete_work() {
+    let (f, api, a) = supervised_fixture();
+    let t = now();
+    let mut forged = api.report(&a, "completed", true);
+    forged["sender"]["id"] = json!(hash("wrong worker"));
+    let mut stale = api.report(&a, "completed", true);
+    stale["id"] = json!(hash("stale"));
+    stale["seq"] = json!(2);
+    let mut body: Value = serde_json::from_str(stale["body"].as_str().unwrap()).unwrap();
+    body["assignment_version"] = json!(9);
+    stale["body"] = json!(body.to_string());
+    let mut malformed = api.report(&a, "completed", true);
+    malformed["id"] = json!(hash("malformed"));
+    malformed["seq"] = json!(3);
+    body["assignment_version"] = json!(1);
+    body["summary"] = json!("");
+    malformed["body"] = json!(body.to_string());
+    api.reports
+        .lock()
+        .unwrap()
+        .extend([forged, stale, malformed]);
+    *api.status.lock().unwrap() = "completed".into();
+    supervision::tick(&f.s, &f.cfg, &api, t).unwrap();
+    assert!(supervision::snapshot(&f.s).unwrap()["assignments"][0]["report"].is_null());
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["holds_slot"], true);
+    let mut valid = api.report(&a, "blocked", false);
+    valid["seq"] = json!(4);
+    api.reports.lock().unwrap().push(valid);
+    supervision::tick(&f.s, &f.cfg, &api, t + 100).unwrap();
+    let mut conflict = api.report(&a, "completed", true);
+    conflict["seq"] = json!(5);
+    conflict["id"] = json!(hash("conflict"));
+    api.reports.lock().unwrap().push(conflict);
+    supervision::tick(&f.s, &f.cfg, &api, t + 200).unwrap();
+    assert_eq!(
+        supervision::snapshot(&f.s).unwrap()["assignments"][0]["report"]["outcome"],
+        "blocked"
+    );
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["holds_slot"], true);
+}
+#[test]
+fn missing_handoff_has_one_report_only_recovery_and_restart_safe_notice_retries() {
+    let (f, api, a) = supervised_fixture();
+    let t = now();
+    *api.status.lock().unwrap() = "completed".into();
+    supervision::tick(&f.s, &f.cfg, &api, t).unwrap();
+    *api.inner.lose_response.lock().unwrap() = true;
+    supervision::tick(&f.s, &f.cfg, &api, t + 1001).unwrap();
+    let reopened = Store::open(&f.s.path).unwrap();
+    supervision::tick(&reopened, &f.cfg, &api, t + 1002).unwrap();
+    supervision::tick(&reopened, &f.cfg, &api, t + 32_000).unwrap();
+    supervision::tick(&reopened, &f.cfg, &api, t + 34_000).unwrap();
+    let c = f.s.connect().unwrap();
+    let follows: i64 = c
+        .query_row(
+            "SELECT count(*) FROM supervision_outbox WHERE purpose='report_request'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(follows, 1);
+    assert_eq!(
+        supervision::snapshot(&f.s).unwrap()["assignments"][0]["phase"],
+        "unresolved"
+    );
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["holds_slot"], true);
+    let creates = api.inner.created.lock().unwrap().len();
+    assert_eq!(creates, 1);
+    let mut late = api.report(&a, "failed", true);
+    late["seq"] = json!(10);
+    api.reports.lock().unwrap().push(late);
+    supervision::tick(&reopened, &f.cfg, &api, t + 35_000).unwrap();
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["state"], "paused");
+}
+#[test]
+fn crash_and_inactivity_are_visible_without_replaying_or_declaring_failure_from_silence() {
+    let (f, api, _) = supervised_fixture();
+    let t = now();
+    supervision::tick(&f.s, &f.cfg, &api, t).unwrap();
+    supervision::tick(&f.s, &f.cfg, &api, t + 3100).unwrap();
+    let c = f.s.connect().unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM supervision_outbox WHERE purpose='activity_overdue'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    *api.status.lock().unwrap() = "failed".into();
+    supervision::tick(&f.s, &f.cfg, &api, t + 3200).unwrap();
+    supervision::tick(&f.s, &f.cfg, &api, t + 4300).unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM supervision_outbox WHERE purpose='unresolved_outcome'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM supervision_outbox WHERE purpose='report_request'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["holds_slot"], true);
+}
+#[test]
+fn report_page_failure_rolls_back_receipts_report_and_cursor_together() {
+    let (f, api, a) = supervised_fixture();
+    let t = now();
+    let valid = api.report(&a, "completed", true);
+    let mut broken = valid.clone();
+    broken["seq"] = json!(2);
+    broken["id"] = Value::Null;
+    api.reports.lock().unwrap().extend([valid, broken]);
+    assert!(supervision::tick(&f.s, &f.cfg, &api, t).is_err());
+    let c = f.s.connect().unwrap();
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM report_receipts", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(supervision::snapshot(&f.s).unwrap()["assignments"][0]["report"].is_null());
+    api.reports.lock().unwrap().pop();
+    supervision::tick(&f.s, &f.cfg, &api, t + 1).unwrap();
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM report_receipts", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+#[test]
+fn service_health_retains_outage_and_recovery_without_repeated_notification_flood() {
+    let (f, api, _) = supervised_fixture();
+    supervision::health(&f.s, &f.cfg, Some("Unavailable endpoint")).unwrap();
+    supervision::health(&f.s, &f.cfg, Some("Still unavailable")).unwrap();
+    let reopened = Store::open(&f.s.path).unwrap();
+    assert_eq!(
+        supervision::snapshot(&reopened).unwrap()["health"]["failures"],
+        2
+    );
+    supervision::health(&reopened, &f.cfg, None).unwrap();
+    supervision::tick(&reopened, &f.cfg, &api, now()).unwrap();
+    let c = reopened.connect().unwrap();
+    assert_eq!(c.query_row("SELECT count(*) FROM supervision_outbox WHERE purpose IN ('service_unavailable','service_recovered')",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    assert_eq!(
+        supervision::snapshot(&reopened).unwrap()["health"]["available"],
+        true
+    );
+}
+#[test]
+fn completed_report_followed_by_failed_run_is_paused_not_certified_successful() {
+    let (f, api, a) = supervised_fixture();
+    api.reports
+        .lock()
+        .unwrap()
+        .push(api.report(&a, "completed", true));
+    *api.status.lock().unwrap() = "failed".into();
+    supervision::tick(&f.s, &f.cfg, &api, now()).unwrap();
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["state"], "paused");
+    assert_eq!(
+        f.s.connect()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM supervision_outbox WHERE purpose='report_run_conflict'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+struct NotPresented<'a>(&'a Supervised);
+impl Boxen for NotPresented<'_> {
+    fn call(&self, r: Value) -> Result<Value> {
+        let inbox = r["op"] == "resident_inbox";
+        let mut result = self.0.call(r)?;
+        if inbox {
+            for m in result["messages"].as_array_mut().unwrap() {
+                m["presented_in"] = Value::Null;
+                m["delivery"] = json!("queued");
+            }
+        }
+        Ok(result)
+    }
+}
+#[test]
+fn accepted_mail_without_activation_emits_one_start_warning_without_resubmission() {
+    let (f, api, _) = supervised_fixture();
+    let t = now();
+    let pending = NotPresented(&api);
+    supervision::tick(&f.s, &f.cfg, &pending, t).unwrap();
+    supervision::tick(&f.s, &f.cfg, &pending, t + 2100).unwrap();
+    supervision::tick(&f.s, &f.cfg, &pending, t + 5000).unwrap();
+    assert_eq!(
+        f.s.connect()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM supervision_outbox WHERE purpose='start_overdue'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(api.inner.created.lock().unwrap().len(), 1);
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["holds_slot"], true);
 }
