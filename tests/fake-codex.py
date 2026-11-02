@@ -84,12 +84,20 @@ def work(prompt):
             response, result = continuity({"action":"write","expected_revision":state["revision"]-1,"memory":"stale overwrite"},2)
             assert not response["success"] and "revision conflict" in result["error"]
         answer = json.dumps(state)
-    if resident_context is not None and prompt.startswith("Mailbox activation."):
+    if resident_context is not None and prompt.startswith(("Mailbox activation.","Message activation.")):
         activation = json.loads(prompt.rsplit("\n",1)[1])
         response, inbox = invoke("boxen_mailbox",{},10)
         assert response["success"] and len(inbox["messages"]) >= len(activation["messages"])
         for incoming in activation["messages"]:
             assert any(m["id"]==incoming["id"] and m["delivery"]=="presented" for m in inbox["messages"])
+        for incoming in activation["messages"]:
+            if incoming['body'].startswith('MESSAGING:'):
+                response,available=invoke('boxen_messages',{'action':'list'},250)
+                assert response['success']
+                response,page=invoke('boxen_messages',{'action':'inbox'},251)
+                assert response['success'] and any(m['id']==incoming['id'] for m in page['messages'])
+                response,result=invoke('boxen_messages',json.loads(incoming['body'].split(':',1)[1]),252)
+                answer=json.dumps({'success':response['success'],'result':result})
         eligible = [m for m in activation["messages"] if m["body"].startswith("REPLY")]
         if eligible:
             incoming=eligible[0]

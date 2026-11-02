@@ -73,6 +73,17 @@ The [compaction research](docs/research/compaction.md) investigates context redu
 
 The [provider/runtime research](docs/research/inference-runtime.md) and [transport experiment](docs/research/inference-transport-experiment.md) explain the boundaries and evidence. [Managed-session portability](docs/research/managed-session-portability.md) remains distinct and unverified.
 
+## Messaging connectors
+
+[Messaging](docs/messaging.md) gives residents a shared inbox/send/status contract
+across Boxen mail and external services. Connector instances have separate native
+accounts, credential references and explicit resident/conversation bindings. The
+bundled Discord runner is `boxen discord-connector --instance ID`; addons can use
+the same public intake/outbox protocol without forking the daemon. Private
+narration stays private, and uncertain external sends are never automatically
+repeated. Discord configuration and opt-in live testing are documented separately
+from credential-free regression checks.
+
 ## Live daemon diagnostics
 
 Diagnostics are off by default and can be enabled, filtered, streamed remotely, redirected to a file, and disabled without restarting the daemon:

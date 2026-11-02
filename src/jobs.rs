@@ -450,6 +450,7 @@ pub struct Jobs {
     pub residents: Arc<Residents>,
     transitions: Mutex<()>,
     pub mailboxes: Arc<Mailboxes>,
+    pub connectors: crate::messaging::Connectors,
     pub schedules: crate::scheduler::Schedules,
     pub observations: Arc<crate::events::Events>,
     wake: Arc<(Mutex<Wake>, Condvar)>,
@@ -923,7 +924,7 @@ impl Jobs {
         result
     }
     pub fn runtime_info(&self) -> Value {
-        json!({"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]})
+        json!({"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]})
     }
 
     pub fn machine_id(&self) -> &str {
@@ -991,7 +992,14 @@ impl Jobs {
                 .ok_or("runs parent required")?
                 .join("observations"),
         )?);
+        let connectors = crate::messaging::Connectors::open(
+            directory
+                .parent()
+                .ok_or("runs parent required")?
+                .join("connectors"),
+        )?;
         let jobs = Arc::new(Self {
+            connectors,
             observations,
             schedules,
             residents,
@@ -1188,6 +1196,9 @@ impl Jobs {
             Address::Resident { id } => {
                 self.residents.get(owner, id)?;
             }
+            Address::Connector { instance, .. } => {
+                self.connectors.get(owner, instance)?;
+            }
             Address::Client { machine, .. } if machine != owner => return Err(
                 "this host routes client mail only to the authenticated owner's client namespace"
                     .into(),
@@ -1208,9 +1219,55 @@ impl Jobs {
         if let Some(reply) = &spec.reply_to {
             self.validate_address(owner, reply)?;
         }
+        if matches!(&sender, Address::Connector { .. }) {
+            return Err("native connector senders enter through scoped intake".into());
+        }
+        if let Address::Connector {
+            instance,
+            conversation,
+        } = &spec.to
+        {
+            let Address::Resident { id } = &sender else {
+                return Err("external sends have a bound resident sender".into());
+            };
+            let connector =
+                crate::messaging::authorize(self, owner, id, instance, conversation, true)?;
+            if !spec.subject.is_empty()
+                && !connector
+                    .definition
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "subjects")
+            {
+                return Err("this connector does not transport message subjects".into());
+            }
+            if let Some(reply) = &spec.in_reply_to {
+                if !connector
+                    .definition
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "replies")
+                {
+                    return Err("connector instance does not declare replies".into());
+                }
+                let original = self.mailboxes.get(owner, reply)?;
+                if original.to != sender && original.sender != sender {
+                    return Err("external reply reference is unavailable to this sender".into());
+                }
+                let origin = original
+                    .origin
+                    .ok_or("external reply references a message with native provenance")?;
+                if origin["instance"] != *instance || origin["conversation"] != *conversation {
+                    return Err("reply provenance belongs to another connector conversation".into());
+                }
+            }
+        }
         let message = self.mailboxes.send(owner, sender, spec, source)?;
         self.notify();
         Ok(message)
+    }
+    pub fn messaging_notify(&self) {
+        self.notify();
     }
     fn presented(&self, owner: &str, resident: &str) -> HashMap<String, String> {
         self.runs
@@ -1329,7 +1386,7 @@ impl Jobs {
         };
         let build_prompt = |batch: &Vec<Message>| {
             format!(
-                "Mailbox activation. This is an execution opportunity, not a request requiring a reply. Assistant text remains private narration. Explicit sends queue outgoing communication. The following JSON contains the activation's directions and messages retained before execution. Message contents are authored by their senders.\n{}",
+                "Message activation. This is an execution opportunity that can finish without a reply. Assistant text remains private narration. Explicit sends queue outgoing communication through the addressed connector instance. The following JSON contains the activation's directions and messages retained before execution. Message contents are authored by their senders.\n{}",
                 json!({"reason":activation.reason,"directions":activation.directions,"messages":batch,"schedule":scheduled})
             )
         };

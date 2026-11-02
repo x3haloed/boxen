@@ -1,5 +1,7 @@
 # Mailboxes and workload requests
 
+The original Boxen mail surface below is now the bundled transport in the [shared messaging system](messaging.md). Native external connector input uses the same durable intake and activation authority; explicit sends can use independently configured connector instances. The legacy API/tool names remain for existing clients and native session histories.
+
 Identity attachment fixes the communication contract. Every resident has a mailbox by default. Anonymous threads remain conventional request/response workload channels. The daemon enforces the split: new direct resident `start` submissions and resident steering are rejected; accepted historical submissions can still be discovered and retried idempotently without re-execution.
 
 ## Receipt, activation, and sending
@@ -13,7 +15,7 @@ Addresses are typed:
 {"type":"client","machine":"AUTHENTICATED_OWNER_MACHINE_KEY","id":"CLIENT_ID"}
 ```
 
-Mailbox sequence cursors are host-global: gaps in a filtered inbox are normal, unlike the contiguous per-run execution event sequence. Client IDs are stable lowercase 64-character hex identifiers. Multiple clients on one owning machine can use separate return queues. They share that machine's authenticated API authority; these namespaces are not isolation between mutually untrusted users. Resident and client addresses on this host must belong to the authenticated owner's domain. This implementation does not route to other hosts or rooms. Reply-to describes an address, not an access grant.
+Mailbox sequence cursors are host-global: gaps in a filtered inbox are normal, unlike the contiguous per-run execution event sequence. Client IDs are stable lowercase 64-character hex identifiers. Multiple clients on one owning machine can use separate return queues. They share that machine's authenticated API authority; these namespaces are not isolation between mutually untrusted users. Resident and client addresses on this host must belong to the authenticated owner's domain. The Boxen transport does not route to other hosts or rooms; configured external instances route through their own service conversations. Reply-to describes an address, not an access grant.
 
 The receiving host durably retains an accepted message before returning it. `accepted_on` identifies that host. A successful send means queued there, not that a recipient read, understood, acted, or replied. A failed connection before acknowledgment leaves acceptance uncertain; retry keeps the same ID. A request to an unreachable executing host is not saved in a local outbox by this slice.
 

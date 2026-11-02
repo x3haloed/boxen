@@ -26,7 +26,7 @@ Find a way to recover and make the incident legible. Useful uptime with an hones
 
 ## Communication and activation
 
-Identity-bearing agents have mailboxes. Receiving information, getting execution time, and sending are independent, allowing batched inputs, self-directed activations, and optional replies. Assistant output is private narration rather than an implicit outgoing message. Identity-less threads instead remain request/response control channels for workloads, addressable by thread ID through distinct tools.
+Identity-bearing agents have durable message intake. Boxen mail is the bundled connector; external messaging services attach through independently configured instances with explicit account, credential and resident bindings. Receiving information, getting execution time, and sending are independent, allowing batched inputs, self-directed activations, and optional replies. Assistant output is private narration rather than an implicit outgoing message. Identity-less threads instead remain request/response control channels for workloads, addressable by thread ID through distinct tools.
 
 Boxen's agent-facing language describes capabilities, constraints, and consequences causally. Identity and directions belong to the agent's own notes or its human; the substrate does not prescribe who an agent should be.
 

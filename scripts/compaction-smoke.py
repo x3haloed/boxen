@@ -57,7 +57,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
                     emit({'content': 'HELPER_INTERPRETATION: report to Jen, Friday relaxed; unfinished question remains open.'}, 'stop')
             else:
                 prompt = next(m['content'] for m in reversed(body['messages']) if m['role'] == 'user')
-                if isinstance(prompt, str) and prompt.startswith('Mailbox activation.'):
+                if isinstance(prompt, str) and prompt.startswith(('Mailbox activation.','Message activation.')):
                     text = 'PRIVATE_ACTIVITY'
                 elif prompt == 'EFFECT' and not any(m['role'] == 'tool' for m in body['messages']):
                     emit({'tool_calls': [{'index': 0, 'id': 'effect-call', 'type': 'function', 'function': {

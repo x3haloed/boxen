@@ -41,7 +41,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
             time.sleep(.12);emit(frame({'content':value[len(value)//2:]}));emit(frame(finish='stop'))
         try:
             if prompt=='SLOW_HTTP':time.sleep(10);return
-            if prompt.startswith('Mailbox activation.'):
+            if prompt.startswith(('Mailbox activation.','Message activation.')):
                 batch=json.loads(prompt.split('\n',1)[1]);direction=batch['directions']
                 reply=next((m for m in batch['messages'] if m['body'].startswith('REPLY')),None)
                 if direction=='CONTINUITY' and len(tools)==0:call('boxen_continuity',{'action':'read'})

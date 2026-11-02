@@ -5,6 +5,7 @@ mod agent_tools;
 mod chat;
 mod codex;
 mod context;
+mod discord_connector;
 mod events;
 mod inference;
 #[cfg(feature = "inference-probe")]
@@ -13,6 +14,7 @@ mod jobs;
 mod logging;
 mod mailbox;
 mod media;
+mod messaging;
 mod platform;
 mod protocol;
 mod residents;
@@ -55,6 +57,8 @@ boxen [--data-dir PATH] peers\n\
 boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--codex PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
 boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|openrouter] [--context JSON]\n\
+boxen [--data-dir PATH] messages HOST:PORT PUBLIC_KEY JSON\n\
+boxen [--data-dir PATH] discord-connector --instance ID [--url http://127.0.0.1:PORT]\n\
 boxen [--data-dir PATH] events HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] schedule HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] context HOST:PORT PUBLIC_KEY THREAD_ID JSON\n\
@@ -100,6 +104,9 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
     }
     if command == "inference-worker" {
         return inference::worker();
+    }
+    if command == "discord-connector" {
+        return discord_connector::run(&directory, args);
     }
     let state = Arc::new(State::open(directory)?);
     match command.as_str() {
@@ -283,6 +290,18 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &args[1],
                     serde_json::json!({"op":"mailbox_send","client_id":client,"message":{"id":id,"to":{"type":"resident","id":args[2]},"subject":subject,"body":args[3]}})
                 )?
+            );
+        }
+        "messages" if args.len() == 3 => {
+            let request: serde_json::Value = serde_json::from_str(&args[2])?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"messaging","args":request})
+                )?)?
             );
         }
         "mailbox" if args.len() == 3 => {

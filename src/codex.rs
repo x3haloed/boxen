@@ -263,6 +263,7 @@ impl Rpc {
                 Some(
                     "boxen_continuity"
                         | "boxen_schedule"
+                        | "boxen_messages"
                         | "boxen_mailbox"
                         | "boxen_send_message"
                         | "boxen_thread_request"

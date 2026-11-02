@@ -86,3 +86,13 @@ replay. Anonymous responses and resident private narration keep their existing
 contracts. Internal collection/batch timers are inspectable scheduler records;
 source/subscription controls manage their policy rather than ordinary schedule
 editing. [Scheduling](scheduling.md) remains available independently of streams.
+
+## Messaging connector instances
+
+`{"op":"messaging","args":{"action":"list"}}` advertises the bundled Boxen
+transport and owned external instances. The common inbox/send/status operations,
+operator configuration, native intake, cursor acknowledgments, dispatch claims,
+service outcomes and health are described in [messaging](messaging.md). Instances
+scope native accounts, credentials and resident bindings; a provider type is not
+a singleton bot or a universal routing namespace. This extends API version 2;
+legacy mailbox endpoints retain their original behavior.

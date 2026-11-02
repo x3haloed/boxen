@@ -352,6 +352,16 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
             "events" => jobs.event_operation(owner, request["args"].clone()),
             "schedule" => jobs.schedule_operation(owner, request["args"].clone()),
             "runtime_info" => Ok(jobs.runtime_info()),
+            "messaging" => crate::messaging::operation(
+                jobs,
+                owner,
+                None,
+                request["args"].clone(),
+                format!(
+                    "client-messaging:{owner}:{}",
+                    request["args"]["id"].as_str().unwrap_or("")
+                ),
+            ),
             "mailbox_status" => Ok(jobs.mailboxes.status()),
             "mailbox_send" => {
                 let client = request["client_id"].as_str().ok_or("client_id required")?;
