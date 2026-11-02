@@ -8,6 +8,9 @@ import sys
 import threading
 import time
 import urllib.request
+import http.client
+import socket
+import urllib.parse
 
 lock = threading.Lock()
 cancel = threading.Event()
@@ -26,6 +29,29 @@ def mcp_call(method,params=None,ident=1):
     payload={'jsonrpc':'2.0','id':ident,'method':method,'params':params or {}}
     r=urllib.request.Request(promoted_bridge['url'],data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+os.environ[promoted_bridge['bearer_token_env_var']]})
     with urllib.request.urlopen(r,timeout=15) as response:return json.load(response)
+
+def bridge_rejection_checks():
+    endpoint=urllib.parse.urlsplit(promoted_bridge['url'])
+    token=os.environ[promoted_bridge['bearer_token_env_var']]
+    def probe(method,path,auth,body,delayed=False,stalled=False):
+        with socket.create_connection((endpoint.hostname,endpoint.port),timeout=4) as s:
+            headers=f'{method} {path} HTTP/1.1\r\nHost: {endpoint.netloc}\r\nContent-Length: {len(body)}\r\n'
+            if auth:headers+='Authorization: Bearer '+token+'\r\n'
+            s.sendall((headers+'\r\n').encode())
+            if not delayed:s.sendall(body)
+            response=http.client.HTTPResponse(s);response.begin()
+            assert response.status==(405 if auth else 401),response.status
+            if delayed and not stalled:s.sendall(body)
+            assert response.read()==b''
+            if stalled:
+                # The server's total request deadline releases the serial handler
+                # even while this client keeps an unfinished request open.
+                time.sleep(2.2)
+                assert mcp_call('ping')['result']=={}
+    for auth in [False,True]:
+        probe('GET' if auth else 'POST','/wrong' if auth else '/mcp',auth,b'x'*98304)
+        probe('GET' if auth else 'POST','/wrong' if auth else '/mcp',auth,b'x'*64,delayed=True)
+    probe('POST','/mcp',False,b'x'*64,delayed=True,stalled=True)
 
 def invoke(tool, arguments, number):
     if promoted_bridge:
@@ -207,6 +233,7 @@ for line in sys.stdin:
             assert method=='thread/resume'
             assert 'developerInstructions' not in request['params']
             promoted_bridge=request['params']['config']['mcp_servers.boxen_resident']
+            bridge_rejection_checks()
             try:
                 urllib.request.urlopen(urllib.request.Request(promoted_bridge['url'],data=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',headers={'Content-Type':'application/json'}),timeout=2)
                 raise AssertionError('bridge accepted an unauthenticated client')

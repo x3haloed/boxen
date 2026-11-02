@@ -69,8 +69,9 @@ def check_promotion(g):
     assert all(r.get('method')!='thread/start' for r in log())
     records=[json.loads(line) for line in diagnostics.read_text().splitlines()]
     assert any(r['event']=='resident_bridge.tool_completed' for r in records)
+    assert any(r['event']=='resident_bridge.request_rejected' for r in records)
     assert 'Initial independent memory' not in diagnostics.read_text()
     (workspace/'fixture-forget-session').touch()
     failed=activate();assert failed['status']=='failed',failed
     assert all(r.get('method')!='thread/start' for r in log())
-    print('PASS same-native-thread MCP tools, independent memory, explicit/selective replies, private narration, retries, bridge lifetime, restart and visible resume failure')
+    print('PASS same-native-thread MCP tools, independent memory, explicit/selective replies, private narration, retries, graceful HTTP rejection with bounded stalled-body recovery, bridge lifetime, restart and visible resume failure')

@@ -96,7 +96,10 @@ historical replay.
 
 The endpoint stops with its activation and rejects effects after terminal status.
 Headers are bounded at 16 KiB, requests at 1 MiB, and request reading has a total
-two-second deadline. The serial handler and existing run limit bound its execution
+two-second deadline. Authentication and method rejections send their HTTP response
+before a write-side shutdown, then discard incoming body bytes within the same
+deadline and a 1 MiB cap. A stalled rejected client cannot retain the serial
+handler indefinitely. The serial handler and existing run limit bound its execution
 resources. Structured diagnostic events are opt-in and omit message/memory bodies
 by default. Authoritative journals remain active when diagnostics are disabled.
 This is application routing under the agreed Full Access model, not OS isolation.
@@ -113,7 +116,8 @@ The controlled suite uses actual paired daemons, a deterministic native backend
 and real HTTP MCP calls. It checks explicit registration without inference,
 concurrent exact retries, ownership/quota conflicts, historical replay, protected
 native settings, continuity writes, selective replies, private narration, call
-deduplication/conflicts, authentication, bridge lifetime, daemon restart and native
+deduplication/conflicts, authentication, graceful rejection of buffered and delayed
+request bodies, bounded stalled-body recovery, bridge lifetime, daemon restart and native
 resume failure without reconstruction. It shares the import regression setup.
 The Linux rotation includes it alongside the existing suites.
 
@@ -147,8 +151,20 @@ writes, an attributed explicit reply and a later no-send activation. The global
 Codex config file remained byte-for-byte unchanged. Both disposable native test
 chats were archived; no production agent was imported or promoted.
 
-macOS/APE/Linux checks are not claimed for this slice. No APE artifact was built
+The original Windows commit did not claim macOS/APE/Linux checks. No APE artifact was built
 in this Windows checkout, and the authorized Linux SSH connection was blocked by
 an untrusted host key in this host's SSH configuration. The seventeen-suite Linux
 runner includes the promotion suite and its fixture helper for the next verified
 portable rotation; this verification did not bypass host-key validation.
+
+### HTTP rejection recovery verification
+
+The subsequent rejection fix passed native macOS ARM64 promotion checks, three
+additional consecutive promotion runs, resident-class regression, strict Clippy
+and all 27 Rust unit tests. Actual APE promotion and timing/idle-CPU checks passed
+on macOS ARM64. The identical APE passed all seventeen controlled Linux suites,
+direct LAN streaming/replay and remote cleanup on Debian 13 x86-64. The regression
+exercises 401/405 responses with buffered and delayed bodies, a stalled sender,
+and successful authenticated requests after the drain deadline. The expanded
+checks failed against the preceding binary. This follow-up used controlled
+backends; Windows and live model behavior were not reverified for the fix.

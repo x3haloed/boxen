@@ -10,7 +10,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -103,6 +103,32 @@ fn reply(stream: &mut TcpStream, status: &str, value: Option<Value>) -> Result<(
     stream.flush()?;
     Ok(())
 }
+fn reject(
+    reader: &mut BufReader<&mut TcpStream>,
+    status: &str,
+    length: Option<usize>,
+    deadline: Instant,
+) -> Result<()> {
+    reply(reader.get_mut(), status, None)?;
+    // Deliver the response before waiting for a body (including clients waiting
+    // for a response before sending it). Closing with unread socket data can
+    // otherwise replace the HTTP rejection with a TCP reset on some platforms.
+    reader.get_mut().shutdown(Shutdown::Write)?;
+    let mut left = length.unwrap_or(1024 * 1024).min(1024 * 1024);
+    let mut buffer = [0; 8192];
+    while left > 0 {
+        reader
+            .get_mut()
+            .set_read_timeout(Some(remaining(deadline)?))?;
+        let size = left.min(buffer.len());
+        let n = reader.read(&mut buffer[..size])?;
+        if n == 0 {
+            break;
+        }
+        left -= n;
+    }
+    Ok(())
+}
 fn serve(
     stream: &mut TcpStream,
     token: &str,
@@ -164,13 +190,21 @@ fn serve(
             }
         }
     }
-    if !authorized || !host_ok {
-        drop(reader);
-        return reply(stream, "401 Unauthorized", None);
-    }
-    if request_line != "POST /mcp HTTP/1.1" {
-        drop(reader);
-        return reply(stream, "405 Method Not Allowed", None);
+    let rejection = if !authorized || !host_ok {
+        Some("401 Unauthorized")
+    } else if request_line != "POST /mcp HTTP/1.1" {
+        Some("405 Method Not Allowed")
+    } else {
+        None
+    };
+    if let Some(status) = rejection {
+        run.diagnostic(
+            Level::Warn,
+            "resident_bridge.request_rejected",
+            || json!({"status":status}),
+            || Value::Null,
+        );
+        return reject(&mut reader, status, length, deadline);
     }
     let size = length.ok_or("bridge content length unavailable")?;
     if size > 1024 * 1024 {
