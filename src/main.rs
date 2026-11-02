@@ -17,6 +17,7 @@ mod media;
 mod messaging;
 mod platform;
 mod protocol;
+mod resident_definitions;
 mod residents;
 mod scheduler;
 mod state;
@@ -74,6 +75,7 @@ boxen [--data-dir PATH] log-status HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] log-off HOST:PORT PUBLIC_KEY\n\n\
 boxen residents HOST:PORT PUBLIC_KEY\n\
 boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|openrouter] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
+boxen resident-class HOST:PORT PUBLIC_KEY JSON\n\
 boxen resident-get HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
 boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-message HOST:PORT PUBLIC_KEY RESIDENT_ID BODY [--id MESSAGE_ID] [--subject SUBJECT] [--client-id ID]\n\
@@ -193,6 +195,17 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &args[0],
                     &args[1],
                     serde_json::json!({"op":"resident_list"})
+                )?
+            );
+        }
+        "resident-class" if args.len() == 3 => {
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"resident_definition","args":serde_json::from_str::<serde_json::Value>(&args[2])?})
                 )?
             );
         }

@@ -58,9 +58,30 @@ pub struct Resident {
     pub auto_activate: bool,
     pub revision: u64,
     pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<crate::resident_definitions::Origin>,
 }
 impl Resident {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn prototype(owner: &str, machine: &str, initial: &Create) -> Self {
+        Resident {
+            context: initial.context.clone(),
+            id: initial.id.clone(),
+            owner: owner.into(),
+            machine_id: machine.into(),
+            name: initial.name.clone(),
+            identity: initial.identity.clone(),
+            memory: initial.memory.clone(),
+            backend: initial.backend.clone(),
+            cwd: initial.cwd.clone(),
+            model: initial.model.clone(),
+            quota_bytes: initial.quota_bytes,
+            auto_activate: initial.auto_activate,
+            revision: 1,
+            created_at: jobs::now(),
+            definition: None,
+        }
+    }
+    pub(crate) fn validate(&self) -> Result<()> {
         self.context.validate()?;
         jobs::valid_id(&self.id)?;
         if !matches!(self.backend.as_str(), "codex" | "openrouter") {
@@ -106,6 +127,8 @@ struct Stored {
     version: u32,
     initial: Create,
     resident: Resident,
+    #[serde(default)]
+    instantiation: Option<crate::resident_definitions::Instantiate>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -252,29 +275,27 @@ impl Residents {
         list
     }
     pub fn create(&self, owner: &str, initial: Create) -> Result<Resident> {
+        self.create_with_origin(owner, initial, None, None)
+    }
+    pub fn create_with_origin(
+        &self,
+        owner: &str,
+        initial: Create,
+        instantiation: Option<crate::resident_definitions::Instantiate>,
+        origin: Option<crate::resident_definitions::Origin>,
+    ) -> Result<Resident> {
         let mut entries = self.entries.lock().unwrap();
         if let Some(prior) = entries.get(&initial.id) {
-            if prior.resident.owner == owner && prior.initial == initial {
+            if prior.resident.owner == owner
+                && prior.initial == initial
+                && prior.instantiation == instantiation
+            {
                 return Ok(prior.resident.clone());
             }
             return Err("resident id already exists with different input or owner".into());
         }
-        let resident = Resident {
-            context: initial.context.clone(),
-            id: initial.id.clone(),
-            owner: owner.into(),
-            machine_id: self.machine_id.clone(),
-            name: initial.name.clone(),
-            identity: initial.identity.clone(),
-            memory: initial.memory.clone(),
-            backend: initial.backend.clone(),
-            cwd: initial.cwd.clone(),
-            model: initial.model.clone(),
-            quota_bytes: initial.quota_bytes,
-            auto_activate: initial.auto_activate,
-            revision: 1,
-            created_at: jobs::now(),
-        };
+        let mut resident = Resident::prototype(owner, &self.machine_id, &initial);
+        resident.definition = origin;
         resident.validate()?;
         if !std::path::Path::new(&resident.cwd).is_absolute()
             || !std::path::Path::new(&resident.cwd).is_dir()
@@ -286,6 +307,7 @@ impl Residents {
         }
         let stored = Stored {
             version: 1,
+            instantiation,
             initial,
             resident: resident.clone(),
         };
@@ -307,6 +329,115 @@ impl Residents {
             || Value::Null,
         );
         Ok(resident)
+    }
+    pub fn existing_instance(
+        &self,
+        owner: &str,
+        spec: &crate::resident_definitions::Instantiate,
+    ) -> Result<Option<Resident>> {
+        let entries = self.entries.lock().unwrap();
+        if let Some(stored) = entries.get(&spec.id) {
+            return if stored.resident.owner == owner && stored.instantiation.as_ref() == Some(spec)
+            {
+                Ok(Some(stored.resident.clone()))
+            } else {
+                Err(
+                    "resident instance id already exists with another creation input or owner"
+                        .into(),
+                )
+            };
+        }
+        Ok(None)
+    }
+    pub fn apply_definition(
+        &self,
+        owner: &str,
+        id: &str,
+        expected: u64,
+        definition: &crate::resident_definitions::Revision,
+        fields: &[String],
+        has_history: bool,
+    ) -> Result<Resident> {
+        if fields.is_empty() || fields.len() > crate::resident_definitions::FIELDS.len() {
+            return Err(
+                "manual definition application names a nonempty bounded set of fields".into(),
+            );
+        }
+        let mut entries = self.entries.lock().unwrap();
+        let prior = Self::authorized(&entries, owner, id)?;
+        if prior.resident.revision != expected {
+            return Err("resident revision changed; a read returns current continuity before manual replacement".into());
+        }
+        let source = prior
+            .resident
+            .definition
+            .as_ref()
+            .ok_or("standalone resident has no definition to apply")?;
+        if source.id != definition.spec.id {
+            return Err("manual application addresses the instance's original definition".into());
+        }
+        let mut stored = prior.clone();
+        let mut value = serde_json::to_value(&stored.resident)?;
+        let template = serde_json::to_value(&definition.spec)?;
+        let mut unique = std::collections::HashSet::new();
+        for field in fields {
+            if !crate::resident_definitions::FIELDS.contains(&field.as_str())
+                || !unique.insert(field)
+            {
+                return Err("manual application fields are unique resident template fields".into());
+            }
+            if has_history
+                && matches!(field.as_str(), "backend" | "cwd" | "model")
+                && value[field] != template[field]
+            {
+                return Err("backend, model and working directory remain pinned after the first accepted run; no backend conversation is implicitly reconstructed".into());
+            }
+            value[field] = template[field].clone();
+        }
+        let mut resident: Resident = serde_json::from_value(value)?;
+        resident.revision = resident
+            .revision
+            .checked_add(1)
+            .ok_or("resident revision exhausted")?;
+        let origin = resident.definition.as_mut().unwrap();
+        for field in fields {
+            origin
+                .last_applied_fields
+                .insert(field.clone(), definition.revision);
+        }
+        resident.validate()?;
+        if !std::path::Path::new(&resident.cwd).is_absolute()
+            || !std::path::Path::new(&resident.cwd).is_dir()
+        {
+            return Err("resident working directory must exist on the executing machine".into());
+        }
+        stored.resident = resident.clone();
+        self.save(id, &stored)?;
+        entries.insert(id.into(), stored);
+        logging::record(
+            Level::Info,
+            Target::State,
+            "resident.definition_applied",
+            Context {
+                thread_id: Some(id),
+                peer_id: Some(owner),
+                ..Context::default()
+            },
+            || json!({"definition_id":definition.spec.id,"definition_revision":definition.revision,"resident_revision":resident.revision,"fields":fields}),
+            || Value::Null,
+        );
+        Ok(resident)
+    }
+    fn save(&self, id: &str, stored: &Stored) -> Result<()> {
+        let temporary = self
+            .directory
+            .join(format!(".pending-{}", state::random_hex()?));
+        state::write_new(&temporary, &serde_json::to_vec(stored)?)?;
+        if let Err(error) = fs::rename(&temporary, self.directory.join(format!("{id}.json"))) {
+            let _ = fs::remove_file(temporary);
+            return Err(error.into());
+        }
+        Ok(())
     }
     pub fn update(&self, owner: &str, id: &str, patch: Patch) -> Result<Resident> {
         let mut entries = self.entries.lock().unwrap();
@@ -369,15 +500,7 @@ impl Residents {
             );
             return Err(error);
         }
-        let path = self.directory.join(format!("{id}.json"));
-        let temporary = self
-            .directory
-            .join(format!(".pending-{}", state::random_hex()?));
-        state::write_new(&temporary, &serde_json::to_vec(&stored)?)?;
-        if let Err(error) = fs::rename(&temporary, &path) {
-            let _ = fs::remove_file(temporary);
-            return Err(error.into());
-        }
+        self.save(id, &stored)?;
         let resident = stored.resident.clone();
         entries.insert(id.into(), stored);
         logging::record(
@@ -422,7 +545,7 @@ impl Residents {
     }
     pub fn instructions(&self, resident: &Resident) -> String {
         format!(
-            "This execution is attached to a Boxen resident with canonical Boxen thread {}. Backend processes and turns are temporary; the resident identity, memory, and retained conversation persist across them.\nCurrent host: {} (OS {}, architecture {}). Working directory: {}. Files and execution environment belong to this host; their availability can differ between hosts.\nThe durable identity/memory store is separate from the working directory and is managed by the daemon at {}. The boxen_continuity tool reads and updates this store. A read returns current continuity, including changes made after turn acceptance. A write succeeds when expected_revision matches the current revision and the resulting stored contents fit the byte quota. Rejected writes leave continuity unchanged. Direct edits to backing files bypass daemon revision tracking and quota accounting and are unsupported. Conversation history is outside this quota. Movement and replication are not enabled in this version. Heartbeats can be configured as ordinary scheduled activations. Bounded source-observation batches can accompany activations; their sources and freshness are explicit. This identity has a mailbox. Incoming messages are queued independently of activation and can be presented as a batch. Assistant text, including final text, is private execution narration retained for authorized observers; it is not delivered to correspondents. A successful boxen_send_message call durably queues a message at its destination. An activation can finish without sending any message. boxen_mailbox reads this identity’s inbox. boxen_thread_request and boxen_thread_result provide separate request/response control channels for identity-less workloads.\nSaved continuity snapshot at turn acceptance (JSON):\n{}",
+            "This execution is attached to a Boxen resident with canonical Boxen thread {}. Backend processes and turns are temporary; the resident identity, memory, and retained conversation persist across them.\nCurrent host: {} (OS {}, architecture {}). Working directory: {}. Files and execution environment belong to this host; their availability can differ between hosts.\nThe durable identity/memory store is separate from the working directory and is managed by the daemon at {}. The boxen_continuity tool reads and updates this store. A read returns current continuity, including changes made after turn acceptance. A write succeeds when expected_revision matches the current revision and the resulting stored contents fit the byte quota. Rejected writes leave continuity unchanged. Direct edits to backing files bypass daemon revision tracking and quota accounting and are unsupported. Conversation history is outside this quota. A definition association records initialization and explicitly applied fields; later definition edits do not automatically change this instance, and mutable continuity remains independent. Movement and replication are not enabled in this version. Heartbeats can be configured as ordinary scheduled activations. Bounded source-observation batches can accompany activations; their sources and freshness are explicit. This identity has a mailbox. Incoming messages are queued independently of activation and can be presented as a batch. Assistant text, including final text, is private execution narration retained for authorized observers; it is not delivered to correspondents. A successful boxen_send_message call durably queues a message at its destination. An activation can finish without sending any message. boxen_mailbox reads this identity’s inbox. boxen_thread_request and boxen_thread_result provide separate request/response control channels for identity-less workloads.\nSaved continuity snapshot at turn acceptance (JSON):\n{}",
             resident.id,
             resident.machine_id,
             crate::platform::host_os(),

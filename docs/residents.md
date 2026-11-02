@@ -1,6 +1,6 @@
 # The first resident
 
-A resident can have a name and a home without having a job. Creating one saves its identity and memory; it does not start inference or require a task description. This first slice hosts each resident on one explicitly selected machine, with one canonical Boxen thread and Codex as the runtime. Heartbeats, movement, replication, branches, clones, and built-in inference remain later work, not abandoned beta requirements.
+A resident can have a name and a home without having a job. Creating one saves its identity and memory; it does not start inference or require a task description. Each resident currently lives on one explicitly selected machine with one canonical Boxen thread, backed by Codex or the built-in OpenRouter runtime. Ordinary scheduling supports heartbeat activations. [Resident definitions](resident-definitions.md) now provide reusable templates with independent instances and manually applied revisions. Movement, replication, shared mutable memory, parallel conversations and reintegration remain beta requirements.
 
 ## Mailbox communication
 
@@ -25,7 +25,7 @@ boxen watch HOST:42424 PEER_KEY RUN_ID
 boxen resident-update HOST:42424 PEER_KEY RESIDENT_ID EXPECTED_REVISION --memory-file memory.txt
 ```
 
-Creation supports `--id`, `--identity-file`, `--memory-file`, and `--quota`. Preserve the original ID and exact inputs when retrying an uncertain creation or message. Definition creation remains idempotent even after the resident updates its memory. Identity/memory edits use compare-and-set; on an uncertain response, read the current revision/content rather than blindly overwriting it. Working directory and model are pinned in this first implementation; name, identity, memory, and quota can be edited. Anonymous threads remain available.
+Creation supports `--id`, `--identity-file`, `--memory-file`, and `--quota`. Preserve the original ID and exact inputs when retrying an uncertain creation or message. Resident creation remains idempotent even after the resident updates its memory. Identity/memory edits use compare-and-set; on an uncertain response, read the current revision/content rather than blindly overwriting it. Working directory and model are pinned in this first implementation; name, identity, memory, and quota can be edited. Anonymous threads remain available.
 
 ## Continuity and environment
 
@@ -69,7 +69,7 @@ Use the existing destination envelope at `POST /api/operation` or the equivalent
 | `resident_issues` | None | Current host's resident-load incidents (metadata only) |
 | `resident_activate` | Resident `id`, `activation_id`, optional `directions` | Independent activation snapshot; existing run/event streaming contract |
 
-Resident responses include `id`, `thread_id`, `owner`, `machine_id`, `name`, `identity`, `memory`, `cwd`, `model`, `quota_bytes`, `used_bytes`, `revision`, `created_at`, and `environment`. The daemon constructs resident activation runs with `backend: "codex"` and its saved `cwd` and `model`; external direct starts are rejected. Its immutable run record adds `resident` (accepted continuity snapshot) and, when relevant, `recovery` (incident context). Normal run/event APIs transport the complete conversation without depending on the official GUI.
+Resident responses include `id`, `thread_id`, `owner`, `machine_id`, `name`, `identity`, `memory`, `cwd`, `model`, `quota_bytes`, `used_bytes`, `revision`, `created_at`, and `environment`. The daemon constructs resident activation runs with the resident’s saved backend, `cwd` and `model`; external direct starts are rejected. Its immutable run record adds `resident` (accepted continuity snapshot) and, when relevant, `recovery` (incident context). Normal run/event APIs transport the complete conversation without depending on the official GUI.
 
 ## Verification
 

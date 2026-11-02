@@ -412,6 +412,7 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
             "thread_result" => {
                 jobs.thread_result(owner, request["id"].as_str().ok_or("run id required")?)
             }
+            "resident_definition" => jobs.definition_operation(owner, request["args"].clone()),
             "resident_issues" => Ok(json!(jobs.residents.issues())),
             "resident_create" => Ok(jobs
                 .create_resident(owner, serde_json::from_value(request["spec"].clone())?)?

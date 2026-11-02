@@ -97,3 +97,7 @@ service outcomes and health are described in [messaging](messaging.md). Instance
 scope native accounts, credentials and resident bindings; a provider type is not
 a singleton bot or a universal routing namespace. This extends API version 2;
 legacy mailbox endpoints retain their original behavior.
+
+## Resident definitions
+
+`resident_definition` accepts an `args` object with `action`: `list`, `get`, `history`, `create`, `update`, `instantiate`, `instances`, or `apply`. It follows the same authenticated destination envelope and owner scope as resident operations. See [resident definitions](resident-definitions.md) for exact inputs, immutable revisions, manual propagation and runtime pinning. Existing resident, mailbox, scheduling and run APIs operate on instances without a class-specific execution path.

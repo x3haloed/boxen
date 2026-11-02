@@ -68,6 +68,8 @@ import controls and resident promotion are separate work.
 
 Create a named resident without assigning a job. It has one canonical conversation and a separate revisioned identity/memory store with an enforced configurable quota. It can maintain its own continuity through a daemon-serviced tool. Each resident has a durable mailbox with default automatic activation, batched input, and explicit sending. Final assistant text remains private activity; anonymous threads retain ordinary request/response. Interrupted work leaves a visible incident while the resident stays available for its next message.
 
+[Resident definitions](docs/resident-definitions.md) provide reusable versioned templates and independent instances through the CLI/API. Changes apply to existing instances only through an explicit field-selected manual operation; workload completion leaves instances intact.
+
 See [the first resident](docs/residents.md) for continuity and [mailboxes](docs/mailboxes.md) for communication, activation, tools, CLI/API, and current limits. This first implementation stays on one selected host; synchronization and movement come later.
 
 The [host-local scheduler](docs/scheduling.md) wakes residents and existing anonymous threads once or on a recurring interval. The simple Schedules panel and `boxen schedule` command share the authenticated daemon API; jobs survive client disconnects and daemon restarts.

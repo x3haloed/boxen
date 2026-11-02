@@ -455,6 +455,7 @@ pub struct Jobs {
     pub inference: crate::inference::Config,
     _lock: File,
     pub residents: Arc<Residents>,
+    pub definitions: crate::resident_definitions::Definitions,
     transitions: Mutex<()>,
     pub mailboxes: Arc<Mailboxes>,
     pub connectors: crate::messaging::Connectors,
@@ -1005,7 +1006,15 @@ impl Jobs {
                 .ok_or("runs parent required")?
                 .join("connectors"),
         )?;
+        let definitions = crate::resident_definitions::Definitions::open(
+            directory
+                .parent()
+                .ok_or("runs parent required")?
+                .join("resident-definitions"),
+            residents.machine_id().into(),
+        );
         let jobs = Arc::new(Self {
+            definitions,
             connectors,
             observations,
             schedules,
@@ -1481,6 +1490,157 @@ impl Jobs {
         records
     }
 
+    pub fn definition_operation(&self, owner: &str, args: Value) -> Result<Value> {
+        let action = args["action"].as_str().unwrap_or("list");
+        let id = args["id"].as_str().unwrap_or("");
+        let outcome = (|| -> Result<Value> {
+            match action {
+                "list" => Ok(self.definitions.list(owner)),
+                "get" => Ok(serde_json::to_value(self.definitions.get(
+                    owner,
+                    id,
+                    args["revision"].as_u64(),
+                )?)?),
+                "history" => self.definitions.history(
+                    owner,
+                    id,
+                    args["after"].as_u64().unwrap_or(0),
+                    args["limit"].as_u64().unwrap_or(20) as usize,
+                ),
+                "create" => Ok(serde_json::to_value(
+                    self.definitions
+                        .create(owner, serde_json::from_value(args["spec"].clone())?)?,
+                )?),
+                "update" => Ok(serde_json::to_value(
+                    self.definitions.update(
+                        owner,
+                        id,
+                        args["expected_revision"]
+                            .as_u64()
+                            .ok_or("expected_revision required")?,
+                        args["patch"]
+                            .as_object()
+                            .ok_or("definition patch is an object")?,
+                    )?,
+                )?),
+                "instantiate" => {
+                    let request: crate::resident_definitions::Instantiate =
+                        serde_json::from_value(args["spec"].clone())?;
+                    valid_id(&request.id)?;
+                    valid_id(&request.definition_id)?;
+                    let _transition = self.transitions.lock().unwrap();
+                    if let Some(existing) = self.residents.existing_instance(owner, &request)? {
+                        self.mailboxes.register(owner, &existing.id)?;
+                        return Ok(existing.value());
+                    }
+                    if self
+                        .runs
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .any(|r| r.snapshot().record.spec.thread_id == request.id)
+                    {
+                        return Err("thread id is already in use".into());
+                    }
+                    let source = self.definitions.get(
+                        owner,
+                        &request.definition_id,
+                        Some(request.definition_revision),
+                    )?;
+                    let mut initial =
+                        crate::resident_definitions::patched(&source.spec, &request.overrides)?;
+                    initial.id = request.id.clone();
+                    let origin = crate::resident_definitions::Origin {
+                        id: request.definition_id.clone(),
+                        instantiated_revision: source.revision,
+                        initial_overrides: request.overrides.keys().cloned().collect(),
+                        last_applied_fields: crate::resident_definitions::FIELDS
+                            .iter()
+                            .filter(|f| !request.overrides.contains_key(**f))
+                            .map(|f| (f.to_string(), source.revision))
+                            .collect(),
+                    };
+                    let resident = self.residents.create_with_origin(
+                        owner,
+                        initial,
+                        Some(request.clone()),
+                        Some(origin),
+                    )?;
+                    self.mailboxes.register(owner, &resident.id)?;
+                    logging::record(
+                        Level::Info,
+                        Target::State,
+                        "resident_definition.instantiated",
+                        Context {
+                            thread_id: Some(&resident.id),
+                            peer_id: Some(owner),
+                            ..Context::default()
+                        },
+                        || json!({"definition_id":request.definition_id,"definition_revision":source.revision,"override_fields":request.overrides.keys().collect::<Vec<_>>()}),
+                        || Value::Null,
+                    );
+                    Ok(resident.value())
+                }
+                "instances" => {
+                    valid_id(id)?;
+                    Ok(json!(
+                        self.residents
+                            .list(owner)
+                            .iter()
+                            .filter(|r| r.definition.as_ref().is_some_and(|d| d.id == id))
+                            .map(|r| r.value())
+                            .collect::<Vec<_>>()
+                    ))
+                }
+                "apply" => {
+                    let _transition = self.transitions.lock().unwrap();
+                    let resident_id = args["resident_id"].as_str().ok_or("resident_id required")?;
+                    let current = self.residents.get(owner, resident_id)?;
+                    let source = current
+                        .definition
+                        .as_ref()
+                        .ok_or("standalone resident has no definition")?;
+                    let revision = args["definition_revision"]
+                        .as_u64()
+                        .ok_or("definition_revision required")?;
+                    let definition = self.definitions.get(owner, &source.id, Some(revision))?;
+                    let fields: Vec<String> = serde_json::from_value(args["fields"].clone())?;
+                    let has_history = self
+                        .runs
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .any(|r| r.snapshot().record.spec.thread_id == resident_id);
+                    let resident = self.residents.apply_definition(
+                        owner,
+                        resident_id,
+                        args["expected_revision"]
+                            .as_u64()
+                            .ok_or("expected_revision required")?,
+                        &definition,
+                        &fields,
+                        has_history,
+                    )?;
+                    self.notify();
+                    Ok(resident.value())
+                }
+                _ => Err("unknown resident definition operation".into()),
+            }
+        })();
+        logging::record(
+            if outcome.is_ok() {
+                Level::Debug
+            } else {
+                Level::Warn
+            },
+            Target::State,
+            "resident_definition.operation",
+            Context::peer(owner),
+            || json!({"action":action,"definition_id":id,"instance_id":args["resident_id"],"accepted":outcome.is_ok(),"error":outcome.as_ref().err().map(|e|e.to_string())}),
+            || Value::Null,
+        );
+        outcome
+    }
     pub fn create_resident(&self, owner: &str, spec: Create) -> Result<Resident> {
         let _transition = self.transitions.lock().unwrap();
         if self

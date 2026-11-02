@@ -30,6 +30,8 @@ Threads of one continuing resident share its durable identity and memory. Synchr
 
 Clones default to inheriting identity and an initial memory snapshot, then developing independent mutable continuity. Live shared memory is an explicit option. A reusable worker identity does not imply eventual reintegration of its instances.
 
+[Resident definitions](resident-definitions.md) now supply immutable versioned templates. Definition changes reach existing instances only through an explicit manual application, with selected replacement fields and a resident revision check. Instances retain independent identity, memory, mailbox and canonical conversation. Workload completion does not dispose of an instance. Manual archive/delete may be added separately; this slice adds neither automatic cleanup nor archive/delete operations. Shared mutable memory and parallel conversations of one continuing identity remain separate future work.
+
 ## Portable continuity
 
 Conversation history must be transportable independently of backend-owned sessions. Preserve backend session state where supported without claiming that reconstruction transfers hidden backend state losslessly.
