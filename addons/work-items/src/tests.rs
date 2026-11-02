@@ -306,3 +306,67 @@ fn investigation_preserves_open_questions_and_existing_owner_without_fake_answer
     duplicate["new_copy"] = json!(true);
     assert!(f.s.assign(&f.cfg, &duplicate).is_err());
 }
+
+#[test]
+fn explicit_replacement_preserves_prior_assignments_and_retries_without_resetting_owner() {
+    let f = Fixture::new();
+    let first = f.s.assign(&f.cfg, &f.input(1)).unwrap();
+    let mut input = f.input(1);
+    input["idempotency_key"] = json!("authorized-replacement");
+    input["replacement"] = json!({"expected_coder":first["coder_id"],"expected_version":1,"reason":"Native child cannot accept direct input","authority":"Human explicitly approved a replacement","handoff":"Retained original assignment and historical evidence"});
+    assert!(f.s.assign(&f.cfg, &input).is_err());
+    release(
+        &f.s,
+        &Fake::new(&f.cfg),
+        first["job_id"].as_str().unwrap(),
+        "paused",
+        true,
+        "No dispatch or runtime; retained source checkout",
+    )
+    .unwrap();
+    input["replacement"]["expected_version"] = json!(2);
+    assert!(f.s.assign(&f.cfg, &input).is_err());
+    input["replacement"]["expected_version"] = json!(1);
+    input["replacement"]["authority"] = json!("");
+    assert!(f.s.assign(&f.cfg, &input).is_err());
+    input["replacement"]["authority"] = json!("Human approved the new copy");
+    let replacement = f.s.assign(&f.cfg, &input).unwrap();
+    assert_ne!(replacement["coder_id"], first["coder_id"]);
+    assert_eq!(replacement["version"], 2);
+    assert_eq!(replacement["job_id"], first["job_id"]);
+    let c = f.s.connect().unwrap();
+    let packets: i64 = c
+        .query_row("SELECT count(*) FROM assignments", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(packets, 2);
+    let transfers: i64 = c
+        .query_row(
+            "SELECT count(*) FROM workflow_events WHERE kind='ownership.transferred'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(transfers, 1);
+    f.s.reserve(1).unwrap();
+    dispatch(
+        &f.s,
+        &f.cfg,
+        &Fake::new(&f.cfg),
+        first["job_id"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(f.s.assign(&f.cfg, &input).unwrap()["idempotent"], true);
+    let coder: String = c
+        .query_row("SELECT coder FROM work", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(replacement["coder_id"], coder);
+    let old_input: String = c
+        .query_row("SELECT input FROM assignments WHERE version=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&old_input).unwrap(),
+        f.input(1)
+    );
+}

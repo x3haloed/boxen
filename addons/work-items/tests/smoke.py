@@ -84,8 +84,18 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
         replies=json.loads(command('messages').stdout)['messages'];assert len(replies)==3 and all(m['body']=='DELIVERED_EXPLICIT_REPLY' for m in replies)
         assert len(api({'op':'resident_list'}))==2 and len(api({'op':'list'}))==3
         packet=home/'evidence'/r1['job_id']/'2/packet.json';assert packet.exists()
+        release['job_id']=r1['job_id'];release['outcome']='paused';command('release','--request-file',request_file('pause-for-transfer',release))
+        transferred=assignment(1,'explicit-replacement',True)
+        transferred['replacement']={'expected_coder':r1['coder_id'],'expected_version':2,'reason':'Controlled independent-resume incompatibility','authority':'Explicit synthetic operator approval','handoff':str(packet)}
+        r4=json.loads(command('assign','--request-file',request_file('replacement',transferred)).stdout)
+        assert r4['version']==3 and r4['coder_id']!=r1['coder_id'] and r4['job_id']==r1['job_id']
+        wait(lambda:state(r1['job_id'])=='delivered');wait(idle)
+        assert json.loads(command('assign','--request-file',request_file('replacement',transferred)).stdout)['idempotent']
+        assert len(api({'op':'resident_list'}))==3 and len(api({'op':'list'}))==4
+        assert len(json.loads(command('messages').stdout)['messages'])==4
+        assert packet.exists() and (home/'evidence'/r1['job_id']/'1/packet.json').exists()
         with database(home/'work-items.sqlite3') as c:assert c.execute('pragma integrity_check').fetchone()[0]=='ok'
-        print('PASS real Boxen create/send/activation/reply, durable migration, exact retries, restart without replay, capacity queue/release, same-coder continuation, immutable packets and private final isolation')
+        print('PASS real Boxen create/send/activation/reply, durable migration, exact retries, restart without replay, capacity queue/release, same-coder continuation, explicit owner transfer, immutable packets and private final isolation')
     finally:
         stop(worker);stop(daemon)
         if daemon:daemon.stdout.close()

@@ -412,20 +412,55 @@ impl Store {
             None
         };
         let new_copy = input["new_copy"] == true;
+        let replacement = input.get("replacement").filter(|v| !v.is_null());
+        ensure!(
+            replacement.is_none() || old.is_some(),
+            "Replacement requires an existing assignment"
+        );
         let (job, coder, version) = if let Some((job, coder, version, held)) = old {
-            ensure!(
-                !new_copy,
-                "Existing work retains its coder; another copy is not created"
-            );
-            ensure!(
-                input.get("coder_id").is_none_or(|v| v == &coder),
-                "Existing coder binding cannot change"
-            );
             ensure!(
                 held == 0,
                 "Current reservation must be released after the coder becomes idle before refreshing"
             );
-            (job, coder, version + 1)
+            if let Some(replacement) = replacement {
+                let state: String =
+                    tx.query_row("SELECT state FROM work WHERE id=?1", [&job], |r| r.get(0))?;
+                ensure!(
+                    new_copy && input.get("coder_id").is_none() && state == "paused",
+                    "Explicit replacement creates a new copy only from paused work"
+                );
+                ensure!(
+                    replacement["expected_coder"] == coder
+                        && replacement["expected_version"] == version,
+                    "Replacement owner/version changed"
+                );
+                for field in ["reason", "authority", "handoff"] {
+                    ensure!(
+                        replacement[field]
+                            .as_str()
+                            .is_some_and(|s| !s.trim().is_empty()),
+                        "Replacement reason, attributed authority and retained handoff are required"
+                    );
+                }
+                let next_coder = hash(&format!("coder:{job}:{request_key}"));
+                Self::log(
+                    &tx,
+                    &job,
+                    "ownership.transferred",
+                    json!({"from":coder,"to":next_coder,"previous_version":version,"replacement":replacement}),
+                )?;
+                (job, next_coder, version + 1)
+            } else {
+                ensure!(
+                    !new_copy,
+                    "Existing work retains its coder; another copy is not created"
+                );
+                ensure!(
+                    input.get("coder_id").is_none_or(|v| v == &coder),
+                    "Existing coder binding cannot change"
+                );
+                (job, coder, version + 1)
+            }
         } else {
             let job = hash(&format!("work:{source}:{item}"));
             ensure!(
@@ -456,7 +491,7 @@ impl Store {
                 .unwrap_or(Value::Null)
         };
         let mid = hash(&format!("assignment:{job}:{version}"));
-        let bundle = json!({"assignment":assignment,"context":input["context"],"legacy_reconciliation":input["legacy_reconciliation"],"source_packet":packet});
+        let bundle = json!({"assignment":assignment,"context":input["context"],"legacy_reconciliation":input["legacy_reconciliation"],"replacement":input["replacement"],"source_packet":packet});
         let packet_path = self
             .path
             .parent()
@@ -474,7 +509,7 @@ impl Store {
             "Assignment/source packet exceeds mailbox body bound; no partial assignment was accepted"
         );
         let message = json!({"id":mid,"to":{"type":"resident","id":coder},"subject":format!("Work item {item}: assignment v{version}"),"body":body});
-        tx.execute("INSERT INTO work(id,source,item,coder,state,version,created) VALUES(?1,?2,?3,?4,'queued',?5,?6) ON CONFLICT(source,item) DO UPDATE SET state='queued',version=excluded.version,error=NULL",params![job,source,item,coder,version,now()])?;
+        tx.execute("INSERT INTO work(id,source,item,coder,state,version,created) VALUES(?1,?2,?3,?4,'queued',?5,?6) ON CONFLICT(source,item) DO UPDATE SET coder=excluded.coder,state='queued',version=excluded.version,error=NULL",params![job,source,item,coder,version,now()])?;
         tx.execute(
             "INSERT INTO assignments VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![

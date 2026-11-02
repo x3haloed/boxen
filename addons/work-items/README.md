@@ -137,6 +137,17 @@ Finishing such an assignment is an investigation handoff, not proof of the repor
 incident's cause, an implemented fix or work-item completion. Later implementation
 still requires its applicable answers/evidence and a new explicit assignment.
 
+An exceptional operator-authorized replacement adds
+`replacement: {"expected_coder":"OLD_ID","expected_version":1,"reason":"...",
+"authority":"attributed human decision","handoff":"retained evidence/history references"}`
+alongside `new_copy: true`, with no `coder_id`. The job must be paused with capacity
+released; CLI acceptance rechecks old execution/mail quiescence. Exact expected
+owner/version checks prevent stale transfers. A new assignment version and a durable
+`ownership.transferred` event retain the prior owner, authority and handoff; old
+assignments and residents remain intact. The new copy is created through the pinned
+definition with stable retry identity. This is an explicit continuity break, not a
+claim that hidden native state transferred. Future continuations keep the new owner.
+
 The transaction accepts one work record per source/item, an immutable assignment
 version and frozen packet, deterministic coder creation/message IDs and pending
 dispatch. Repeating the exact key returns that accepted version; changed reuse
@@ -225,7 +236,8 @@ Unit checks cover complete pagination/checkpoints, reassignment/closure tracking
 comment/PR-only changes, exact requests, capacity/conflicts, lost-response recovery,
 existing ownership, source invalidation, retained packets and continuation.
 The smoke suite uses real Boxen HTTP/execution and a controlled Codex backend for
-copy/send/reply, private finals, capacity release, restart and same-copy continuation.
+copy/send/reply, private finals, capacity release, restart, same-copy continuation
+and explicitly authorized owner replacement without replay or history deletion.
 These are distinct from real model/application evidence. The installed deployment
 also performs a live read-only Azure poll; no production coding is dispatched by
 installation. Windows native is verified; Unix paths are implemented but not yet

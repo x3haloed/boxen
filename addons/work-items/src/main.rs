@@ -234,6 +234,27 @@ fn execute() -> Result<()> {
             )?;
             if !known {
                 inspect_assignment(&s, &cfg, &input)?;
+                if input.get("replacement").is_some_and(|v| !v.is_null()) {
+                    let item = input["item"].as_i64().context("Work item ID required")?;
+                    let (job, coder, version, state, held): (String, String, i64, String, i64) = s.connect()?.query_row("SELECT id,coder,version,state,holds_slot FROM work WHERE source=?1 AND item=?2", rusqlite::params![ado::config(&s)?.source(),item], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+                    ensure!(
+                        state == "paused"
+                            && held == 0
+                            && input["replacement"]["expected_coder"] == coder
+                            && input["replacement"]["expected_version"] == version,
+                        "Replacement requires the expected paused owner/version and released capacity"
+                    );
+                    // Recheck the existing authority's live execution and mail state.
+                    // This does not cancel a worker, consume queued mail or repeat effects.
+                    transport::release(
+                        &s,
+                        &Control::new(&cfg)?,
+                        &job,
+                        "paused",
+                        true,
+                        "Explicit owner-transfer preflight: prior release retained; execution/mail quiescence rechecked",
+                    )?;
+                }
             }
             println!(
                 "{}",
