@@ -13,7 +13,7 @@ pass `--resume`, start inference, or acquire the desktop writer. Only explicit
 ## Install on Windows
 
 ```powershell
-./install.ps1 -ThreadId YOUR_EXISTING_CODEX_THREAD_UUID -CodexBinary C:/absolute/path/codex.exe
+./install.ps1 -ThreadId YOUR_EXISTING_CODEX_THREAD_UUID
 ```
 
 Defaults:
@@ -31,15 +31,20 @@ different profile. The task restarts a failed adapter; it does not start or stop
 Boxen or Codex. Updating stops only this installed adapter/profile. Multiple
 profiles sharing the installed executable need their workers stopped for upgrade.
 
-The configured absolute Codex executable can change after a desktop update.
-An operator can stop the task, update `codex_binary` to the new absolute path,
-and restart the task; mailbox/thread/peer identity stays pinned.
+`codex_binary` defaults to `"auto"`; every queue subprocess uses the same bounded
+executable discovery as the daemon. Desktop updates are picked up without adapter
+reinstallation. `-CodexBinary C:/absolute/path/codex.exe` selects an explicit pin.
+Existing profiles with an absolute path stay pinned until the operator changes
+`codex_binary` to `"auto"` while the adapter task is stopped. Mailbox/thread/peer
+identity and pending delivery records remain unchanged. A missing executable at
+spawn can trigger one automatic rediscovery; a started queue process is never
+replayed by the resolver, because acceptance may be uncertain.
 
 For other service managers or a foreground worker:
 
 ```text
 cargo build --release --locked
-boxen-support --config ABS_CONFIG init THREAD_UUID --codex ABS_CODEX --boxen-home ABS_BOXEN_HOME
+boxen-support --config ABS_CONFIG init THREAD_UUID --codex auto --boxen-home ABS_BOXEN_HOME
 boxen-support --config ABS_CONFIG run
 boxen-support --config ABS_CONFIG status
 ```

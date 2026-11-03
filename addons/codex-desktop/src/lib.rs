@@ -1,5 +1,7 @@
 //! An external client of Boxen. This crate does not link the daemon or its stores.
 mod child;
+#[path = "../../../shared/codex_executable.rs"]
+pub mod codex_executable;
 #[cfg(test)]
 mod tests;
 use anyhow::{Context, Result, bail, ensure};
@@ -91,8 +93,9 @@ impl Config {
             "participant label must contain 1–100 printable bytes"
         );
         ensure!(
-            self.codex_binary.is_absolute() && self.boxen_home.is_absolute(),
-            "Codex executable and Boxen home use absolute paths"
+            (self.codex_binary.is_absolute() || self.codex_binary == Path::new("auto"))
+                && self.boxen_home.is_absolute(),
+            "Codex executable is auto or an absolute pin; Boxen home uses an absolute path"
         );
         let socket = self
             .url

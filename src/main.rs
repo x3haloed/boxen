@@ -4,6 +4,8 @@ extern crate cosmo_compat as _;
 mod agent_tools;
 mod chat;
 mod codex;
+#[path = "../shared/codex_executable.rs"]
+mod codex_executable;
 mod context;
 mod discord_connector;
 mod events;
@@ -91,6 +93,7 @@ boxen inference-health HOST:PORT PUBLIC_KEY\n\
 boxen inference-resume HOST:PORT PUBLIC_KEY FAILED_RUN_ID [--id NEW_RUN_ID]\n\
 boxen resident-activate HOST:PORT PUBLIC_KEY RESIDENT_ID [--id RUN_ID] [--directions TEXT]\n\
 boxen thread-result HOST:PORT PUBLIC_KEY RUN_ID\n\n\
+boxen codex-path [--codex auto|PATH]\n\n\
 boxen platform-check\n\n\
 Pair by exchanging identity public keys through a trusted channel and\n\
 running trust on BOTH machines. --ui must bind to IPv4 loopback.\n\
@@ -108,6 +111,20 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
     #[cfg(feature = "inference-probe")]
     if command == "inference-probe" || command == "inference-replay" {
         return inference_probe::run(&command, args);
+    }
+    if command == "codex-path" {
+        let configured = take_option(&mut args, "--codex")?
+            .or_else(|| env::var("BOXEN_CODEX").ok())
+            .unwrap_or_else(|| "auto".into());
+        if !args.is_empty() {
+            return Err("unexpected codex-path arguments".into());
+        }
+        let selected = codex_executable::resolve(&configured, platform::host_os())?;
+        println!(
+            "{}",
+            serde_json::json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic})
+        );
+        return Ok(());
     }
     if command == "platform-check" && args.is_empty() {
         println!("{}", platform::check()?);

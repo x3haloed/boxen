@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     io::{BufRead, BufReader, Read, Write},
-    path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, mpsc},
     time::{Duration, Instant},
@@ -385,13 +384,6 @@ pub fn execute(
         },
         json!({"text":spec.prompt}),
     )?;
-    let executable = resolve(binary);
-    run.diagnostic(
-        Level::Info,
-        "process.starting",
-        || json!({"executable":executable,"cwd":spec.cwd}),
-        || Value::Null,
-    );
     let bridge = if promoted {
         Some(crate::resident_bridge::Bridge::start(
             jobs.clone(),
@@ -401,13 +393,22 @@ pub fn execute(
     } else {
         None
     };
-    let mut command = Command::new(&executable);
-    if let Some(bridge) = &bridge {
-        command.env(crate::resident_bridge::TOKEN_ENV, &bridge.token);
-    }
-    let mut child = command.args(["app-server", "--listen", "stdio://"])
-        .current_dir(&spec.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().map_err(|error| format!("Cannot start Codex at {executable}: {error}. The executing daemon selects its backend with serve --codex PATH."))?;
+    let mut child = crate::codex_executable::launch(
+        binary, crate::platform::host_os(),
+        |selected| {
+            let mut command = Command::new(&selected.path);
+            if let Some(bridge) = &bridge {
+                command.env(crate::resident_bridge::TOKEN_ENV, &bridge.token);
+            }
+            command.args(["app-server", "--listen", "stdio://"])
+                .current_dir(&spec.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+        },
+        |selected, retry| run.diagnostic(Level::Info, "process.starting",
+            || json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"rediscovered":retry,"cwd":spec.cwd}), || Value::Null),
+    ).map_err(|error| {
+        run.diagnostic(Level::Error, "process.start_failed", ||json!({"detail":error.to_string()}), ||Value::Null);
+        format!("Cannot start Codex: {error}")
+    })?;
     let stdin = child.stdin.take().ok_or("missing app-server stdin")?;
     run.diagnostic(
         Level::Info,
@@ -582,144 +583,4 @@ pub fn execute(
         rpc.tick()?;
     }
     Ok(())
-}
-
-pub(crate) fn resolve(configured: &str) -> String {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let search = std::env::var_os("PATH");
-    resolve_on(
-        configured,
-        crate::platform::host_os(),
-        std::env::consts::ARCH,
-        home.as_deref(),
-        search.as_deref(),
-    )
-}
-
-fn resolve_on(
-    configured: &str,
-    os: &str,
-    arch: &str,
-    home: Option<&std::path::Path>,
-    search: Option<&std::ffi::OsStr>,
-) -> String {
-    if configured != "codex" {
-        return configured.into();
-    }
-    let name = if os == "windows" {
-        "codex.exe"
-    } else {
-        "codex"
-    };
-    let mut candidates = Vec::new();
-    if os == "macos" {
-        candidates.push(PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"));
-    }
-    let mut prefixes = Vec::new();
-    if let Some(search) = search {
-        for directory in std::env::split_paths(search).filter(|p| !p.as_os_str().is_empty()) {
-            candidates.push(directory.join(name));
-            if let Some(parent) = directory.parent() {
-                prefixes.push(parent.to_owned());
-            }
-        }
-    }
-    if let Some(home) = home {
-        candidates.push(home.join(".local/bin").join(name));
-        candidates.push(home.join(".cargo/bin").join(name));
-        prefixes.push(home.join(".npm-global"));
-        if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
-            let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-            paths.sort();
-            paths.reverse();
-            prefixes.extend(paths);
-        }
-    }
-    prefixes.extend([
-        PathBuf::from("/usr/local"),
-        PathBuf::from("/usr"),
-        PathBuf::from("/opt/homebrew"),
-    ]);
-    let platform = match (os, arch) {
-        ("linux", "x86_64") => Some(("linux-x64", "x86_64-unknown-linux-musl")),
-        ("linux", "aarch64") => Some(("linux-arm64", "aarch64-unknown-linux-musl")),
-        ("macos", "x86_64") => Some(("darwin-x64", "x86_64-apple-darwin")),
-        ("macos", "aarch64") => Some(("darwin-arm64", "aarch64-apple-darwin")),
-        ("windows", "x86_64") => Some(("win32-x64", "x86_64-pc-windows-msvc")),
-        ("windows", "aarch64") => Some(("win32-arm64", "aarch64-pc-windows-msvc")),
-        _ => None,
-    };
-    if let Some((package, target)) = platform {
-        for prefix in prefixes {
-            let modules = prefix.join("lib/node_modules/@openai");
-            let codex = modules.join("codex");
-            let relative = format!("vendor/{target}/bin/{name}");
-            candidates.push(
-                codex
-                    .join(format!("node_modules/@openai/codex-{package}"))
-                    .join(&relative),
-            );
-            candidates.push(modules.join(format!("codex-{package}")).join(&relative));
-            candidates.push(codex.join(&relative));
-        }
-    }
-    candidates
-        .into_iter()
-        .find(|p| {
-            if !p.is_file() {
-                return false;
-            }
-            #[cfg(unix)]
-            if os != "windows" {
-                use std::os::unix::fs::PermissionsExt;
-                return p
-                    .metadata()
-                    .is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
-            }
-            true
-        })
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| configured.into())
-}
-
-#[cfg(test)]
-mod discovery_tests {
-    use super::*;
-    #[test]
-    fn linux_standalone_and_native_npm_are_discovered_without_desktop_or_node_path() {
-        let root = std::env::temp_dir().join(format!(
-            "boxen-codex-discovery-{}",
-            crate::state::random_hex().unwrap()
-        ));
-        let binary = root.join(".local/bin/codex");
-        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        std::fs::write(&binary, "fixture").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        assert_eq!(
-            PathBuf::from(resolve_on("codex", "linux", "x86_64", Some(&root), None)),
-            binary
-        );
-        assert_eq!(
-            resolve_on("/explicit/backend", "linux", "x86_64", Some(&root), None),
-            "/explicit/backend"
-        );
-        std::fs::remove_file(binary).unwrap();
-        let binary = root.join(".nvm/versions/node/v22/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex");
-        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        std::fs::write(&binary, "fixture").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        assert_eq!(
-            PathBuf::from(resolve_on("codex", "linux", "x86_64", Some(&root), None)),
-            binary
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
 }

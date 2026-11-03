@@ -324,21 +324,16 @@ struct NativeReader {
 }
 impl NativeReader {
     fn open(binary: &str, owner: &str) -> Result<Self> {
-        let executable = codex::resolve(binary);
-        logging::record(
-            Level::Debug,
-            Target::Runtime,
-            "thread_import.reader_starting",
-            Context::peer(owner),
-            || json!({"executable":executable}),
-            || Value::Null,
-        );
-        let mut child = Command::new(executable)
-            .args(["app-server", "--listen", "stdio://"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let mut child = crate::codex_executable::launch(binary, crate::platform::host_os(),
+            |selected| Command::new(&selected.path)
+                .args(["app-server", "--listen", "stdio://"])
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn(),
+            |selected, retry| logging::record(Level::Debug, Target::Runtime,
+                "thread_import.reader_starting", Context::peer(owner),
+                ||json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"rediscovered":retry}), ||Value::Null),
+        ).inspect_err(|error| logging::record(Level::Error, Target::Runtime,
+            "thread_import.reader_start_failed", Context::peer(owner),
+            ||json!({"detail":error.to_string()}), ||Value::Null))?;
         let stdin = child
             .stdin
             .take()

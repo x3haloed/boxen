@@ -12,6 +12,27 @@ fn main() {
         thread::sleep(Duration::from_secs(120));
         return;
     }
+    if args.get(1).is_some_and(|s| s == "--version") {
+        let folder = env::current_exe().unwrap().parent().unwrap().to_owned();
+        match fs::read_to_string(folder.join("probe-mode"))
+            .unwrap_or_default()
+            .trim()
+        {
+            "sleep" => thread::sleep(Duration::from_secs(120)),
+            "flood" => {
+                println!("{}", "x".repeat(8192));
+                thread::sleep(Duration::from_secs(120));
+            }
+            "fail" => std::process::exit(1),
+            _ => println!(
+                "codex-cli {}",
+                fs::read_to_string(folder.join("version"))
+                    .unwrap_or_else(|_| "1.0.0".into())
+                    .trim()
+            ),
+        }
+        return;
+    }
     assert_eq!(args.get(1).map(String::as_str), Some("queue"));
     let i = args.iter().position(|s| s == "--message").unwrap();
     fs::write(

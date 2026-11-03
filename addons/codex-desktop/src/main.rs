@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use boxen_codex_desktop::{Config, Store, hash, rpc, run};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
@@ -17,20 +17,6 @@ fn home() -> Result<PathBuf> {
         .map(PathBuf::from)
         .context("home directory unavailable")
 }
-fn codex() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("CODEX_BINARY") {
-        return Ok(path.into());
-    }
-    if let Some(paths) = std::env::var_os("PATH") {
-        for path in std::env::split_paths(&paths) {
-            let p = path.join(if cfg!(windows) { "codex.exe" } else { "codex" });
-            if p.is_file() {
-                return Ok(p);
-            }
-        }
-    }
-    bail!("Codex executable unavailable; --codex ABSOLUTE_PATH selects it explicitly")
-}
 fn execute() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args.iter().any(|v| v == "--help") {
@@ -46,8 +32,11 @@ fn execute() -> Result<()> {
         args.remove(0);
         let executable = option(&mut args, "--codex")?
             .map(PathBuf::from)
-            .map(Ok)
-            .unwrap_or_else(codex)?;
+            .unwrap_or_else(|| {
+                std::env::var_os("CODEX_BINARY")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("auto"))
+            });
         let boxen_home = option(&mut args, "--boxen-home")?
             .map(PathBuf::from)
             .unwrap_or(home()?.join(".boxen"));

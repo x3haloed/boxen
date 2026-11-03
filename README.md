@@ -38,6 +38,19 @@ On each machine, trust the other machine's public key, obtained through a truste
 ./target/release/boxen ping other-machine.lan:42424 OTHER_PUBLIC_KEY "Hello, other box"
 ```
 
+Codex launches use automatic executable discovery by default (`--codex auto` or
+`BOXEN_CODEX=auto`). On Windows, complete desktop installations are probed with a
+bounded `--version` call and the highest valid version wins; numeric prerelease
+versions compare numerically, with installation time breaking equal-version ties.
+Partial updates and unusable candidates are skipped. CLI/PATH and existing native
+npm locations remain fallbacks. Discovery occurs for each new app-server, including
+history imports, so desktop updates do not require a daemon restart. The shared
+resolver also powers the desktop-mail adapter. `boxen codex-path` reports the
+current selection without starting agent work. Discovery has a five-second total
+probe budget and one second per candidate. An explicit `--codex PATH` remains a
+pin and is never silently replaced. A missing executable at spawn triggers one
+rediscovery in automatic mode; failures after spawn never replay work.
+
 For the identical-file portable build, run `bash scripts/build-ape.sh`, then use `bash target/cosmo/release/boxen.com` in place of `./target/release/boxen`. End users only need the resulting executable. The first developer build downloads a pinned Rust toolchain and Cosmopolitan compiler.
 
 See [LAN setup, protocol, and verification](docs/p2p.md), including the SSH development deployment helper and the current portability limits.

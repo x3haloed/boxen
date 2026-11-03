@@ -20,7 +20,8 @@ if(!$NoBuild){
     & cargo build --release --locked --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml')
     if($LASTEXITCODE -ne 0){throw 'Adapter build failed'}
 }
-if(!$CodexBinary){$CodexBinary=(Get-Command codex -ErrorAction Stop).Source}
+if(!$CodexBinary){$CodexBinary='auto'}
+if($CodexBinary -ne 'auto'){$CodexBinary=[IO.Path]::GetFullPath($CodexBinary)}
 $built=Join-Path $PSScriptRoot 'target\release\boxen-support.exe'
 if(!(Test-Path -LiteralPath $built)){throw 'The release executable is unavailable'}
 New-Item -ItemType Directory -Force -Path $bin,$profile | Out-Null
@@ -34,7 +35,7 @@ if($old){
 Get-CimInstance Win32_Process -Filter "Name='boxen-support.exe'" | Where-Object {$_.ExecutablePath -eq $exe -and $_.CommandLine.Contains($config)} | ForEach-Object {Stop-Process -Id $_.ProcessId -ErrorAction Stop}
 Copy-Item -LiteralPath $built -Destination $exe -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'run-worker.ps1') -Destination $worker -Force
-& $exe --config $config init $ThreadId --codex ([IO.Path]::GetFullPath($CodexBinary)) --boxen-home ([IO.Path]::GetFullPath($BoxenHome)) --url $Url --label $Label
+& $exe --config $config init $ThreadId --codex $CodexBinary --boxen-home ([IO.Path]::GetFullPath($BoxenHome)) --url $Url --label $Label
 if($LASTEXITCODE -ne 0){throw 'Adapter configuration failed'}
 $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $log=Join-Path $profile 'logs\bridge.jsonl'

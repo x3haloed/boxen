@@ -75,13 +75,34 @@ impl Drop for OwnedChild {
     }
 }
 pub fn submit(executable: &Path, thread: &str, notice: &str, timeout: Duration) -> Result<()> {
-    let mut command = Command::new(executable);
-    command
-        .args(["queue", "--thread", thread, "--message", notice])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let mut process = OwnedChild::spawn(&mut command)?;
+    let mut process = crate::codex_executable::launch(
+        executable
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Codex executable path is not UTF-8"))?,
+        std::env::consts::OS,
+        |selected| {
+            let mut command = Command::new(&selected.path);
+            command
+                .args(["queue", "--thread", thread, "--message", notice])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            OwnedChild::spawn(&mut command).map_err(|error| {
+                std::io::Error::new(
+                    error
+                        .downcast_ref::<std::io::Error>()
+                        .map_or(std::io::ErrorKind::Other, |e| e.kind()),
+                    error.to_string(),
+                )
+            })
+        },
+        |selected, retry| {
+            println!(
+                "{}",
+                serde_json::json!({"event":"desktop.codex_starting","at":crate::now(),"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"rediscovered":retry})
+            )
+        },
+    )?;
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = process.child.try_wait()? {

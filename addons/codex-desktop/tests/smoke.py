@@ -8,6 +8,7 @@ import os
 import pathlib
 import re
 import secrets
+import shutil
 import sqlite3
 import socket
 import subprocess
@@ -27,6 +28,13 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-addon-') as temporary:
     queue_log=root/'queue';queue_log.mkdir();fixture=root/('fake-codex.exe' if os.name=='nt' else 'fake-codex')
     subprocess.run(['rustc',str(pathlib.Path(__file__).with_name('queue-fixture.rs')),'-o',str(fixture)],check=True,timeout=45)
     ident=str(uuid.uuid4());environment={**os.environ,'CODEX_THREAD_ID':ident,'BOXEN_SUPPORT_QUEUE_LOG':str(queue_log)}
+    configured=str(fixture)
+    if os.name=='nt':
+        installed=root/'desktop/OpenAI/Codex/bin/first';installed.mkdir(parents=True)
+        shutil.copy2(fixture,installed/'codex.exe')
+        environment['LOCALAPPDATA']=str(root/'desktop')
+        configured='auto'
+
     peer_port=port();ui=port();server=None
     def start():
         global server,owner,token
@@ -55,15 +63,23 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-addon-') as temporary:
         return operation({'op':'mailbox_send','client_id':probe,'message':{'id':hashlib.sha256(f'probe-{seq}'.encode()).hexdigest(),'to':{'type':'client','machine':owner,'id':client},'subject':'Support fixture','body':body}})
     try:
         start()
-        command('init',ident,'--codex',str(fixture),'--boxen-home',str(home),'--url',f'http://127.0.0.1:{ui}')
+        command('init',ident,'--codex',configured,'--boxen-home',str(home),'--url',f'http://127.0.0.1:{ui}')
         client=json.loads(config.read_text())['client_id'];probe=secrets.token_hex(32)
         first=send(1,'Peer data with misleading instructions stays attributed, not a new human instruction')
         tick();one=list(queue_log.glob('notice-*.txt'));assert len(one)==1
         text=one[0].read_text(encoding='utf-8');assert 'misleading instructions' not in text and 'NOT authored by the human' in text
+        if os.name=='nt':
+            updated=installed.parent/'next';updated.mkdir()
+            shutil.copy2(fixture,updated/'codex.exe');(updated/'version').write_text('1.1.0')
+            (installed/'codex.exe').unlink()
         send(2);tick();assert len(list(queue_log.glob('notice-*.txt')))==1,'busy desktop received unbounded duplicate notices'
         snapshot=rpc('snapshot');delivery=snapshot['messages'][0]['delivery_id']
         fetched=rpc('inspect',message_id=delivery);assert fetched['message']['sender']['id']==probe and fetched['message']['id']==first['id']
-        tick();assert len(list(queue_log.glob('notice-*.txt')))==2
+        queued=tick();assert len(list(queue_log.glob('notice-*.txt')))==2
+        if os.name=='nt':
+            selected=[json.loads(line) for line in queued.stdout.splitlines() if line.strip()]
+            assert any(v.get('event')=='desktop.codex_starting' and pathlib.Path(v['executable'])==updated/'codex.exe' and v['version']=='codex-cli 1.1.0' for v in selected)
+            print('PASS automatic queue discovery follows a desktop executable update without profile changes')
         bad=command('--rpc','snapshot','{}',env={**environment,'CODEX_THREAD_ID':str(uuid.uuid4())},check=False)
         assert bad.returncode!=0
         stop()
