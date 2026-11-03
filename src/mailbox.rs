@@ -50,6 +50,8 @@ impl Address {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Send {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<Value>,
     pub id: String,
     pub to: Address,
     pub subject: String,
@@ -61,6 +63,8 @@ pub struct Send {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<Value>,
     pub id: String,
     pub owner: String,
     pub sender: Address,
@@ -86,6 +90,7 @@ impl Message {
             && self.body == spec.body
             && self.reply_to == spec.reply_to.clone().unwrap_or_else(|| sender.clone())
             && self.in_reply_to == spec.in_reply_to
+            && self.service == spec.service
     }
 }
 struct Inner {
@@ -99,6 +104,7 @@ struct Inner {
     cursors: HashMap<String, Value>,
 }
 pub struct DeliveryOutcome<'a> {
+    pub result: Option<&'a Value>,
     pub status: &'a str,
     pub external_id: Option<&'a str>,
     pub reason: Option<&'a str>,
@@ -347,7 +353,16 @@ impl Mailboxes {
                 "message acceptance requires a nonblank subject of at most 256 bytes".into(),
             );
         }
-        if spec.body.len() > 32 * 1024 || (spec.body.is_empty() && origin.is_none()) {
+        if let Some(service) = &spec.service
+            && (!matches!(spec.to, Address::Connector { .. })
+                || !service.is_object()
+                || serde_json::to_vec(service)?.len() > 32 * 1024)
+        {
+            return Err("service requests address external connectors and fit 32 KiB".into());
+        }
+        if spec.body.len() > 32 * 1024
+            || (spec.body.is_empty() && origin.is_none() && spec.service.is_none())
+        {
             return Err("message body acceptance range is 1–32768 bytes".into());
         }
         let mut inner = self.inner.lock().unwrap();
@@ -379,6 +394,7 @@ impl Mailboxes {
         }
         let reply_to = spec.reply_to.clone().unwrap_or_else(|| sender.clone());
         let message = Message {
+            service: spec.service,
             id: spec.id,
             owner: owner.into(),
             sender,
@@ -478,13 +494,14 @@ impl Mailboxes {
             status,
             external_id,
             reason,
+            result,
         } = outcome;
         if let Some(reason) = reason {
             crate::messaging::opaque(reason, 64)?;
         }
         self.check()?;
         let mut inner = self.inner.lock().unwrap();
-        let _ = inner
+        let message = inner
             .ids
             .get(id)
             .and_then(|i| inner.messages.get(*i))
@@ -505,10 +522,19 @@ impl Mailboxes {
         if let Some(id) = external_id {
             crate::messaging::opaque(id, 256)?;
         }
-        if status == "accepted" && external_id.is_none() {
+        if result.is_some_and(|v| serde_json::to_vec(v).map_or(true, |b| b.len() > 64 * 1024)) {
+            return Err("service result exceeds 64 KiB".into());
+        }
+        if status == "accepted"
+            && external_id.is_none()
+            && !(message.service.is_some() && result.is_some())
+        {
             return Err("external acceptance includes the service message id".into());
         }
         let mut receipt = json!({"status":status,"claim_id":claim_id,"external_id":external_id,"reason":reason,"at":jobs::now()});
+        if let Some(result) = result {
+            receipt["result"] = result.clone();
+        }
         if let Some(value) = prior.get("parts") {
             let parts = value
                 .as_array()
@@ -531,6 +557,7 @@ impl Mailboxes {
             return if prior["status"] == status
                 && prior["external_id"] == json!(external_id)
                 && prior["reason"] == json!(reason)
+                && prior.get("result") == result
             {
                 Ok(prior.clone())
             } else {
@@ -545,6 +572,7 @@ impl Mailboxes {
     }
     /// Progress belongs to the existing correspondence receipt, never a second
     /// adapter database. A claimed part may have taken effect after a crash.
+    #[allow(clippy::too_many_arguments)] // Coordinates one part within the authoritative receipt.
     pub fn part(
         &self,
         owner: &str,
@@ -676,6 +704,17 @@ impl Mailboxes {
             })
             .cloned()
             .collect()
+    }
+    pub fn has_pending(&self, owner: &str, resident: &str, presented: &HashSet<String>) -> bool {
+        let target = Address::Resident {
+            id: resident.into(),
+        };
+        self.inner
+            .lock()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.owner == owner && m.to == target && !presented.contains(&m.id))
     }
     pub fn pending(
         &self,

@@ -23,6 +23,8 @@ const MAX_INPUT: usize = 32768;
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -279,6 +281,9 @@ impl Events {
             .ok_or_else(|| "subscription is unavailable or owned by another peer".into())
     }
     pub fn create_source(&self, owner: &str, spec: SourceSpec) -> Result<Source> {
+        if let Some(id) = &spec.audience {
+            jobs::valid_id(id)?;
+        }
         jobs::valid_id(&spec.id)?;
         if spec.name.trim().is_empty()
             || spec.name.len() > 100
@@ -333,7 +338,15 @@ impl Events {
     pub fn subscribe(&self, owner: &str, mut spec: SubscriptionSpec) -> Result<Subscription> {
         jobs::valid_id(&spec.id)?;
         jobs::valid_id(spec.target.id())?;
-        self.source(owner, &spec.source)?;
+        let source = self.source(owner, &spec.source)?;
+        if source
+            .spec
+            .audience
+            .as_ref()
+            .is_some_and(|id| id != spec.target.id())
+        {
+            return Err("observation source is restricted to another target".into());
+        }
         if !(1000..=86400000).contains(&spec.interval_ms)
             || !(1..=3600).contains(&spec.wake_limit)
             || !(1..=3600).contains(&spec.target_wake_limit)
@@ -498,7 +511,7 @@ impl Events {
     }
     pub fn list(&self, owner: &str) -> Value {
         let g = self.inner.lock().unwrap();
-        json!({"sources":g.data.sources.values().filter(|s|s.owner==owner).map(|s|json!({"id":s.spec.id,"name":s.spec.name,"generation":s.generation,"enabled":s.enabled,"mode":s.spec.mode,"seq":s.seq,"retained":s.items.len(),"dropped":s.dropped,"health":s.health,"tools":s.spec.tools})).collect::<Vec<_>>(),"subscriptions":g.data.subscriptions.values().filter(|s|s.owner==owner).collect::<Vec<_>>(),"unavailable":g.unavailable})
+        json!({"sources":g.data.sources.values().filter(|s|s.owner==owner).map(|s|json!({"id":s.spec.id,"name":s.spec.name,"audience":s.spec.audience,"generation":s.generation,"enabled":s.enabled,"mode":s.spec.mode,"seq":s.seq,"retained":s.items.len(),"dropped":s.dropped,"health":s.health,"tools":s.spec.tools})).collect::<Vec<_>>(),"subscriptions":g.data.subscriptions.values().filter(|s|s.owner==owner).collect::<Vec<_>>(),"unavailable":g.unavailable})
     }
     fn active(s: &Subscription) -> bool {
         s.enabled && !s.ended && s.spec.expires_at_ms.is_none_or(|t| t > jobs::now())
@@ -1277,6 +1290,7 @@ mod tests {
             .create_source(
                 &owner,
                 SourceSpec {
+                    audience: None,
                     id: state::random_hex().unwrap(),
                     name: "bounded test".into(),
                     command: vec![],

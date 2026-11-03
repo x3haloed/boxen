@@ -10,6 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "discord_gateway.rs"]
+pub(crate) mod gateway;
 const API: &str = "https://discord.com/api/v10";
 struct Control {
     agent: ureq::Agent,
@@ -36,13 +38,36 @@ struct Discord {
     key: String,
     base: String,
     next: Instant,
+    channels: HashMap<String, Value>,
 }
 enum Reply {
     Ok(Value),
     Rejected(u16),
 }
 impl Discord {
+    fn context(&mut self, id: &str) -> Result<Value> {
+        snowflake(id)?;
+        if let Some(value) = self.channels.get(id) {
+            return Ok(value.clone());
+        }
+        let value = self.get(&format!("/channels/{id}"))?;
+        let context = json!({"space":value["guild_id"],"parent":value["parent_id"],"direct":matches!(value["type"].as_u64(),Some(1|3)),"author":if value["type"]==1 {value["recipients"].as_array().and_then(|a|a.first()).cloned().unwrap_or(Value::Null)}else{Value::Null}});
+        if self.channels.len() >= 512 {
+            self.channels.clear();
+        }
+        self.channels.insert(id.into(), context.clone());
+        Ok(context)
+    }
     fn call(&mut self, method: &str, path: &str, body: Option<Value>) -> Result<Reply> {
+        self.request(method, path, body, None)
+    }
+    fn request(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        multipart: Option<(&str, &[u8])>,
+    ) -> Result<Reply> {
         for _ in 0..3 {
             while Instant::now() < self.next {
                 std::thread::sleep(
@@ -52,7 +77,13 @@ impl Discord {
                 );
             }
             let url = format!("{}{path}", self.base);
-            let response = if method == "POST" {
+            let response = if let Some((content_type, bytes)) = multipart {
+                self.agent
+                    .post(url)
+                    .header("Authorization", format!("Bot {}", self.key))
+                    .header("Content-Type", content_type)
+                    .send(bytes)
+            } else if method == "POST" {
                 self.agent
                     .post(url)
                     .header("Authorization", format!("Bot {}", self.key))
@@ -61,6 +92,11 @@ impl Discord {
                         "DiscordBot (https://github.com/x3haloed/boxen, 0.1)",
                     )
                     .send_json(body.as_ref().ok_or("POST body required")?)
+            } else if method == "PUT" {
+                self.agent
+                    .put(url)
+                    .header("Authorization", format!("Bot {}", self.key))
+                    .send_empty()
             } else {
                 self.agent
                     .get(url)
@@ -73,6 +109,12 @@ impl Discord {
             };
             let mut response = response.map_err(|_| "Discord transport outcome unavailable")?;
             let status = response.status().as_u16();
+            if status == 204 {
+                return Ok(Reply::Ok(Value::Null));
+            }
+            if !(200..300).contains(&status) && status != 429 {
+                return Ok(Reply::Rejected(status));
+            }
             let remaining = response
                 .headers()
                 .get("x-ratelimit-remaining")
@@ -193,7 +235,13 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
         key: String::new(),
         base: api,
         next: Instant::now(),
+        channels: HashMap::new(),
     };
+    let mut gateway: Option<gateway::Gateway> = None;
+    let mut pending = std::collections::VecDeque::<Value>::new();
+    let mut gateway_next = Instant::now();
+    let mut gateway_failures = 0u64;
+    let mut gateway_health = (false, 0u64, 0u64);
     let mut channel_failures: HashMap<String, (u64, Instant)> = HashMap::new();
     let mut failures = 0u64;
     let mut backoff = 2u64;
@@ -201,6 +249,8 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
         let result = (|| -> Result<bool> {
             let current: Instance = serde_json::from_value(control.call(json!({"action":"get"}))?)?;
             if !current.definition.enabled {
+                gateway = None;
+                pending.clear();
                 return Ok(false);
             }
             let credential_file =
@@ -226,6 +276,10 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
                 return Err("Discord credential file is empty or has unexpected formatting".into());
             }
             if discord.key != key {
+                gateway = None;
+                pending.clear();
+                gateway_next = Instant::now();
+                discord.channels.clear();
                 discord.key = key;
                 let identity = match discord.get("/users/@me") {
                     Ok(i) => i,
@@ -244,28 +298,201 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
                     json!({"account":current.definition.account}),
                 );
             }
-            let conversations: HashSet<_> = current
+            if current.gateway && !once {
+                if gateway.is_none() && Instant::now() >= gateway_next {
+                    let start = (|| -> Result<gateway::Gateway> {
+                        let url = if let Some(url) =
+                            current.definition.settings["gateway_url"].as_str()
+                        {
+                            if !url.starts_with("ws://127.0.0.1:") {
+                                return Err("custom Gateway URLs are loopback fixtures".into());
+                            }
+                            url.to_owned()
+                        } else {
+                            discord.get("/gateway/bot")?["url"]
+                                .as_str()
+                                .ok_or("Gateway URL unavailable")?
+                                .to_owned()
+                        };
+                        let saved = control.call(json!({"action":"gateway_state"}))?;
+                        gateway::Gateway::start(
+                            url,
+                            discord.key.clone(),
+                            serde_json::from_value(saved["session"].clone())?,
+                        )
+                    })();
+                    match start {
+                        Ok(g) => {
+                            gateway = Some(g);
+                            gateway_failures = 0;
+                            channel_failures.remove("_gateway");
+                        }
+                        Err(_) => {
+                            gateway_failures += 1;
+                            let wait = (1u64 << gateway_failures.min(6)).min(60);
+                            gateway_next = Instant::now() + Duration::from_secs(wait);
+                            channel_failures
+                                .insert("_gateway".into(), (gateway_failures, gateway_next));
+                            if gateway_failures == 1 || gateway_failures.is_power_of_two() {
+                                notices(
+                                    "discord.gateway_unavailable",
+                                    &instance,
+                                    json!({"failures":gateway_failures,"retry_seconds":wait}),
+                                );
+                            }
+                        }
+                    }
+                }
+                if let Some(g) = &gateway {
+                    if let Ok(presence) = control.call(json!({"action":"native_presence"})) {
+                        g.presence(presence);
+                    }
+                    while pending.len() < 64 {
+                        match g.events.try_recv() {
+                            Ok(v) => pending.push_back(v),
+                            Err(_) => break,
+                        }
+                    }
+                    while let Some(event) = pending.front() {
+                        let kind = event["type"].as_str().unwrap_or("");
+                        let data = &event["data"];
+                        if kind == "GUILD_CREATE" {
+                            for c in data["channels"].as_array().into_iter().flatten() {
+                                cache_channel(&mut discord, c);
+                            }
+                        } else if matches!(
+                            kind,
+                            "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "THREAD_CREATE" | "THREAD_UPDATE"
+                        ) {
+                            cache_channel(&mut discord, data);
+                        } else if matches!(kind, "CHANNEL_DELETE" | "THREAD_DELETE")
+                            && let Some(id) = data["id"].as_str()
+                        {
+                            discord.channels.remove(id);
+                        }
+                        let mut context = Value::Null;
+                        if matches!(kind, "MESSAGE_CREATE" | "MESSAGE_REACTION_ADD")
+                            && let Some(id) = data["channel_id"].as_str()
+                            && current
+                                .residents()
+                                .iter()
+                                .any(|r| current.policy().potential(r, "receive", id))
+                        {
+                            context = discord
+                                .context(id)
+                                .unwrap_or_else(|_| json!({"unavailable":true}));
+                        }
+                        if kind == "MESSAGE_REACTION_ADD" && context.is_object() {
+                            context["message_author_id"] = if data["message_author_id"].is_string()
+                            {
+                                data["message_author_id"].clone()
+                            } else if let (Some(channel), Some(message)) =
+                                (data["channel_id"].as_str(), data["message_id"].as_str())
+                            {
+                                if snowflake(channel).is_ok() && snowflake(message).is_ok() {
+                                    discord
+                                        .get(&format!("/channels/{channel}/messages/{message}"))
+                                        .map(|v| v["author"]["id"].clone())
+                                        .unwrap_or(Value::Null)
+                                } else {
+                                    Value::Null
+                                }
+                            } else {
+                                Value::Null
+                            };
+                        }
+                        let result=control.call(json!({"action":"gateway_event","event":event,"native_context":context}));
+                        match result {
+                            Ok(v) => {
+                                g.acknowledge(&v["session"])?;
+                                pending.pop_front();
+                            }
+                            Err(_) => {
+                                channel_failures
+                                    .insert("_gateway_intake".into(), (1, Instant::now()));
+                                break;
+                            }
+                        }
+                    }
+                    if pending.is_empty() {
+                        channel_failures.remove("_gateway_intake");
+                    }
+                    let health = (
+                        g.connected.load(std::sync::atomic::Ordering::Relaxed),
+                        g.failures.load(std::sync::atomic::Ordering::Relaxed),
+                        g.pressure.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                    if health != gateway_health
+                        && (health.0 != gateway_health.0
+                            || health.1.is_power_of_two()
+                            || health.2.is_power_of_two())
+                    {
+                        notices(
+                            "discord.gateway_health",
+                            &instance,
+                            json!({"connected":health.0,"failures":health.1,"backpressure_resumes":health.2,"reason":g.last_error.lock().unwrap().clone()}),
+                        );
+                    }
+                    gateway_health = health;
+                    if !health.0 {
+                        channel_failures.insert("_gateway".into(), (health.1, Instant::now()));
+                    } else {
+                        channel_failures.remove("_gateway");
+                    }
+                }
+            } else {
+                gateway = None;
+                pending.clear();
+                channel_failures.remove("_gateway");
+                channel_failures.remove("_gateway_intake");
+            }
+            let mut conversations: HashSet<String> = current
                 .definition
                 .bindings
                 .iter()
                 .filter(|b| b.receive)
-                .map(|b| b.conversation.as_str())
+                .map(|b| b.conversation.clone())
                 .collect();
+            for resident in current.residents() {
+                for scope in current.attention(&resident).watched {
+                    if scope.kind == "conversation"
+                        && let Some(id) = scope.id
+                    {
+                        conversations.insert(id);
+                    }
+                }
+            }
             for conversation in conversations {
+                if current.gateway {
+                    continue;
+                }
+                if !current
+                    .residents()
+                    .iter()
+                    .any(|r| current.policy().potential(r, "receive", &conversation))
+                {
+                    continue;
+                }
                 if channel_failures
-                    .get(conversation)
+                    .get(&conversation)
                     .is_some_and(|(_, next)| Instant::now() < *next)
                 {
                     continue;
                 }
+                let native_context = if current.policy.is_some() || !current.attention.is_empty() {
+                    discord.context(&conversation)?
+                } else {
+                    Value::Null
+                };
                 match poll(
                     &control,
                     &mut discord,
-                    conversation,
+                    &conversation,
                     &current.definition.account,
+                    &native_context,
                 ) {
                     Ok(()) => {
-                        if let Some((count, _)) = channel_failures.remove(conversation) {
+                        if let Some((count, _)) = channel_failures.remove(&conversation) {
                             notices(
                                 "discord.channel_recovered",
                                 &instance,
@@ -275,12 +502,12 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
                     }
                     Err(error) => {
                         let count = channel_failures
-                            .get(conversation)
+                            .get(&conversation)
                             .map(|(n, _)| n + 1)
                             .unwrap_or(1);
                         let wait = (1u64 << count.min(6)).min(60);
                         channel_failures.insert(
-                            conversation.into(),
+                            conversation.clone(),
                             (count, Instant::now() + Duration::from_secs(wait)),
                         );
                         if count == 1 || count.is_multiple_of(32) {
@@ -336,10 +563,22 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
                 continue;
             }
         }
-        std::thread::sleep(Duration::from_secs(2));
+        if let Some(g) = &gateway {
+            if let Ok(v) = g.events.recv_timeout(Duration::from_secs(2)) {
+                pending.push_back(v);
+            }
+        } else {
+            std::thread::sleep(Duration::from_secs(2));
+        }
     }
 }
-fn poll(control: &Control, discord: &mut Discord, conversation: &str, account: &str) -> Result<()> {
+fn poll(
+    control: &Control,
+    discord: &mut Discord,
+    conversation: &str,
+    account: &str,
+    native_context: &Value,
+) -> Result<()> {
     snowflake(conversation)?;
     let checkpoint = control.call(json!({"action":"cursor","conversation":conversation}))?;
     let after = checkpoint["checkpoint"]["cursor"].as_str();
@@ -402,6 +641,21 @@ fn poll(control: &Control, discord: &mut Discord, conversation: &str, account: &
     }
     let mut cursor = after.unwrap().to_owned();
     let normalized:Vec<_>=accumulated.iter().map(|v|crate::messaging::bounded_native(&json!({"id":v["id"],"author":v["author"],"body":v["content"].as_str().unwrap_or(""),"timestamp":v["timestamp"],"attachments":v["attachments"],"attachment_retention":"remote_references_only","native":v,"content_availability":if v["content"].as_str().is_some_and(|s|!s.is_empty())||v["attachments"].as_array().is_some_and(|a|!a.is_empty()){"present"}else{"empty_or_unavailable"}}))).collect();
+    let normalized: Vec<_> = normalized
+        .into_iter()
+        .map(|mut v| {
+            v["space"] = native_context["space"].clone();
+            v["parent"] = native_context["parent"].clone();
+            v["direct"] = native_context["direct"].clone();
+            v["mention"] = json!(
+                v["native"]["mentions"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|u| u["id"] == account))
+            );
+            v["reply"] = json!(v["native"]["referenced_message"]["author"]["id"] == account);
+            v
+        })
+        .collect();
     let mut offset = 0;
     while offset < normalized.len() {
         let mut end = offset;
@@ -477,17 +731,114 @@ fn deliver(control: &Control, discord: &mut Discord) -> Result<()> {
             .ok_or("outgoing text unavailable")?;
         // Rejection is recorded before any external effect if the adapter cannot represent the request.
         let claim_id = state::random_hex()?;
+        let instance: Instance = serde_json::from_value(control.call(json!({"action":"get"}))?)?;
+        let native_context = if valid_conversation && instance.policy.is_some() {
+            // Refresh authoritative native scope before dispatch; cached parent metadata can change.
+            discord.channels.remove(conversation);
+            match discord.context(conversation) {
+                Ok(context) => context,
+                Err(_) => json!({"unavailable":true}),
+            }
+        } else {
+            Value::Null
+        };
         let claimed =
-            control.call(json!({"action":"claim","id":message["id"],"claim_id":claim_id}))?;
+            control.call(json!({"action":"claim","id":message["id"],"claim_id":claim_id,"native_context":native_context}))?;
         if claimed["claimed"] != true {
             continue;
         }
+        if native_context["unavailable"] == true {
+            // No native effect was attempted. A terminal rejection prevents one
+            // unavailable conversation from occupying the dispatch window forever.
+            control.call(json!({"action":"complete","id":message["id"],"claim_id":claim_id,"status":"rejected","reason":"native_scope_unavailable"}))?;
+            notices(
+                "discord.dispatch_context_unavailable",
+                &control.instance,
+                json!({"conversation":conversation,"message":message["id"]}),
+            );
+            continue;
+        }
+        if let Some(service) = message
+            .get("service")
+            .filter(|v| !v.is_null() && v["operation"] != "send_files")
+        {
+            let operation = service["operation"].as_str().unwrap_or("");
+            let resident = claimed["message"]["sender"]["id"]
+                .as_str()
+                .ok_or("service resident unavailable")?;
+            let result = service_call(
+                discord,
+                &instance,
+                resident,
+                conversation,
+                operation,
+                &service["arguments"],
+                &native_context,
+            );
+            let (status, external_id, reason, result) = match result {
+                Ok(Reply::Ok(value)) => (
+                    "accepted",
+                    if operation == "react" {
+                        service["arguments"]["message_id"].as_str()
+                    } else {
+                        None
+                    },
+                    None,
+                    Some(value),
+                ),
+                Ok(Reply::Rejected(_)) => ("rejected", None, Some("service_rejected"), None),
+                Err(_) => (
+                    if operation == "read_context" {
+                        "rejected"
+                    } else {
+                        "uncertain"
+                    },
+                    None,
+                    Some("service_unavailable"),
+                    None,
+                ),
+            };
+            control.call(json!({"action":"complete","id":message["id"],"claim_id":claim_id,"status":status,"external_id":external_id,"reason":reason,"result":result}))?;
+            notices(
+                "discord.service_outcome",
+                &control.instance,
+                json!({"message_id":message["id"],"operation":operation,"status":status,"reason":reason}),
+            );
+            continue;
+        }
+        let upload = message["service"]["operation"] == "send_files";
+        let files = if upload {
+            match load_uploads(control, message) {
+                Ok(files) => files,
+                Err(_) => {
+                    control.call(json!({"action":"complete","id":message["id"],"claim_id":claim_id,"status":"rejected","reason":"attachment_unavailable"}))?;
+                    notices(
+                        "discord.upload_unavailable",
+                        &control.instance,
+                        json!({"message_id":message["id"]}),
+                    );
+                    continue;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let body = if upload {
+            message["service"]["arguments"]["body"]
+                .as_str()
+                .unwrap_or("")
+        } else {
+            body
+        };
         let (status, external_id, reason) = if !valid_conversation {
             ("rejected", None, Some("invalid_native_conversation".into()))
-        } else if body.is_empty() {
+        } else if body.is_empty() && files.is_empty() {
             ("rejected", None, Some("empty_body".into()))
         } else {
-            let parts = text_parts(body);
+            let mut parts = text_parts(body);
+            if parts.is_empty() && !files.is_empty() {
+                parts.push("");
+            }
             let mut first_id = None;
             let mut aggregate = ("accepted", None);
             for (index, part) in parts.iter().enumerate() {
@@ -505,11 +856,22 @@ fn deliver(control: &Control, discord: &mut Discord) -> Result<()> {
                     payload["message_reference"] =
                         json!({"message_id":reply,"fail_if_not_exists":false});
                 }
-                let (part_status, part_id, part_reason) = match discord.call(
-                    "POST",
-                    &format!("/channels/{conversation}/messages"),
-                    Some(payload),
-                ) {
+                let reply = if index == 0 && !files.is_empty() {
+                    let (content_type, bytes) = multipart_upload(&payload, &files)?;
+                    discord.request(
+                        "POST",
+                        &format!("/channels/{conversation}/messages"),
+                        None,
+                        Some((&content_type, &bytes)),
+                    )
+                } else {
+                    discord.call(
+                        "POST",
+                        &format!("/channels/{conversation}/messages"),
+                        Some(payload),
+                    )
+                };
+                let (part_status, part_id, part_reason) = match reply {
                     Ok(Reply::Ok(value)) => {
                         if let Some(id) = value["id"].as_str() {
                             ("accepted", Some(id.to_owned()), None)
@@ -567,4 +929,223 @@ fn deliver(control: &Control, discord: &mut Discord) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn service_call(
+    discord: &mut Discord,
+    instance: &Instance,
+    resident: &str,
+    conversation: &str,
+    operation: &str,
+    args: &Value,
+    context: &Value,
+) -> Result<Reply> {
+    snowflake(conversation)?;
+    if operation == "react" {
+        let Some(id) = args["message_id"].as_str().filter(|s| snowflake(s).is_ok()) else {
+            return Ok(Reply::Rejected(400));
+        };
+        let Some(emoji) = args["emoji"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+        else {
+            return Ok(Reply::Rejected(400));
+        };
+        let encoded: String = emoji
+            .as_bytes()
+            .iter()
+            .map(|b| format!("%{b:02X}"))
+            .collect();
+        return discord.call(
+            "PUT",
+            &format!("/channels/{conversation}/messages/{id}/reactions/{encoded}/@me"),
+            None,
+        );
+    }
+    if operation != "read_context" {
+        return Ok(Reply::Rejected(400));
+    }
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default, deny_unknown_fields)]
+    struct Input {
+        message_id: Option<String>,
+        before_id: Option<String>,
+        after_id: Option<String>,
+        limit: Option<usize>,
+        before: Option<usize>,
+        after: Option<usize>,
+    }
+    let input: Input = match serde_json::from_value(args.clone()) {
+        Ok(v) => v,
+        Err(_) => return Ok(Reply::Rejected(400)),
+    };
+    if input.before_id.is_some() && input.after_id.is_some() {
+        return Ok(Reply::Rejected(400));
+    }
+    for id in [&input.message_id, &input.before_id, &input.after_id]
+        .into_iter()
+        .flatten()
+    {
+        snowflake(id)?;
+    }
+    let limit = input.limit.unwrap_or(25);
+    let before = input.before.unwrap_or(20);
+    let after = input.after.unwrap_or(5);
+    if !(1..=50).contains(&limit) || before > 50 || after > 50 {
+        return Ok(Reply::Rejected(400));
+    }
+    let mut originals = Vec::new();
+    let base = format!("/channels/{conversation}/messages");
+    let mut page = |path: &str| -> Result<()> {
+        let v = discord.get(path)?;
+        originals.extend(
+            v.as_array()
+                .ok_or("context page is not an array")?
+                .iter()
+                .cloned(),
+        );
+        Ok(())
+    };
+    if let Some(id) = input.before_id {
+        page(&format!("{base}?limit={limit}&before={id}"))?;
+    } else if let Some(id) = input.after_id {
+        page(&format!("{base}?limit={limit}&after={id}"))?;
+    } else if let Some(id) = input.message_id {
+        if before > 0 {
+            page(&format!("{base}?limit={before}&before={id}"))?;
+        }
+        if after > 0 {
+            page(&format!("{base}?limit={after}&after={id}"))?;
+        }
+        originals.push(discord.get(&format!("{base}/{id}"))?);
+    } else {
+        page(&format!("{base}?limit={limit}"))?;
+    }
+    originals.sort_by_key(|v| {
+        v["id"]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    });
+    originals.dedup_by(|a, b| a["id"] == b["id"]);
+    let total = originals.len();
+    let mut messages = Vec::new();
+    let mut bytes = 0;
+    let mut filtered = 0;
+    for original in originals {
+        let mut native = context.clone();
+        if !native.is_object() {
+            native = json!({});
+        }
+        native["author"] = original["author"].clone();
+        if !instance
+            .policy()
+            .permits(resident, "read", conversation, &native)
+        {
+            filtered += 1;
+            continue;
+        }
+        let native = crate::messaging::bounded_native(
+            &json!({"id":original["id"],"author":original["author"],"body":original["content"].as_str().unwrap_or(""),"timestamp":original["timestamp"],"attachments":original["attachments"],"native":original}),
+        );
+        let size = serde_json::to_vec(&native)?.len();
+        if bytes + size > 60 * 1024 {
+            break;
+        }
+        bytes += size;
+        messages.push(native);
+    }
+    let oldest = messages.first().map(|m| m["id"].clone());
+    let newest = messages.last().map(|m| m["id"].clone());
+    Ok(Reply::Ok(
+        json!({"conversation":conversation,"messages":messages,"ordering":"chronological","provider_window_count":total,"filtered_by_read_policy":filtered,"retained_count":messages.len(),"omitted_count":total-filtered-messages.len(),"next":{"older":{"before_id":oldest,"limit":limit},"newer":{"after_id":newest,"limit":limit}}}),
+    ))
+}
+
+fn load_uploads(control: &Control, message: &Value) -> Result<Vec<(Value, Vec<u8>)>> {
+    use base64::Engine;
+    let files = message["service"]["arguments"]["files"]
+        .as_array()
+        .filter(|v| !v.is_empty() && v.len() <= 10)
+        .ok_or("upload has 1–10 retained files")?;
+    let mut output = Vec::new();
+    let mut total = 0;
+    for (index, artifact) in files.iter().enumerate() {
+        let expected = artifact["bytes"]
+            .as_u64()
+            .filter(|n| *n <= 2 * 1024 * 1024)
+            .ok_or("upload file exceeds 2 MiB")? as usize;
+        total += expected;
+        if total > 16 * 1024 * 1024 {
+            return Err("upload batch exceeds 16 MiB".into());
+        }
+        let mut bytes = Vec::new();
+        loop {
+            let part=control.call(json!({"action":"attachment","id":message["id"],"index":index,"offset":bytes.len(),"limit":262144}))?;
+            let data = base64::engine::general_purpose::STANDARD.decode(
+                part["base64"]
+                    .as_str()
+                    .ok_or("attachment bytes unavailable")?,
+            )?;
+            if bytes.len() + data.len() > expected
+                || part["next_offset"].as_u64() != Some((bytes.len() + data.len()) as u64)
+            {
+                return Err("attachment chunk bounds failed".into());
+            }
+            bytes.extend(data);
+            if part["done"] == true {
+                break;
+            }
+            if bytes.len() == expected {
+                return Err("attachment stream did not terminate".into());
+            }
+        }
+        if bytes.len() != expected
+            || state::hex(&Sha256::digest(&bytes)) != artifact["sha256"].as_str().unwrap_or("")
+        {
+            return Err("attachment integrity failed".into());
+        }
+        output.push((artifact.clone(), bytes));
+    }
+    Ok(output)
+}
+fn multipart_upload(payload: &Value, files: &[(Value, Vec<u8>)]) -> Result<(String, Vec<u8>)> {
+    let boundary = format!("boxen-{}", state::random_hex()?);
+    let mut data = Vec::new();
+    let mut payload = payload.clone();
+    payload["attachments"] = json!(
+        files
+            .iter()
+            .enumerate()
+            .map(|(i, (f, _))| json!({"id":i,"filename":f["filename"]}))
+            .collect::<Vec<_>>()
+    );
+    data.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n").as_bytes());
+    data.extend(serde_json::to_vec(&payload)?);
+    data.extend(b"\r\n");
+    for (index, (artifact, bytes)) in files.iter().enumerate() {
+        let filename = artifact["filename"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+            .ok_or("upload filename unavailable")?;
+        let filename = filename.replace('\\', "\\\\").replace('"', "\\\"");
+        let mime = artifact["mime"]
+            .as_str()
+            .filter(|s| s.len() <= 128 && !s.chars().any(char::is_control))
+            .ok_or("upload MIME unavailable")?;
+        data.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"files[{index}]\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n").as_bytes());
+        data.extend(bytes);
+        data.extend(b"\r\n");
+    }
+    data.extend(format!("--{boundary}--\r\n").as_bytes());
+    Ok((format!("multipart/form-data; boundary={boundary}"), data))
+}
+
+fn cache_channel(discord: &mut Discord, value: &Value) {
+    if let Some(id) = value["id"].as_str() {
+        if discord.channels.len() >= 512 {
+            discord.channels.clear();
+        }
+        discord.channels.insert(id.into(),json!({"space":value["guild_id"],"parent":value["parent_id"],"direct":matches!(value["type"].as_u64(),Some(1|3)),"author":if value["type"]==1 {value["recipients"].as_array().and_then(|a|a.first()).cloned().unwrap_or(Value::Null)}else{Value::Null}}));
+    }
 }

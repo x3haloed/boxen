@@ -1,4 +1,4 @@
-# Messaging connectors: first slice
+# Messaging connectors
 
 Boxen mail is the bundled `boxen` connector. External services use the same
 resident intake and explicit-send contract through **configured connector
@@ -45,9 +45,7 @@ contains bounded, non-secret provider configuration. Agent discovery omits both
 settings and credential references. File paths refer to the **runner's** machine;
 instance mobility and credential distribution are not implemented.
 
-Instances and their bindings are immutable after creation in this slice, apart
-from revision-checked enable/pause. Changing accounts or grants uses a new instance
-ID, preserving the meaning of historical addresses and receipts.
+Instance identities, accounts and initial bindings remain immutable. Revision-checked operator updates can change enablement, policy and Gateway mode; resident attention changes independently. Historical addresses and receipts retain their original meaning.
 
 ## Common API
 
@@ -110,8 +108,7 @@ or the external service outcome. `status` reads one authorized message by ID.
 
 Capabilities are explicit: `send`, `receive`, `replies`, `subjects`,
 `native_metadata`. Unsupported sending/reply/header operations are rejected.
-Rendered/downloaded attachments, edits, deletions, reactions, native discovery and
-other service-specific operations remain outside this first common interface.
+Declared connector operations extend this interface through `call`, retaining requests, claims and bounded results in the same correspondence journal. Discord supplies `read_context`, `react` and `send_files`. Native edits/deletes, rich components and creating DMs by user lookup remain outside this slice.
 
 ## Configure an instance
 
@@ -159,7 +156,7 @@ an inference-runtime fork or a daemon provider registration. It uses:
 | `ingest` | Takes `instance`, `conversation`, prior `after` cursor (null initially), next `cursor`, and a native `messages` batch. Durable fanout precedes checkpoint acceptance. |
 | `outbox` | Returns bounded queued messages addressed to the instance. |
 | `claim` | Takes `instance`, message `id`, and fresh `claim_id`; retains uncertainty before returning `claimed:true` and the accepted message/native reply reference. A repeated claim returns `claimed:false`. |
-| `complete` | Takes `instance`, message `id`, `claim_id`, outcome `status`, and optional `external_id` and bounded `reason`. Accepted service outcomes require an external message ID. |
+| `complete` | Takes `instance`, message `id`, `claim_id`, outcome `status`, and optional `external_id` and bounded `reason`. Accepted service outcomes require an external message ID or a bounded `result` for a query. |
 | `health` | Reports `state` and optional unavailable `channels`. Discovery shows last report/time and explicit staleness. Health changes produce structured diagnostics, not repeated agent input. |
 
 An intake batch contains at most 32 messages and 192 KiB of prepared JSON. Each
@@ -237,7 +234,7 @@ cycle for diagnostics/tests. It reads its own private bot-token file, verifies t
 bot account, and rechecks changed credentials. Unix credential permissions are
 owner-only. Tokens never appear in process arguments, routing records or logs.
 
-This first runner polls configured channel histories every two seconds, honors
+The default runner polls configured channel histories every two seconds, honors
 Discord's response rate-limit headers and retry durations, and sends text/native
 replies. It starts at the current tail, explicitly recording `from_now` rather
 than presenting old channel history as new arrivals. Catch-up traverses up to
@@ -260,18 +257,92 @@ correspondence receipt retains a durable claim before each part and its service
 outcome afterward. Overall acceptance requires all parts accepted. Partial
 failure retains accepted IDs and an explicit `partial_delivery` outcome; a crash
 leaves any claimed part uncertain. Neither a partial send nor an unknown effect
-is automatically replayed, and later new messages remain available. Empty bodies
-remain rejected. Historical rejected messages are not automatically resubmitted. Discord's
+is automatically replayed, and later new messages remain available. Empty text-only bodies remain rejected; file posts can be attachment-only. Historical rejected messages are not automatically resubmitted. Discord's
 nonce facility supplements duplicate protection but is not treated as durable,
-unbounded idempotency. Gateway push, native edits/deletes, posting files, rich
-components, DMs initiated by user lookup, and other Discord operations are not
-implemented. The runner uses Discord's official HTTPS API; `--api-base` permits
+unbounded idempotency. Native edits/deletes, rich components, and DMs initiated by user lookup remain unimplemented. The runner uses Discord's official HTTPS API; `--api-base` permits
 only an explicit loopback fixture alternative and redirects are disabled.
 
 Registration does not launch a process. The runner remains independent of resident
 and GUI lifetimes; an operator can run it under a service manager. Pause is hot;
 a running foreground runner waits for reenable. Addon supervision is a later
 slice rather than a hidden daemon dependency.
+
+
+## Permission and attention
+
+Permission is operator-controlled; attention belongs to each resident. Intake
+requires both. Existing bindings seed exact-channel `read`, `receive`, and `send`
+grants plus watched interests, preserving existing installations. Everything else
+is denied by default. Explicit deny overrides allow. Broad grants alone do not
+select ordinary room traffic; watching a room alone cannot authorize it.
+
+`configure_policy` takes `instance`, `expected_revision` and `policy.grants`.
+Each grant has `resident`, `scope`, `actions`, optional `effect` (`allow`/`deny`),
+and `accept_bots` (false by default). Scopes are `conversation`, `space` (guild),
+`parent`, `user`, `direct`, or `all`; the first four include `id`. Actions are
+`read`, `receive`, `send`, `react`, `files`, and `presence`. Broad receiving plus
+DM/mention/reply attention approximates Watch; watching `all` selects all permitted
+traffic. Self-account posts are always excluded.
+
+Resident `boxen_messages` actions `permissions` and `attention` expose their own
+configuration. `watch`, `unwatch`, `mute`, `unmute` take a scope and expected
+revision; `update_attention` replaces the attention object (`direct_messages`,
+`mentions`, `replies`, `reactions`, `watched`, `muted`). Mutes override interest.
+Changing permission does not erase interests. Queue authorization is provisional
+when native scope is unknown; dispatch rechecks current grants against trusted
+runner metadata. Revoked queued operations are rejected without an external effect. Unavailable
+native scope ends the affected queued operation before any service effect, so
+failed conversations cannot permanently fill the dispatch window. Gateway input
+without required scope metadata is skipped with an explicit gap, not accepted
+under a guessed permission.
+
+## Native operations
+
+`boxen_messages` action `call` takes `id`, `to`, `operation`, `arguments` and
+optional `wait_ms` (default 5000, maximum 20000). The result can be pending;
+`status` retrieves the eventual receipt. Action calls share existing outgoing
+attempt budgets; queries do not send correspondence. Generic addons can declare
+bounded query/action descriptors in their immutable definition's `tools` array.
+
+Discord `read_context` returns chronological windows (latest, `message_id`
+centered, `before_id` or `after_id`), at most 50 per directional page and bounded
+to 60 KiB total, with continuation IDs and original authors. Reading never changes
+attention. `react` takes `message_id` and Unicode/custom `emoji`.
+
+`send_files` accepts `paths` (1–10 local paths or HTTP(S) URLs) and optional `body`.
+Bytes are snapshotted on the executing host before acceptance: 2 MiB/file,
+16 MiB/run and batch. URL fetching has a 15-second deadline, forwards no connector
+credentials and does not follow redirects. The runner fetches integrity-checked
+artifact chunks through the authenticated API; local paths need not exist on its
+host. Files accompany the first split post. Exact retries use the retained request
+without rereading sources. Interrupted effects remain unknown, never automatically
+replayed. Attachment metadata received from Discord remains a remote reference,
+not retained incoming bytes or proof of model perception.
+
+## Optional Gateway transport
+
+`configure_gateway` with `enabled: true`, `instance`, and `expected_revision`
+switches intake from polling to Discord Gateway. The portable runner owns a
+bounded native WebSocket connection, heartbeats and reconnects. Accepted session
+sequence belongs to the existing correspondence journal. Resume replays only
+unaccepted events; an invalid session records an explicit gap before fresh
+identification. `attention` exposes sequence/gap metadata. No historical messages
+are fabricated to conceal an unavailable resume. Bot message-content access and
+appropriate native permissions remain necessary. Sharding is not implemented.
+
+Reactions on the configured account's posts become bounded passive observation
+streams, privately addressed to the associated resident thread. They do not add
+mail or wake the resident. The ordinary observation tools expose them; expiry,
+loss and retention remain under the existing observation authority. Other
+residents cannot subscribe to these private sources.
+
+Presence is invisible unless policy grants `presence` with `scope: {"kind":"all"}`;
+presence belongs to the account rather than one channel. One resident can show
+ready/queued/busy; shared-account activity is aggregated rather than impersonating
+one resident. Updates are rate-bounded. Configuration rejects concurrent enabled
+Gateway instances for the same account on one host; cross-host account ownership
+is still an operator responsibility. Registration does not enable Gateway,
+broaden existing grants, launch a runner, or move an existing runner.
 
 ## Verification
 
@@ -284,7 +355,7 @@ python3 scripts/test-linux.py
 ```
 
 The controlled suite uses real paired daemons, native resident dynamic tools,
-and two authenticated bot accounts against a controlled Discord HTTP server. It
+and authenticated bot accounts against controlled Discord HTTP and WebSocket servers. It
 checks equal native channel/message IDs across isolated instances, explicit bot
 sharing, original native authors, generic Boxen mail, a credential-free custom
 provider, separator-safe opaque IDs, selective/no-send behavior, subject-free
@@ -302,3 +373,13 @@ and preserves journals under ignored `work/`; existing residents are untouched.
 The first live run completed two real Codex activations with a greeting and linked
 Discord reply; incoming human author identity was retained and private narration
 created no automatic message. No live Discord credentials enter the Linux rotation.
+
+The opt-in `scripts/messaging-live.py --gateway --service-only` mode checks real
+Gateway readiness/resume, native history, an explicit reaction and a retained file
+post using an isolated temporary resident and explicitly supplied bot/channel.
+It does not claim human incoming-message evidence; the ordinary live mode waits
+for that separate interaction. Tokens remain in private files. Controlled Gateway
+checks include root-path upgrade validation, restrictive policy, directed versus
+ordinary input, durable restart, invalid sessions, passive reaction audience and
+idle CPU. Live evidence is recorded under ignored `work/` rather than public
+routing IDs or personal deployment notes.

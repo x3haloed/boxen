@@ -46,6 +46,8 @@ pub struct Definition {
     #[serde(default)]
     pub settings: Value,
     pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<crate::message_service::Tool>,
     pub bindings: Vec<Binding>,
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -55,6 +57,73 @@ pub struct Instance {
     pub owner: String,
     pub revision: u64,
     pub definition: Definition,
+    #[serde(default)]
+    pub policy: Option<crate::message_policy::Policy>,
+    #[serde(default)]
+    pub gateway: bool,
+    #[serde(default)]
+    pub attention: HashMap<String, crate::message_policy::Attention>,
+}
+impl Instance {
+    pub fn policy(&self) -> crate::message_policy::Policy {
+        self.policy
+            .clone()
+            .unwrap_or_else(|| crate::message_policy::Policy {
+                grants: self
+                    .definition
+                    .bindings
+                    .iter()
+                    .map(|b| crate::message_policy::Grant {
+                        resident: b.resident.clone(),
+                        scope: crate::message_policy::Scope {
+                            kind: "conversation".into(),
+                            id: Some(b.conversation.clone()),
+                        },
+                        actions: [
+                            ("receive", b.receive),
+                            ("read", b.receive),
+                            ("send", b.send),
+                        ]
+                        .into_iter()
+                        .filter(|(_, enabled)| *enabled)
+                        .map(|(a, _)| a.into())
+                        .collect(),
+                        effect: "allow".into(),
+                        accept_bots: b.accept_bots,
+                    })
+                    .collect(),
+            })
+    }
+    pub fn residents(&self) -> Vec<String> {
+        let mut residents: Vec<_> = self
+            .definition
+            .bindings
+            .iter()
+            .map(|b| b.resident.clone())
+            .chain(self.policy().grants.into_iter().map(|g| g.resident))
+            .collect();
+        residents.sort();
+        residents.dedup();
+        residents
+    }
+    pub fn attention(&self, resident: &str) -> crate::message_policy::Attention {
+        self.attention
+            .get(resident)
+            .cloned()
+            .unwrap_or_else(|| crate::message_policy::Attention {
+                watched: self
+                    .definition
+                    .bindings
+                    .iter()
+                    .filter(|b| b.receive && b.resident == resident)
+                    .map(|b| crate::message_policy::Scope {
+                        kind: "conversation".into(),
+                        id: Some(b.conversation.clone()),
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+    }
 }
 pub struct Connectors {
     directory: PathBuf,
@@ -111,6 +180,13 @@ impl Connectors {
                 let i: Instance = serde_json::from_slice(&bytes)?;
                 state::key(&i.owner)?;
                 validate(&i.definition)?;
+                if let Some(p) = &i.policy {
+                    p.validate()?;
+                }
+                for (id, a) in &i.attention {
+                    jobs::valid_id(id)?;
+                    a.validate()?;
+                }
                 if path.file_stem().and_then(|s| s.to_str()) != Some(&i.definition.id) {
                     return Err("connector filename and id differ".into());
                 }
@@ -170,16 +246,21 @@ impl Connectors {
         let list = channels
             .as_array()
             .ok_or("health channels are an array of configured conversation ids")?;
-        if list.len() > 32
+        if list.len() > 64
             || list.iter().any(|c| {
-                !instance
-                    .definition
-                    .bindings
-                    .iter()
-                    .any(|b| json!(b.conversation) == *c)
+                c.as_str().is_none_or(|id| {
+                    opaque(id, 256).is_err()
+                        || !(instance.gateway && matches!(id, "_gateway" | "_gateway_intake")
+                            || instance
+                                .residents()
+                                .iter()
+                                .any(|r| instance.policy().potential(r, "receive", id)))
+                })
             })
         {
-            return Err("health channels address only configured conversations".into());
+            return Err(
+                "health channels address bounded permitted conversations or Gateway health".into(),
+            );
         }
         let value =
             json!({"state":status,"last_seen":jobs::now(),"unavailable_conversations":channels});
@@ -205,9 +286,7 @@ impl Connectors {
             .unwrap()
             .values()
             .filter(|i| {
-                i.owner == owner
-                    && resident
-                        .is_none_or(|r| i.definition.bindings.iter().any(|b| b.resident == r))
+                i.owner == owner && resident.is_none_or(|r| i.residents().iter().any(|id| id == r))
             })
             .cloned()
             .collect()
@@ -248,6 +327,9 @@ impl Connectors {
             owner: owner.into(),
             revision: 1,
             definition,
+            policy: None,
+            gateway: false,
+            attention: HashMap::new(),
         };
         state::publish_new(
             &self
@@ -266,6 +348,19 @@ impl Connectors {
         Ok(instance)
     }
     pub fn enabled(&self, owner: &str, id: &str, revision: u64, enabled: bool) -> Result<Instance> {
+        self.configure(owner, id, revision, Some(enabled), None, None, None)
+    }
+    #[allow(clippy::too_many_arguments)] // One revision-checked atomic configuration transition.
+    fn configure(
+        &self,
+        owner: &str,
+        id: &str,
+        revision: u64,
+        enabled: Option<bool>,
+        policy: Option<crate::message_policy::Policy>,
+        attention: Option<(String, crate::message_policy::Attention)>,
+        gateway: Option<bool>,
+    ) -> Result<Instance> {
         let _transition = self.intake.lock().unwrap();
         let mut inner = self.inner.lock().unwrap();
         let prior = inner
@@ -279,11 +374,41 @@ impl Connectors {
         }
         let mut next = prior.clone();
         next.revision += 1;
-        next.definition.enabled = enabled;
+        if let Some(gateway) = gateway {
+            next.gateway = gateway;
+        }
+        if let Some(enabled) = enabled {
+            next.definition.enabled = enabled;
+        }
+        if let Some(policy) = policy {
+            next.policy = Some(policy);
+        }
+        if let Some((resident, attention)) = attention {
+            if next.attention.len() >= 64 && !next.attention.contains_key(&resident) {
+                return Err("instance attention contains at most 64 residents".into());
+            }
+            next.attention.insert(resident, attention);
+        }
+        if controls_presence(&next)
+            && inner.values().any(|i| {
+                i.definition.id != id
+                    && i.definition.account == next.definition.account
+                    && i.definition.provider == next.definition.provider
+                    && controls_presence(i)
+            })
+        {
+            return Err(
+                "another enabled instance on this host controls this account's presence".into(),
+            );
+        }
         let temporary = self
             .directory
             .join(format!("{id}.pending-{}", state::random_hex()?));
-        state::write_new(&temporary, &serde_json::to_vec(&next)?)?;
+        let bytes = serde_json::to_vec(&next)?;
+        if bytes.len() > 32 * 1024 {
+            return Err("connector configuration exceeds 32 KiB".into());
+        }
+        state::write_new(&temporary, &bytes)?;
         fs::rename(&temporary, self.directory.join(format!("{id}.json")))?;
         inner.insert(id.into(), next.clone());
         drop(inner);
@@ -297,6 +422,23 @@ impl Connectors {
     }
 }
 fn validate(d: &Definition) -> Result<()> {
+    if d.tools.len() > 16 {
+        return Err("instances declare at most 16 service operations".into());
+    }
+    for tool in &d.tools {
+        opaque(&tool.name, 64)?;
+        opaque(&tool.description, 4096)?;
+        if !matches!(tool.kind.as_str(), "query" | "action")
+            || !matches!(
+                tool.permission.as_str(),
+                "read" | "send" | "react" | "files" | "presence"
+            )
+        {
+            return Err(
+                "declared operations have query/action kind and an explicit permission".into(),
+            );
+        }
+    }
     jobs::valid_id(&d.id)?;
     opaque(&d.name, 100)?;
     opaque(&d.provider, 64)?;
@@ -392,7 +534,24 @@ fn project_address(a: &Address) -> Value {
     }
 }
 fn project(jobs: &Jobs, m: &Message) -> Value {
-    json!({"id":m.id,"from":project_address(&m.sender),"to":project_address(&m.to),"subject":if m.subject.is_empty(){Value::Null}else{json!(m.subject)},"body":m.body,"reply_to":project_address(&m.reply_to),"in_reply_to":m.in_reply_to,"origin":m.origin,"accepted_at":m.accepted_at,"seq":m.seq,"delivery":jobs.mailboxes.receipt(&m.id).unwrap_or_else(||json!({"status":if matches!(m.to,Address::Connector{..}){"queued"}else{"accepted"},"accepted_on":m.accepted_on}))})
+    json!({"id":m.id,"from":project_address(&m.sender),"to":project_address(&m.to),"subject":if m.subject.is_empty(){Value::Null}else{json!(m.subject)},"body":m.body,"service":m.service,"reply_to":project_address(&m.reply_to),"in_reply_to":m.in_reply_to,"origin":m.origin,"accepted_at":m.accepted_at,"seq":m.seq,"delivery":jobs.mailboxes.receipt(&m.id).unwrap_or_else(||json!({"status":if matches!(m.to,Address::Connector{..}){"queued"}else{"accepted"},"accepted_on":m.accepted_on}))})
+}
+pub fn authorize_action(
+    jobs: &Jobs,
+    owner: &str,
+    resident: &str,
+    instance: &str,
+    conversation: &str,
+    action: &str,
+) -> Result<Instance> {
+    let i = jobs.connectors.get(owner, instance)?;
+    if !i.definition.enabled {
+        return Err("connector instance is disabled; pending correspondence is retained".into());
+    }
+    if !i.policy().potential(resident, action, conversation) {
+        return Err("connector conversation has no matching resident binding or policy grant for this operation".into());
+    }
+    Ok(i)
 }
 pub fn authorize(
     jobs: &Jobs,
@@ -414,19 +573,17 @@ pub fn authorize(
     if !i.definition.enabled {
         return Err("connector instance is disabled; pending correspondence is retained".into());
     }
-    if !i.definition.bindings.iter().any(|b| {
-        b.resident == resident
-            && b.conversation == conversation
-            && if send { b.send } else { b.receive }
-    }) {
-        return Err(
-            "connector conversation has no matching resident binding for this operation".into(),
-        );
+    if !i.policy().potential(
+        resident,
+        if send { "send" } else { "receive" },
+        conversation,
+    ) {
+        return Err("connector conversation has no matching resident binding or policy grant for this operation".into());
     }
     Ok(i)
 }
 pub fn operation(
-    jobs: &Jobs,
+    jobs: &std::sync::Arc<Jobs>,
     owner: &str,
     resident: Option<&str>,
     args: Value,
@@ -436,12 +593,109 @@ pub fn operation(
     let id = args["instance"].as_str().unwrap_or("");
     let result = (|| -> Result<Value> {
         match action {
+            "call" => {
+                let r = resident
+                    .or_else(|| args["resident"].as_str())
+                    .ok_or("connector calls have a resident")?;
+                jobs.residents.get(owner, r)?;
+                let instance = args["to"]["instance"]
+                    .as_str()
+                    .ok_or("destination instance required")?;
+                let conversation = args["to"]["conversation"]
+                    .as_str()
+                    .ok_or("destination conversation required")?;
+                let connector = jobs.connectors.get(owner, instance)?;
+                let name = args["operation"].as_str().ok_or("operation required")?;
+                let tool = crate::message_service::declared(&connector, name)?;
+                authorize_action(jobs, owner, r, instance, conversation, &tool.permission)?;
+                let arguments = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                if !arguments.is_object() {
+                    return Err("connector arguments are an object".into());
+                }
+                let message_id = args["id"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| jobs.mailboxes.source_id(&source))
+                    .unwrap_or(state::random_hex()?);
+                let mut service = json!({"operation":name,"arguments":arguments});
+                if let Some(paths) = args.get("_source_paths") {
+                    service["source_paths"] = paths.clone();
+                }
+                let message = jobs.send_mail(
+                    owner,
+                    Address::Resident { id: r.into() },
+                    Send {
+                        service: Some(service),
+                        id: message_id,
+                        to: address(instance, conversation)?,
+                        subject: String::new(),
+                        body: String::new(),
+                        reply_to: None,
+                        in_reply_to: None,
+                    },
+                    source,
+                )?;
+                Ok(project(jobs, &message))
+            }
+            "permissions" | "attention" | "watch" | "unwatch" | "mute" | "unmute"
+            | "update_attention" => {
+                let target = resident
+                    .or_else(|| args["resident"].as_str())
+                    .ok_or("resident required")?;
+                jobs.residents.get(owner, target)?;
+                let i = jobs.connectors.get(owner, id)?;
+                if !i.residents().iter().any(|r| r == target) {
+                    return Err("resident is not associated with this connector".into());
+                }
+                let policy = i.policy();
+                if action == "permissions" {
+                    return Ok(
+                        json!({"revision":i.revision,"grants":policy.grants.into_iter().filter(|g|g.resident==target).collect::<Vec<_>>()}),
+                    );
+                }
+                let mut attention = i.attention(target);
+                if action == "attention" {
+                    let stream = gateway_session(jobs, owner, id)?;
+                    return Ok(
+                        json!({"revision":i.revision,"attention":attention,"transport":if i.gateway {"gateway"}else{"polling"},"health":jobs.connectors.health(id),"native_stream":{"sequence":stream.sequence,"gaps":stream.gaps,"last_gap":stream.last_gap}}),
+                    );
+                }
+                if action == "update_attention" {
+                    attention = serde_json::from_value(args["attention"].clone())?;
+                } else {
+                    let scope: crate::message_policy::Scope =
+                        serde_json::from_value(args["scope"].clone())?;
+                    scope.validate()?;
+                    let list = if matches!(action, "watch" | "unwatch") {
+                        &mut attention.watched
+                    } else {
+                        &mut attention.muted
+                    };
+                    list.retain(|s| s != &scope);
+                    if matches!(action, "watch" | "mute") {
+                        list.push(scope);
+                    }
+                }
+                attention.validate()?;
+                let next = jobs.connectors.configure(
+                    owner,
+                    id,
+                    args["expected_revision"]
+                        .as_u64()
+                        .ok_or("expected_revision required")?,
+                    None,
+                    None,
+                    Some((target.into(), attention)),
+                    None,
+                )?;
+                Ok(json!({"revision":next.revision,"attention":next.attention(target)}))
+            }
             "list" => {
                 let mut instances = vec![
                     json!({"id":"boxen","provider":"boxen","capabilities":["receive","send","replies","subjects"],"account":owner}),
                 ];
                 for i in jobs.connectors.list(owner, resident) {
-                    instances.push(json!({"id":i.definition.id,"name":i.definition.name,"provider":i.definition.provider,"account":i.definition.account,"enabled":i.definition.enabled,"health":jobs.connectors.health(&i.definition.id),"bindings":i.definition.bindings.iter().filter(|b|resident.is_none_or(|r|b.resident==r)).collect::<Vec<_>>(),"capabilities":i.definition.capabilities}));
+                    instances.push(json!({"id":i.definition.id,"name":i.definition.name,"provider":i.definition.provider,"account":i.definition.account,"enabled":i.definition.enabled,"health":jobs.connectors.health(&i.definition.id),"bindings":i.definition.bindings.iter().filter(|b|resident.is_none_or(|r|b.resident==r)).collect::<Vec<_>>(),"capabilities":i.definition.capabilities,"tools":crate::message_service::tools(&i)}));
                 }
                 Ok(
                     json!({"instances":instances,"issues":if resident.is_none(){json!(jobs.connectors.issues)}else{json!([])}}),
@@ -506,6 +760,7 @@ pub fn operation(
                     .or_else(|| jobs.mailboxes.source_id(&source))
                     .unwrap_or(state::random_hex()?);
                 let spec = Send {
+                    service: None,
                     id: message_id,
                     to: target,
                     subject: args["subject"].as_str().unwrap_or("").into(),
@@ -532,6 +787,112 @@ pub fn operation(
                     return Err("connector configuration and native intake belong to the authenticated operator or connector runner".into());
                 }
                 match action {
+                    "configure_gateway" => Ok(serde_json::to_value(
+                        jobs.connectors.configure(
+                            owner,
+                            id,
+                            args["expected_revision"]
+                                .as_u64()
+                                .ok_or("expected_revision required")?,
+                            None,
+                            None,
+                            None,
+                            Some(args["enabled"].as_bool().ok_or("enabled required")?),
+                        )?,
+                    )?),
+                    "gateway_state" => {
+                        let i = jobs.connectors.get(owner, id)?;
+                        if i.definition.provider != "discord" {
+                            return Err("Gateway state belongs to Discord instances".into());
+                        }
+                        Ok(json!({"session":gateway_session(jobs,owner,id)?}))
+                    }
+                    "gateway_event" => gateway_event(jobs, owner, id, &args),
+                    "native_presence" => {
+                        let i = jobs.connectors.get(owner, id)?;
+                        let ids: Vec<_> = i
+                            .residents()
+                            .into_iter()
+                            .filter(|r| i.policy().permits(r, "presence", "", &Value::Null))
+                            .collect();
+                        if !i.definition.enabled || ids.is_empty() {
+                            return Ok(
+                                json!({"since":null,"activities":[],"status":"invisible","afk":false}),
+                            );
+                        }
+                        let (active, queued) = jobs.resident_activity(owner, &ids);
+                        let state = if active > 0 {
+                            "busy"
+                        } else if queued > 0 {
+                            "queued"
+                        } else {
+                            "ready"
+                        };
+                        let label = if ids.len() == 1 {
+                            format!("{}: {state}", jobs.residents.get(owner, &ids[0])?.name)
+                        } else {
+                            format!("{} residents, {active} active", ids.len())
+                        };
+                        Ok(
+                            json!({"since":null,"activities":[{"name":"Resident status","type":4,"state":label}],"status":if active>0 {"dnd"}else if queued>0{"idle"}else{"online"},"afk":false}),
+                        )
+                    }
+                    "attachment" => {
+                        use base64::Engine;
+                        jobs.connectors.get(owner, id)?;
+                        let message = jobs
+                            .mailboxes
+                            .get(owner, args["id"].as_str().ok_or("message id required")?)?;
+                        if !matches!(&message.to,Address::Connector{instance,..} if instance==id) {
+                            return Err("attachment belongs to another connector".into());
+                        }
+                        let index = args["index"]
+                            .as_u64()
+                            .filter(|i| *i < 10)
+                            .ok_or("attachment index is 0–9")?
+                            as usize;
+                        let artifact = message
+                            .service
+                            .as_ref()
+                            .and_then(|s| s["arguments"]["files"].get(index))
+                            .ok_or("retained attachment unavailable")?;
+                        jobs.get(
+                            owner,
+                            artifact["run"].as_str().ok_or("artifact run required")?,
+                        )?;
+                        let bytes = crate::media::upload_bytes(jobs.artifact_root(), artifact)?;
+                        let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+                        let limit =
+                            args["limit"].as_u64().unwrap_or(65536).clamp(1, 262144) as usize;
+                        if offset > bytes.len() {
+                            return Err("attachment offset exceeds retained file".into());
+                        }
+                        let end = (offset + limit).min(bytes.len());
+                        Ok(
+                            json!({"artifact":artifact,"offset":offset,"next_offset":end,"done":end==bytes.len(),"base64":base64::engine::general_purpose::STANDARD.encode(&bytes[offset..end])}),
+                        )
+                    }
+                    "configure_policy" => {
+                        let policy: crate::message_policy::Policy =
+                            serde_json::from_value(args["policy"].clone())?;
+                        policy.validate()?;
+                        for g in &policy.grants {
+                            jobs.residents.get(owner, &g.resident)?;
+                        }
+                        Ok(serde_json::to_value(
+                            jobs.connectors.configure(
+                                owner,
+                                id,
+                                args["expected_revision"]
+                                    .as_u64()
+                                    .ok_or("expected_revision required")?,
+                                None,
+                                Some(policy),
+                                None,
+                                None,
+                            )?,
+                        )?)
+                    }
                     "create" => {
                         let definition: Definition =
                             serde_json::from_value(args["definition"].clone())?;
@@ -565,14 +926,11 @@ pub fn operation(
                             .ok_or("conversation required")?;
                         let i = jobs.connectors.get(owner, id)?;
                         if !i
-                            .definition
-                            .bindings
+                            .residents()
                             .iter()
-                            .any(|b| b.conversation == conversation && b.receive)
+                            .any(|r| i.policy().potential(r, "receive", conversation))
                         {
-                            return Err(
-                                "conversation is outside this connector's receive bindings".into(),
-                            );
+                            return Err("conversation is outside this connector's receive bindings and policy".into());
                         }
                         Ok(
                             json!({"checkpoint":jobs.mailboxes.cursor(&format!("{owner}:{id}:{conversation}"))}),
@@ -602,7 +960,53 @@ pub fn operation(
                         let Address::Resident { id: r } = &m.sender else {
                             return Err("external sends have a bound resident sender".into());
                         };
-                        authorize(jobs, owner, r, id, conversation, true)?;
+                        let instance = jobs.connectors.get(owner, id)?;
+                        if !instance.definition.enabled {
+                            return Err("connector instance is disabled; pending correspondence is retained".into());
+                        }
+                        if !instance.policy().permits(
+                            r,
+                            &m.service
+                                .as_ref()
+                                .map(|s| {
+                                    crate::message_service::declared(
+                                        &instance,
+                                        s["operation"].as_str().unwrap_or(""),
+                                    )
+                                })
+                                .transpose()?
+                                .map(|t| t.permission)
+                                .unwrap_or_else(|| "send".into()),
+                            conversation,
+                            &args["native_context"],
+                        ) {
+                            let claim_id = args["claim_id"].as_str().ok_or("claim_id required")?;
+                            let claim = jobs.mailboxes.claim(owner, id, mid, claim_id)?;
+                            if claim["claimed"] != true {
+                                return Ok(claim);
+                            }
+                            let receipt = jobs.mailboxes.complete(
+                                owner,
+                                id,
+                                mid,
+                                claim_id,
+                                crate::mailbox::DeliveryOutcome {
+                                    result: None,
+                                    status: "rejected",
+                                    external_id: None,
+                                    reason: Some("policy_denied"),
+                                },
+                            )?;
+                            event(
+                                owner,
+                                id,
+                                "messaging.dispatch_policy_denied",
+                                || json!({"message_id":mid,"resident_id":r,"conversation":conversation}),
+                            );
+                            return Ok(
+                                json!({"claimed":false,"receipt":receipt,"policy_denied":true}),
+                            );
+                        }
                         let native_reply = if let Some(reply) = &m.in_reply_to {
                             if !jobs
                                 .connectors
@@ -653,6 +1057,7 @@ pub fn operation(
                                 .filter(|n| *n <= 32)
                                 .ok_or("part total is 1–32")? as usize,
                             crate::mailbox::DeliveryOutcome {
+                                result: None,
                                 status: args["status"].as_str().ok_or("status required")?,
                                 external_id: args["external_id"].as_str(),
                                 reason: args["reason"].as_str(),
@@ -667,6 +1072,7 @@ pub fn operation(
                             args["id"].as_str().ok_or("message id required")?,
                             args["claim_id"].as_str().ok_or("claim_id required")?,
                             crate::mailbox::DeliveryOutcome {
+                                result: args.get("result"),
                                 status: args["status"].as_str().ok_or("status required")?,
                                 external_id: args["external_id"].as_str(),
                                 reason: args["reason"].as_str(),
@@ -714,6 +1120,9 @@ pub fn bounded_native(value: &Value) -> Value {
 
 fn ingest(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Value> {
     let _transition = jobs.connectors.intake.lock().unwrap();
+    ingest_locked(jobs, owner, id, args)
+}
+fn ingest_locked(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Value> {
     let i = jobs.connectors.get(owner, id)?;
     if !i.definition.enabled {
         return Err("connector instance is disabled".into());
@@ -725,14 +1134,14 @@ fn ingest(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Value> {
         .as_str()
         .ok_or("conversation required")?;
     opaque(conversation, 256)?;
-    let bindings: Vec<_> = i
-        .definition
-        .bindings
-        .iter()
-        .filter(|b| b.conversation == conversation && b.receive)
+    let policy = i.policy();
+    let recipients: Vec<_> = i
+        .residents()
+        .into_iter()
+        .filter(|r| policy.potential(r, "receive", conversation))
         .collect();
-    if bindings.is_empty() {
-        return Err("conversation is outside this connector's receive bindings".into());
+    if recipients.is_empty() {
+        return Err("conversation is outside this connector's receive bindings and policy".into());
     }
     let messages = args["messages"]
         .as_array()
@@ -742,7 +1151,7 @@ fn ingest(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Value> {
     }
     let cursor = args["cursor"].as_str().ok_or("cursor required")?;
     opaque(cursor, 256)?;
-    let key = format!("{owner}:{id}:{conversation}");
+    let key = cursor_key(owner, id, conversation, args["stream"].as_str());
     let digest = state::hex(&Sha256::digest(serde_json::to_vec(args)?));
     let prior = jobs.mailboxes.cursor(&key);
     if prior.as_ref().is_some_and(|p| p["cursor"] == cursor) {
@@ -791,18 +1200,24 @@ fn ingest(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Value> {
         if serde_json::to_vec(&origin)?.len() > 32 * 1024 {
             return Err("native message metadata exceeds 32 KiB".into());
         }
-        for b in &bindings {
-            if native["author"]["bot"] == true && !b.accept_bots {
+        for recipient in &recipients {
+            if i.definition.provider == "discord" && native["author"]["id"] == i.definition.account
+            {
                 continue;
             }
-            jobs.residents.get(owner, &b.resident)?;
+            if !policy.permits(recipient, "receive", conversation, native)
+                || !i.attention(recipient).interested(conversation, native)
+            {
+                continue;
+            }
+            jobs.residents.get(owner, recipient)?;
             let mid = state::hex(&Sha256::digest(serde_json::to_vec(&json!([
                 "connector-message-v1",
                 owner,
                 id,
                 conversation,
                 native_id,
-                b.resident
+                recipient
             ]))?));
             let source = format!("connector:{mid}");
             jobs.mailboxes.accept(
@@ -812,9 +1227,10 @@ fn ingest(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Value> {
                     conversation: conversation.into(),
                 },
                 Send {
+                    service: None,
                     id: mid,
                     to: Address::Resident {
-                        id: b.resident.clone(),
+                        id: recipient.clone(),
                     },
                     subject: native["subject"].as_str().unwrap_or("").into(),
                     body: body.into(),
@@ -839,4 +1255,246 @@ fn ingest(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Value> {
         || json!({"conversation":conversation,"native_messages":messages.len(),"deliveries":accepted,"cursor":cursor}),
     );
     Ok(json!({"accepted":true,"cursor":cursor,"deliveries":accepted}))
+}
+
+fn cursor_key(owner: &str, id: &str, conversation: &str, stream: Option<&str>) -> String {
+    match stream {
+        Some(stream) => state::hex(&Sha256::digest(
+            serde_json::to_vec(&json!([
+                "native-stream-v1",
+                owner,
+                id,
+                conversation,
+                stream
+            ]))
+            .unwrap(),
+        )),
+        None => format!("{owner}:{id}:{conversation}"),
+    }
+}
+fn gateway_session(
+    jobs: &Jobs,
+    owner: &str,
+    id: &str,
+) -> Result<crate::discord_connector::gateway::Session> {
+    let key = format!("gateway:{owner}:{id}");
+    match jobs
+        .mailboxes
+        .cursor(&key)
+        .and_then(|v| v["cursor"].as_str().map(str::to_owned))
+    {
+        Some(s) => Ok(serde_json::from_str(&s)?),
+        None => Ok(Default::default()),
+    }
+}
+fn gateway_event(
+    jobs: &std::sync::Arc<Jobs>,
+    owner: &str,
+    id: &str,
+    args: &Value,
+) -> Result<Value> {
+    let _guard = jobs.connectors.intake.lock().unwrap();
+    let instance = jobs.connectors.get(owner, id)?;
+    if instance.definition.provider != "discord"
+        || !instance.definition.enabled
+        || !instance.gateway
+    {
+        return Err(
+            "native Gateway intake is enabled only for configured Discord instances".into(),
+        );
+    }
+    let mut state = gateway_session(jobs, owner, id)?;
+    let event = &args["event"];
+    let kind = event["type"]
+        .as_str()
+        .ok_or("Gateway event type required")?;
+    if serde_json::to_vec(event)?.len() > 192 * 1024 {
+        return Err("Gateway event exceeds 192 KiB".into());
+    }
+    if kind == "INVALID_SESSION" {
+        state.session_id = None;
+        state.resume_url = None;
+        state.sequence = 0;
+        state.gaps += 1;
+        state.last_gap = Some("resume_unavailable".into());
+    } else {
+        let seq = event["sequence"]
+            .as_u64()
+            .ok_or("Gateway sequence required")?;
+        let session = event["session_id"]
+            .as_str()
+            .ok_or("Gateway session required")?;
+        opaque(session, 256)?;
+        if state.session_id.as_deref() == Some(session) && seq <= state.sequence {
+            return Ok(json!({"session":state,"duplicate":true}));
+        }
+        if state.session_id.as_deref() == Some(session) && seq > state.sequence.saturating_add(1) {
+            state.gaps += 1;
+            state.last_gap = Some("native_sequence_gap".into());
+        }
+        let data = &event["data"];
+        if kind == "READY" {
+            if data["user"]["id"] != instance.definition.account {
+                return Err("Gateway identity differs from the connector account".into());
+            }
+            let url = data["resume_gateway_url"]
+                .as_str()
+                .ok_or("resume URL required")?;
+            crate::discord_connector::gateway::validate_url(url)?;
+            if state.session_id.is_some() && state.session_id.as_deref() != Some(session) {
+                state.gaps += 1;
+            }
+            state.session_id = Some(session.into());
+            state.resume_url = Some(url.into());
+        } else if state.session_id.as_deref() != Some(session) {
+            return Err("Gateway event is outside its retained session".into());
+        }
+        if kind == "MESSAGE_REACTION_ADD"
+            && args["native_context"]["unavailable"] != true
+            && publish_reaction(
+                jobs,
+                owner,
+                &instance,
+                session,
+                seq,
+                data,
+                &args["native_context"],
+            )
+            .is_err()
+        {
+            state.gaps += 1;
+            state.last_gap = Some("reaction_retention_unavailable".into());
+        }
+        if args["native_context"]["unavailable"] == true {
+            state.gaps += 1;
+            state.last_gap = Some("native_scope_unavailable".into());
+        }
+        if kind == "MESSAGE_CREATE" && args["native_context"]["unavailable"] != true {
+            let conversation = data["channel_id"]
+                .as_str()
+                .ok_or("native conversation required")?;
+            let policy = instance.policy();
+            if instance
+                .residents()
+                .iter()
+                .any(|r| policy.potential(r, "receive", conversation))
+            {
+                let context = &args["native_context"];
+                let mut native = data.clone();
+                native["space"] = data
+                    .get("guild_id")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .unwrap_or_else(|| context["space"].clone());
+                native["direct"] = json!(data["guild_id"].is_null() && context["space"].is_null());
+                native["parent"] = context["parent"].clone();
+                native["mention"] = json!(
+                    data["native"]["mentions"]
+                        .as_array()
+                        .is_some_and(|a| a.iter().any(|u| u["id"] == instance.definition.account))
+                );
+                native["reply"] = json!(
+                    data["native"]["referenced_message"]["author"]["id"]
+                        == instance.definition.account
+                );
+                let key = cursor_key(owner, id, conversation, Some(session));
+                let after = jobs
+                    .mailboxes
+                    .cursor(&key)
+                    .map(|v| v["cursor"].clone())
+                    .unwrap_or(Value::Null);
+                ingest_locked(
+                    jobs,
+                    owner,
+                    id,
+                    &json!({"conversation":conversation,"stream":session,"after":after,"cursor":seq.to_string(),"messages":[native]}),
+                )?;
+            }
+        }
+        state.sequence = seq;
+    }
+    let value = serde_json::to_string(&state)?;
+    jobs.mailboxes.checkpoint(
+        &format!("gateway:{owner}:{id}"),
+        &value,
+        &state::hex(&Sha256::digest(value.as_bytes())),
+    )?;
+    event_gateway_log(owner, id, kind, &state);
+    Ok(json!({"session":state}))
+}
+fn event_gateway_log(
+    owner: &str,
+    id: &str,
+    kind: &str,
+    state: &crate::discord_connector::gateway::Session,
+) {
+    event(
+        owner,
+        id,
+        "discord.gateway_accepted",
+        || json!({"event_type":kind,"sequence":state.sequence,"gaps":state.gaps}),
+    );
+}
+
+fn publish_reaction(
+    jobs: &std::sync::Arc<Jobs>,
+    owner: &str,
+    instance: &Instance,
+    session: &str,
+    seq: u64,
+    data: &Value,
+    context: &Value,
+) -> Result<()> {
+    if context["message_author_id"] != instance.definition.account
+        || data["user_id"] == instance.definition.account
+    {
+        return Ok(());
+    }
+    let conversation = data["channel_id"]
+        .as_str()
+        .ok_or("reaction conversation required")?;
+    let mut native = context.clone();
+    native["author"] = json!({"id":data["user_id"],"bot":data["member"]["user"]["bot"]});
+    let policy = instance.policy();
+    for resident in instance.residents() {
+        let attention = instance.attention(&resident);
+        if !attention.reactions
+            || attention
+                .muted
+                .iter()
+                .any(|s| s.matches(conversation, &native))
+            || !policy.permits(&resident, "receive", conversation, &native)
+        {
+            continue;
+        }
+        let r = jobs.residents.get(owner, &resident)?;
+        let id = state::hex(&Sha256::digest(serde_json::to_vec(&json!([
+            "discord-reactions-v1",
+            instance.definition.id,
+            resident
+        ]))?));
+        let source=jobs.event_operation(owner,json!({"action":"create_source","spec":{"id":id,"name":"Discord reactions","cwd":r.cwd,"audience":resident}}))?;
+        jobs.event_operation(owner,json!({"action":"subscribe","spec":{"id":state::hex(&Sha256::digest(format!("reaction-sub:{id}").as_bytes())),"source":id,"target":{"type":"resident","id":resident},"interval_ms":1000,"waking":false,"health_waking":false,"lifetime":"persistent"}}))?;
+        if source["cursor"]["session"] == session
+            && source["cursor"]["sequence"]
+                .as_u64()
+                .is_some_and(|n| n >= seq)
+        {
+            continue;
+        }
+        let observation = state::hex(&Sha256::digest(serde_json::to_vec(&json!([
+            session, seq, &id
+        ]))?));
+        jobs.observations.publish(owner,&id,source["generation"].as_u64().ok_or("reaction source generation unavailable")?,None,
+            json!({"protocol":"boxen-adapter-v1","cursor":{"session":session,"sequence":seq},"observations":[{"id":observation,"observed_at_ms":jobs::now(),"payload":{"source":"discord","instance":instance.definition.id,"account":instance.definition.account,"kind":"reaction","action":"add","conversation":conversation,"native_message_id":data["message_id"],"user_id":data["user_id"],"emoji":data["emoji"],"burst":data["burst"]}}]}))?;
+    }
+    Ok(())
+}
+
+fn controls_presence(i: &Instance) -> bool {
+    i.gateway
+        && i.definition.enabled
+        && i.residents()
+            .iter()
+            .any(|r| i.policy().permits(r, "presence", "", &Value::Null))
 }

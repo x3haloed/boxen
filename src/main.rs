@@ -14,6 +14,8 @@ mod jobs;
 mod logging;
 mod mailbox;
 mod media;
+mod message_policy;
+mod message_service;
 mod messaging;
 mod platform;
 mod protocol;

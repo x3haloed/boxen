@@ -999,6 +999,9 @@ impl Jobs {
         json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]})
     }
 
+    pub(crate) fn artifact_root(&self) -> &std::path::Path {
+        &self.directory
+    }
     pub fn machine_id(&self) -> &str {
         self.residents.machine_id()
     }
@@ -1310,8 +1313,25 @@ impl Jobs {
             let Address::Resident { id } = &sender else {
                 return Err("external sends have a bound resident sender".into());
             };
-            let connector =
-                crate::messaging::authorize(self, owner, id, instance, conversation, true)?;
+            let connector = if let Some(service) = &spec.service {
+                let connector = self.connectors.get(owner, instance)?;
+                let tool = crate::message_service::declared(
+                    &connector,
+                    service["operation"]
+                        .as_str()
+                        .ok_or("service operation required")?,
+                )?;
+                crate::messaging::authorize_action(
+                    self,
+                    owner,
+                    id,
+                    instance,
+                    conversation,
+                    &tool.permission,
+                )?
+            } else {
+                crate::messaging::authorize(self, owner, id, instance, conversation, true)?
+            };
             if !spec.subject.is_empty()
                 && !connector
                     .definition
@@ -1541,6 +1561,49 @@ impl Jobs {
         Ok(run)
     }
 
+    pub(crate) fn resident_activity(&self, owner: &str, ids: &[String]) -> (usize, usize) {
+        let runs = self.runs.lock().unwrap();
+        let mut active = std::collections::HashSet::new();
+        let mut queued = std::collections::HashSet::new();
+        let mut presented: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        for run in runs.values() {
+            let inner = run.inner.lock().unwrap();
+            let s = &inner.snapshot;
+            if s.record.owner != owner {
+                continue;
+            }
+            let Some(id) = s
+                .record
+                .spec
+                .resident_id
+                .as_ref()
+                .filter(|id| ids.contains(id))
+            else {
+                continue;
+            };
+            if s.status == "running" {
+                active.insert(id.clone());
+            } else if s.status == "starting" {
+                queued.insert(id.clone());
+            }
+            if let Some(batch) = &s.record.mailbox {
+                presented
+                    .entry(id.clone())
+                    .or_default()
+                    .extend(batch.message_ids.iter().cloned());
+            }
+        }
+        drop(runs);
+        for id in ids {
+            if self
+                .mailboxes
+                .has_pending(owner, id, presented.entry(id.clone()).or_default())
+            {
+                queued.insert(id.clone());
+            }
+        }
+        (active.len(), queued.len())
+    }
     pub fn list(&self, owner: &str) -> Vec<Snapshot> {
         let mut records: Vec<_> = self
             .runs

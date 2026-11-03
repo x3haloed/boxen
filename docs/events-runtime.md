@@ -268,3 +268,12 @@ Windows, other untested architectures, native stream-media attachment projection
 older Codex-session tool upgrades, and long-duration resident behavior remain
 unverified or planned as described above. No contact with or migration of existing residents or production
 subscription was part of verification.
+
+### Private source audiences
+
+Sources can carry an immutable optional `audience` thread ID. Subscription targets
+must match that audience; agent source lookup and listing enforce it too. Shared
+sources without an audience retain existing behavior. Trusted authenticated
+operators can still inspect retained source state. Discord's passive reaction
+feeds use this existing bounded observation authority, with resident-private
+sources and non-waking subscriptions rather than another inbox or error feed.

@@ -27,6 +27,8 @@ p.add_argument('--account',required=True)
 p.add_argument('--channel',required=True)
 p.add_argument('--codex',default='codex')
 p.add_argument('--model',default='')
+p.add_argument('--gateway',action='store_true',help='Use native Gateway intake and test resume')
+p.add_argument('--service-only',action='store_true',help='Check native history, reaction and retained upload without waiting for a human')
 p.add_argument('--wait-seconds',type=int,default=1200)
 args=p.parse_args()
 binary=args.binary.resolve();binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest();command=(['/bin/bash'] if binary.suffix=='.com' else [])+[str(binary)]
@@ -57,10 +59,14 @@ with tempfile.TemporaryDirectory(prefix='boxen-connector-live-') as temp:
         resident=api({'op':'resident_create','spec':{'id':secrets.token_hex(32),'backend':'codex','name':'Connector test (temporary)','cwd':temp,'model':args.model,'auto_activate':True,'identity':'This is a temporary resident for a human-requested messaging integration test. Assistant narration is private. External correspondence uses the declared messaging tools and connector bindings.'}})
         ident=secrets.token_hex(32)
         definition={'id':ident,'name':'Discord test bot','provider':'discord','account':args.account,'credential_file':str(args.key_file.resolve()),'capabilities':['send','receive','replies','native_metadata'],'bindings':[{'conversation':args.channel,'resident':resident['id']}]}
-        msg('create',definition=definition)
+        created=msg('create',definition=definition)
+        if args.service_only:
+            created=msg('configure_policy',instance=ident,expected_revision=created['revision'],policy={'grants':[{'resident':resident['id'],'scope':{'kind':'conversation','id':args.channel},'actions':['read','receive','send','react','files']}]})
+        if args.gateway:msg('configure_gateway',instance=ident,expected_revision=created['revision'],enabled=True)
         connector_log=(evidence/'connector.jsonl').open('w')
         runner=subprocess.Popen(command+['--data-dir',str(home),'discord-connector','--instance',ident,'--url',f'http://127.0.0.1:{ui}'],stdout=connector_log,stderr=subprocess.STDOUT,text=True,start_new_session=True);processes.append(runner)
-        until(lambda:msg('cursor',instance=ident,conversation=args.channel)['checkpoint'],60)
+        if args.gateway:until(lambda:msg('gateway_state',instance=ident)['session']['session_id'],60)
+        else:until(lambda:msg('cursor',instance=ident,conversation=args.channel)['checkpoint'],60)
         greeting=f'Boxen connector test {marker}: a temporary resident is connected and ready for a reply.'
         directions=f'This is a human-requested messaging test. Its expected external result is exactly one greeting with body {json.dumps(greeting)} in connector instance {ident}, conversation {args.channel}. The greeting is explicit outgoing communication; final narration is private.'
         run=api({'op':'resident_activate','id':resident['id'],'activation_id':secrets.token_hex(32),'directions':directions})
@@ -74,6 +80,45 @@ with tempfile.TemporaryDirectory(prefix='boxen-connector-live-') as temp:
         first=until(greeting_sent)
         print(json.dumps({'live_ready':True,'channel':args.channel,'bot_account':args.account,'temporary_resident':resident['id'],'marker':marker,'greeting_external_id':first['delivery']['external_id'],'evidence':str(evidence)}),flush=True)
         (ROOT/'work/messaging-live-current.json').write_text(json.dumps({'channel':args.channel,'marker':marker,'resident':resident['id'],'instance':ident,'home':str(home),'ui':ui,'peer':peer,'pid':daemon.pid,'evidence':str(evidence)}))
+        if args.service_only:
+            def operation(name,arguments):
+                receipt=msg('call',resident=resident['id'],id=secrets.token_hex(32),to={'instance':ident,'conversation':args.channel},operation=name,arguments=arguments)
+                return until(lambda:(v if (v:=msg('status',id=receipt['id']))['delivery']['status'] in ('accepted','rejected') or v['delivery'].get('reason') else None))
+            history=operation('read_context',{'message_id':first['delivery']['external_id'],'before':1,'after':1})
+            assert history['delivery']['status']=='accepted',history
+            assert any(m['id']==first['delivery']['external_id'] for m in history['delivery']['result']['messages'])
+            reaction=operation('react',{'message_id':first['delivery']['external_id'],'emoji':'🦊'})
+            assert reaction['delivery']['status']=='accepted',reaction
+            artifact=pathlib.Path(temp)/'opaque.bin';artifact.write_bytes(b'Boxen explicit native upload test\x00\xff')
+            upload_body='Boxen retained attachment test '+marker
+            directions=f'This human-requested integration test has one expected external effect: a send_files call via boxen_messages to instance {ident}, conversation {args.channel}, with paths [{json.dumps(str(artifact))}] and body {json.dumps(upload_body)}. This call retains the file bytes before the connector sends them. Final narration is private.'
+            api({'op':'resident_activate','id':resident['id'],'activation_id':secrets.token_hex(32),'directions':directions})
+            def uploaded():
+                events=[json.loads(line) for line in (home/'mailboxes/events.jsonl').read_text().splitlines()]
+                for e in events:
+                    m=e.get('message',{});service=m.get('service') or {}
+                    if service.get('operation')=='send_files' and service['arguments'].get('body')==upload_body:
+                        v=msg('status',id=m['id'])
+                        if v['delivery']['status']=='accepted':return v
+            upload=until(uploaded)
+            native_id=upload['delivery']['external_id']
+            checked=operation('read_context',{'message_id':native_id,'before':0,'after':0})
+            assert checked['delivery']['status']=='accepted'
+            attachments=checked['delivery']['result']['messages'][0]['attachments']
+            assert attachments and attachments[0]['size']==artifact.stat().st_size,attachments
+            resumed=False
+            if args.gateway:
+                saved=msg('gateway_state',instance=ident)['session']
+                runner.terminate();runner.wait(timeout=10)
+                previous_lines=len((evidence/'connector.jsonl').read_text().splitlines())
+                runner=subprocess.Popen(command+['--data-dir',str(home),'discord-connector','--instance',ident,'--url',f'http://127.0.0.1:{ui}'],stdout=connector_log,stderr=subprocess.STDOUT,text=True,start_new_session=True);processes.append(runner)
+                until(lambda:any(json.loads(line).get('event')=='discord.gateway_health' and json.loads(line).get('fields',{}).get('connected') for line in (evidence/'connector.jsonl').read_text().splitlines()[previous_lines:]),60)
+                time.sleep(5)
+                after=msg('gateway_state',instance=ident)['session'];assert after['session_id']==saved['session_id'] and after['gaps']==saved['gaps'],after
+                resumed=True
+            result={'ok':True,'binary_sha256':binary_sha256,'connector':'real Discord Gateway/REST' if args.gateway else 'real Discord REST','native_history':True,'reaction':True,'retained_upload':True,'resume_same_session':resumed,'incoming_human_tested':False}
+            (evidence/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result),flush=True)
+            raise SystemExit(0)
         # A human message mentioning the bot works with Discord's mention-based content access too.
         def delivered_reply():
             events=[json.loads(line) for line in (home/'mailboxes/events.jsonl').read_text().splitlines()]

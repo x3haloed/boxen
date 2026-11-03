@@ -80,6 +80,100 @@ fn file_bytes(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn retain(root: &Path, run: &str, bytes: &[u8]) -> Result<String> {
+    crate::jobs::valid_id(run)?;
+    let digest = hash(bytes);
+    let directory = root.join(run).join("artifacts");
+    state::private_dir(&directory)?;
+    let dest = directory.join(&digest);
+    if !dest.exists() {
+        let used = fs::read_dir(&directory)?
+            .try_fold(0u64, |n, e| -> Result<u64> { Ok(n + e?.metadata()?.len()) })?;
+        if used + bytes.len() as u64 > 16 * 1024 * 1024 {
+            return Err("run artifact quota of 16 MiB is full".into());
+        }
+        state::publish_new(&dest, bytes)?;
+        #[cfg(unix)]
+        fs::File::open(&directory)?.sync_all()?;
+    } else if file_bytes(&dest)? != bytes {
+        return Err("retained artifact failed integrity validation".into());
+    }
+    Ok(digest)
+}
+pub fn upload(root: &Path, cwd: &str, run: &str, path: &str) -> Result<Value> {
+    if path.is_empty() || path.len() > 4096 {
+        return Err("upload path contains 1–4096 bytes".into());
+    }
+    let (bytes, filename) = if path.starts_with("https://") || path.starts_with("http://") {
+        let uri: tungstenite::http::Uri = path.parse().map_err(|_| "upload URL is invalid")?;
+        if uri.authority().is_none_or(|a| a.as_str().contains('@')) {
+            return Err("upload URLs have an authority without embedded credentials".into());
+        }
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .timeout_global(Some(std::time::Duration::from_secs(15)))
+            .build()
+            .into();
+        let response = agent
+            .get(path)
+            .call()
+            .map_err(|_| "upload URL fetch failed")?;
+        if !response.status().is_success() {
+            return Err(
+                "upload URL returned a non-success status; redirects are not followed".into(),
+            );
+        }
+        let mut bytes = Vec::new();
+        response
+            .into_body()
+            .into_reader()
+            .take((MAX_FILE + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "upload URL body is unavailable")?;
+        if bytes.len() > MAX_FILE {
+            return Err("upload URL exceeds 2 MiB".into());
+        }
+        let filename = uri
+            .path()
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("attachment")
+            .to_owned();
+        (bytes, filename)
+    } else {
+        let path = Path::new(cwd).join(path);
+        let bytes = file_bytes(&path)?;
+        let filename = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .ok_or("upload filename is UTF-8")?
+            .to_owned();
+        (bytes, filename)
+    };
+    let digest = retain(root, run, &bytes)?;
+    if filename.len() > 256 || filename.chars().any(char::is_control) {
+        return Err("upload filename is bounded and has no control characters".into());
+    }
+    Ok(
+        json!({"run":run,"sha256":digest,"bytes":bytes.len(),"filename":filename,"mime":kind(&bytes).map(|(_,m)|m).unwrap_or("application/octet-stream")}),
+    )
+}
+pub fn upload_bytes(root: &Path, artifact: &Value) -> Result<Vec<u8>> {
+    let run = artifact["run"].as_str().ok_or("artifact run required")?;
+    let digest = artifact["sha256"]
+        .as_str()
+        .ok_or("artifact digest required")?;
+    crate::jobs::valid_id(run)?;
+    crate::jobs::valid_id(digest)?;
+    let bytes = file_bytes(&root.join(run).join("artifacts").join(digest))?;
+    if hash(&bytes) != digest || artifact["bytes"].as_u64() != Some(bytes.len() as u64) {
+        return Err("upload artifact integrity failed".into());
+    }
+    Ok(bytes)
+}
+
 pub fn read(root: &Path, cwd: &str, run: &str, args: Value) -> Result<Value> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -98,22 +192,7 @@ pub fn read(root: &Path, cwd: &str, run: &str, args: Value) -> Result<Value> {
         if input.offset.is_some() || input.limit.is_some() {
             return Err("media reads send the original whole file; text offset/limit do not select pages or time ranges".into());
         }
-        let digest = hash(&bytes);
-        let directory = root.join(run).join("artifacts");
-        state::private_dir(&directory)?;
-        let dest = directory.join(&digest);
-        if !dest.exists() {
-            let used = fs::read_dir(&directory)?
-                .try_fold(0u64, |n, e| -> Result<u64> { Ok(n + e?.metadata()?.len()) })?;
-            if used + bytes.len() as u64 > MAX_RUN {
-                return Err("run artifact quota of 16 MiB is full".into());
-            }
-            state::publish_new(&dest, &bytes)?;
-            #[cfg(unix)]
-            fs::File::open(&directory)?.sync_all()?;
-        } else if file_bytes(&dest)? != bytes {
-            return Err("retained artifact failed integrity validation".into());
-        }
+        let digest = retain(root, run, &bytes)?;
         Ok(
             json!({"ok":true,"path":path,"modality":modality,"mime":mime,"bytes":bytes.len(),"sha256":digest,"artifact":{"run":run,"sha256":digest,"mime":mime,"modality":modality},"projection":"native whole-file input; no local conversion"}),
         )

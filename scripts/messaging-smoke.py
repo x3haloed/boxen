@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Real paired daemons, resident tools, isolated connector accounts and controlled Discord HTTP."""
 import http.server
+import email.parser
+import email.policy
 import json
 import os
 import pathlib
@@ -14,6 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 
 ROOT=pathlib.Path(__file__).resolve().parent.parent
 BINARY=pathlib.Path(sys.argv[1] if len(sys.argv)>1 else ROOT/'target/release/boxen').resolve()
@@ -22,22 +25,41 @@ def port():
     with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
 
 class Discord(http.server.BaseHTTPRequestHandler):
-    messages=[];sent=[];counter=100;rate_limit=False;unknown=False;reject_after=0;unknown_after=0;crash_after=0
+    context_failure=False
+    messages=[];sent=[];uploads=[];counter=100;rate_limit=False;unknown=False;reject_after=0;unknown_after=0;crash_after=0
     def log_message(self,*args):pass
     def reply(self,status,value):
         data=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
     def account(self):
         return {'Bot fixture-a':{'id':'1001','bot':True,'username':'First bot'},'Bot fixture-b':{'id':'1002','bot':True,'username':'Second bot'}}.get(self.headers.get('Authorization'))
     def do_GET(self):
+        if self.path=='/attachment.bin':
+            data=b'url fixture bytes\x00\xff';self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
         account=self.account()
         if not account:self.reply(401,{'error':'bad credential'});return
         if self.path=='/users/@me':self.reply(200,account);return
+        if self.path=='/channels/666' and Discord.context_failure:self.reply(503,{'error':'context unavailable'});return
+        if self.path.startswith('/channels/') and self.path.count('/')==2:
+            channel=self.path.rsplit('/',1)[1];self.reply(200,{'id':channel,'guild_id':None if channel=='555' else 'space-one','type':1 if channel=='555' else 3 if channel=='666' else 0,'recipients':[{'id':'3333','bot':False}]});return
+        if self.path.startswith('/channels/999/messages/'):
+            ident=self.path.rsplit('/',1)[1];value=next((m for m in Discord.messages if m['id']==ident),None)
+            self.reply(200 if value else 404,value or {'error':'missing'});return
         assert self.path.startswith('/channels/999/messages?'),self.path
-        before=int(self.path.split('before=')[1]) if 'before=' in self.path else 2**64
-        self.reply(200,[m for m in reversed(Discord.messages) if int(m['id'])<before][:100])
+        query=urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        before=int(query.get('before',[str(2**64)])[0]);after=int(query.get('after',['0'])[0]);limit=int(query.get('limit',['25'])[0])
+        selected=[m for m in Discord.messages if after<int(m['id'])<before]
+        self.reply(200,(selected if 'after' in query else list(reversed(selected)))[:limit])
+    def do_PUT(self):
+        assert self.account();assert self.path.startswith('/channels/999/messages/') and '/reactions/' in self.path
+        self.send_response(204);self.send_header('Content-Length','0');self.end_headers()
     def do_POST(self):
         account=self.account();assert account
-        body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        raw=self.rfile.read(int(self.headers['Content-Length']))
+        if self.headers.get('Content-Type','').startswith('multipart/'):
+            mime=email.parser.BytesParser(policy=email.policy.default).parsebytes(('Content-Type: '+self.headers['Content-Type']+'\r\nMIME-Version: 1.0\r\n\r\n').encode()+raw)
+            fields=list(mime.iter_parts());body=json.loads(next(p for p in fields if p.get_param('name',header='content-disposition')=='payload_json').get_payload(decode=True))
+            Discord.uploads.extend({'filename':p.get_filename(),'bytes':p.get_payload(decode=True)} for p in fields if p.get_param('name','',header='content-disposition')!='payload_json')
+        else:body=json.loads(raw)
         assert body['allowed_mentions']=={'parse':[]},body
         assert len(body['content'].encode('utf-16-le'))//2<=2000,body
         if Discord.reject_after:
@@ -140,11 +162,20 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
         assert any(json.loads(line).get('event')=='discord.self_echo_skipped' and json.loads(line)['fields']['count']==1 for line in skipped.stdout.splitlines())
         runner(a);assert len(inbox(r1))==before
         local=command(r1,{'definition':{'id':'boxen'}},body='SILENT generic Boxen mail',conversation='resident:'+r2,subject='Local connector proof');assert any(m['id']==local and m['from']['instance']=='boxen' for m in inbox(r2))
-        custom=msg('create',definition={'id':secrets.token_hex(32),'name':'Credential-free custom addon','provider':'custom','account':'public-room','capabilities':['receive','native_metadata'],'settings':{'endpoint':'example.invalid'},'bindings':[{'conversation':'a:b','resident':r3,'send':False},{'conversation':'a','resident':r3,'send':False}]})
+        custom=msg('create',definition={'id':secrets.token_hex(32),'tools':[{'name':'lookup','description':'Returns public fixture data.','kind':'query','permission':'read','parameters':{'type':'object'}},{'name':'send_files','description':'Returns addon-defined public data; this is not Discord upload.','kind':'query','permission':'read','parameters':{'type':'object'}}],'name':'Credential-free custom addon','provider':'custom','account':'public-room','capabilities':['receive','native_metadata'],'settings':{'endpoint':'example.invalid'},'bindings':[{'conversation':'a:b','resident':r3,'send':False},{'conversation':'a','resident':r3,'send':False},{'conversation':'a','resident':r1,'send':False}]})
         custom_id=custom['definition']['id']
         for conversation,native_id in [('a:b','c'),('a','b:c')]:
             msg('ingest',instance=custom_id,conversation=conversation,after=None,cursor='one',messages=[{'id':native_id,'author':{'id':'external-author'},'body':'SILENT opaque identifier collision proof'}])
         assert len([m for m in inbox(r3) if m.get('origin',{}).get('instance')==custom_id])==2
+        service=msg('call',resident=r3,id=secrets.token_hex(32),to={'instance':custom_id,'conversation':'a'},operation='lookup',arguments={'key':'example'})
+        claim=secrets.token_hex(32)
+        assert msg('claim',instance=custom_id,id=service['id'],claim_id=claim)['claimed']
+        result={'value':'credential-free native query'}
+        done=msg('complete',instance=custom_id,id=service['id'],claim_id=claim,status='accepted',result=result)
+        assert msg('status',id=service['id'])['delivery']['result']==result
+        assert msg('complete',instance=custom_id,id=service['id'],claim_id=claim,status='accepted',result=result)==done
+        reject(lambda:msg('complete',instance=custom_id,id=service['id'],claim_id=claim,status='accepted',result={'value':'changed'}))
+
         activate(r1);assert not msg('outbox' ,instance=aid)['messages'],'private narration became an outgoing send'
         assert not Discord.sent
         bad_reply=command(r1,a,reply=ib[0]['id']);reject(lambda:msg('status',id=bad_reply))
@@ -187,6 +218,198 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
         runner(a);assert len(Discord.sent)==before+2,'partial multipart effects replayed after restart'
         resumed=command(r1,a,'Fresh send after interrupted multipart');runner(a)
         assert msg('status',id=resumed)['delivery']['status']=='accepted'
+        # Policy grants and resident attention are separate durable predicates.
+        pc=instance('Policy connector','1001',[r1],'fixture-a');pid=pc['definition']['id']
+        def policy(grants):
+            current=msg('get',instance=pid)
+            return msg('configure_policy',instance=pid,expected_revision=current['revision'],policy={'grants':grants})
+        def grant(r,kind='conversation',ident='999',actions=None,effect='allow',bots=False):
+            scope={'kind':kind}
+            if ident is not None:scope['id']=ident
+            return {'resident':r,'scope':scope,'actions':actions or ['receive','read','send'],'effect':effect,'accept_bots':bots}
+        def interest(r,action,scope):
+            current=msg('attention',instance=pid,resident=r)
+            return msg(action,instance=pid,resident=r,expected_revision=current['revision'],scope=scope)
+        def intake(conversation,native):
+            old=msg('cursor',instance=pid,conversation=conversation)['checkpoint']
+            return msg('ingest',instance=pid,conversation=conversation,after=old['cursor'] if old else None,cursor=native['id'],messages=[native])
+        def received(r):return [m for m in inbox(r) if (m.get('origin') or {}).get('instance')==pid]
+        policy([grant(r1,'all',None),grant(r2)])
+        intake('999',{'id':'10001','author':{'id':'person'},'body':'SILENT ordinary'})
+        assert len(received(r1))==1 and not received(r2),'permission alone subscribed resident'
+        interest(r2,'watch',{'kind':'all'})
+        intake('888',{'id':'10002','author':{'id':'person'},'body':'SILENT outside grant'})
+        assert not received(r2),'attention granted permission'
+        interest(r1,'mute',{'kind':'conversation','id':'999'})
+        intake('999',{'id':'10003','author':{'id':'person'},'body':'SILENT muted'})
+        assert len(received(r1))==1 and len(received(r2))==1
+        queued=command(r1,pc,'SILENT outbound while muted')
+        policy([grant(r1,'all',None),grant(r1,'all',None,['send'],'deny'),grant(r2)])
+        # Claim rejection is retained and does not block other new sends.
+        before=len(Discord.sent);runner(pc)
+        assert msg('status',id=queued)['delivery']['reason']=='policy_denied' and len(Discord.sent)==before
+        next_send=command(r2,pc,'SILENT independent outbound');runner(pc)
+        assert msg('status',id=next_send)['delivery']['status']=='accepted'
+        latest=msg('get',instance=pid)
+        reject(lambda:msg('configure_policy',instance=pid,expected_revision=1,policy={'grants':[]}))
+        assert msg('get',instance=pid)==latest
+        # Policy can be wider than Watch, while attention can still select only directed mail.
+        policy([grant(r2,'all',None)])
+        interest(r2,'unwatch',{'kind':'all'})
+        intake('777',{'id':'10004','author':{'id':'person'},'body':'SILENT unselected'})
+        before=len(received(r2))
+        intake('777',{'id':'10005','author':{'id':'person'},'body':'SILENT directed','mention':True})
+        assert len(received(r2))==before+1
+        policy([grant(r2,'all',None),grant(r2,'user','person',['receive'],'deny')])
+        intake('777',{'id':'10006','author':{'id':'person'},'body':'SILENT denied author','mention':True})
+        assert len(received(r2))==before+1
+        policy([grant(r2,'space','guild-one'),grant(r2,'parent','blocked',['receive'],'deny')])
+        before=len(received(r2))
+        intake('777',{'id':'10007','space':'guild-other','parent':'allowed','author':{'id':'person'},'body':'SILENT wrong guild','mention':True})
+        intake('777',{'id':'10008','space':'guild-one','parent':'blocked','author':{'id':'person'},'body':'SILENT denied parent','mention':True})
+        assert len(received(r2))==before
+        intake('777',{'id':'10009','space':'guild-one','parent':'allowed','author':{'id':'person'},'body':'SILENT allowed guild','mention':True})
+        assert len(received(r2))==before+1
+        assert msg('native_presence',instance=pid)['status']=='invisible'
+        policy(msg('get',instance=pid)['policy']['grants']+[grant(r2,'all',None,['presence'])])
+        assert msg('native_presence',instance=pid)['status']=='idle','unpresented mail did not show queued presence'
+        saved_policy=msg('get',instance=pid)
+        peer_process.kill();peer_process.wait(timeout=5);peer_process,tokens[1]=daemon(1)
+        assert msg('get',instance=pid)==saved_policy
+        assert msg('create',definition=pc['definition'])==saved_policy,'creation retry reset policy or attention'
+        # Native context and reactions travel through retained generic service requests.
+        policy([grant(r1,'user','3333',['react'])])
+        group=msg('call',resident=r1,id=secrets.token_hex(32),to={'instance':pid,'conversation':'666'},operation='react',arguments={'message_id':'12345','emoji':'🦊'})
+        runner(pc)
+        assert msg('status',id=group['id'])['delivery']['reason']=='policy_denied','one DM correspondent granted a group-room action'
+        policy([grant(r1,'conversation','999',['read','receive','send','react'])])
+        def call_service(operation,arguments):
+            return msg('call',resident=r1,id=secrets.token_hex(32),to={'instance':pid,'conversation':'999'},operation=operation,arguments=arguments)
+        query=call_service('read_context',{'limit':3});runner(pc)
+        answer=msg('status',id=query['id'])
+        assert answer['service']['operation']=='read_context' and answer['delivery']['status']=='accepted'
+        window=answer['delivery']['result'];assert len(window['messages'])==3
+        assert [int(m['id']) for m in window['messages']]==sorted(int(m['id']) for m in window['messages'])
+        center=call_service('read_context',{'message_id':native['id'],'before':0,'after':2});runner(pc)
+        assert any(m['id']==native['id'] for m in msg('status',id=center['id'])['delivery']['result']['messages'])
+        reaction=call_service('react',{'message_id':native['id'],'emoji':'🦊'});runner(pc)
+        assert msg('status',id=reaction['id'])['delivery']['status']=='accepted'
+        # Unavailable metadata cannot permanently occupy the bounded dispatch window.
+        policy([grant(r1,'all',None,['read','receive','send','react'])])
+        blocked=[msg('call',resident=r1,id=secrets.token_hex(32),to={'instance':pid,'conversation':'666'},operation='react',arguments={'message_id':'12345','emoji':'🦊'}) for _ in range(20)]
+        healthy=call_service('react',{'message_id':native['id'],'emoji':'🦊'})
+        Discord.context_failure=True
+        try:runner(pc);runner(pc)
+        finally:Discord.context_failure=False
+        assert all(msg('status',id=m['id'])['delivery']['status']=='rejected' for m in blocked)
+        assert msg('status',id=healthy['id'])['delivery']['status']=='accepted','unavailable conversations blocked healthy service work'
+        policy([grant(r1,'conversation','999',['read','receive','send'])])
+        reject(lambda:call_service('react',{'message_id':native['id'],'emoji':'🦊'}))
+        old_receipt=msg('status',id=query['id'])
+        peer_process.kill();peer_process.wait(timeout=5);peer_process,tokens[1]=daemon(1)
+        assert msg('status',id=query['id'])==old_receipt
+        policy([grant(r1,'conversation','999',['read','receive','send','files'])])
+        def agent_service(call,before_dispatch=None):
+            api({'op':'mailbox_send','client_id':keys[0],'message':{'id':secrets.token_hex(32),'to':{'type':'resident','id':r1},'subject':'Native service proof','body':'MESSAGING:'+json.dumps(call)}})
+            errors=[]
+            def execute():
+                try:activate(r1)
+                except Exception as error:errors.append(error)
+            worker=threading.Thread(target=execute);worker.start();deadline=time.monotonic()+8
+            destination=call['to']['instance']
+            while not any(m['id']==call['id'] for m in msg('outbox',instance=destination)['messages']):
+                assert time.monotonic()<deadline;time.sleep(.04)
+            if before_dispatch:before_dispatch()
+            if destination==pid:runner(pc)
+            else:
+                claim=secrets.token_hex(32);assert msg('claim',instance=destination,id=call['id'],claim_id=claim)['claimed']
+                msg('complete',instance=destination,id=call['id'],claim_id=claim,status='accepted',result={'custom':True})
+            worker.join(10);assert not worker.is_alive() and not errors,errors
+            return msg('status',id=call['id'])
+        custom_call={'action':'call','id':secrets.token_hex(32),'to':{'instance':custom_id,'conversation':'a'},'operation':'send_files','arguments':{'key':'addon semantics'}}
+        assert agent_service(custom_call)['delivery']['result']=={'custom':True},'Discord upload behavior leaked into a custom provider'
+        artifact=directory/'opaque.data';payload=b'opaque attachment bytes\x00\xff\n';artifact.write_bytes(payload)
+        upload={'action':'call','id':secrets.token_hex(32),'to':{'instance':pid,'conversation':'999'},'operation':'send_files','arguments':{'paths':[str(artifact)],'body':'u'*2500}}
+        before=len(Discord.sent);sent=agent_service(upload,artifact.unlink)
+        assert sent['delivery']['status']=='accepted' and Discord.uploads[-1]['bytes']==payload
+        assert ''.join(m['body']['content'] for m in Discord.sent[before:])=='u'*2500
+        assert len(sent['delivery']['parts'])==2
+        # Same-ID retry works after the original file disappears, with no new upload.
+        count=len(Discord.uploads)
+        api({'op':'mailbox_send','client_id':keys[0],'message':{'id':secrets.token_hex(32),'to':{'type':'resident','id':r1},'subject':'Retry upload','body':'MESSAGING:'+json.dumps(upload)}})
+        activate(r1);runner(pc);assert len(Discord.uploads)==count
+        reject(lambda:msg('attachment',instance=aid,id=upload['id'],index=0))
+        url_upload={'action':'call','id':secrets.token_hex(32),'to':{'instance':pid,'conversation':'999'},'operation':'send_files','arguments':{'paths':[f'http://127.0.0.1:{server.server_port}/attachment.bin']}}
+        assert agent_service(url_upload)['delivery']['status']=='accepted'
+        assert Discord.uploads[-1]['bytes']==b'url fixture bytes\x00\xff'
+        # Real WebSocket handshake/heartbeats/resume against a controlled Gateway.
+        sys.path.insert(0,str(ROOT/'tests'))
+        from discord_gateway_fixture import GatewayFixture
+        gateway_fixture=GatewayFixture();gateway_process=None
+        def eventually(predicate,seconds=12):
+            deadline=time.monotonic()+seconds
+            while time.monotonic()<deadline:
+                value=predicate()
+                if value:return value
+                time.sleep(.05)
+            raise AssertionError('Gateway state did not converge')
+        try:
+            gr=resident('Gateway resident')
+            api({'op':'resident_update','id':gr,'patch':{'expected_revision':1,'auto_activate':True}})
+            gid=secrets.token_hex(32)
+            gi=msg('create',definition={'id':gid,'name':'Gateway connector','provider':'discord','account':'1001','credential_file':a['definition']['credential_file'],'settings':{'gateway_url':gateway_fixture.url},'capabilities':['send','receive','replies','native_metadata'],'bindings':[{'conversation':'999','resident':gr}]})
+            msg('configure_gateway',instance=gid,expected_revision=gi['revision'],enabled=True)
+            gateway_log=(directory/'gateway.log').open('w')
+            def start_gateway():
+                return subprocess.Popen(COMMAND+['--data-dir',str(homes[0]),'discord-connector','--instance',gid,'--url',f'http://127.0.0.1:{uis[0]}','--peer',keys[1],'--address',f'127.0.0.1:{peers[1]}','--api-base',f'http://127.0.0.1:{server.server_port}'],stdout=gateway_log,stderr=subprocess.STDOUT)
+            gateway_process=start_gateway();processes.append(gateway_process)
+            eventually(lambda:msg('gateway_state',instance=gid)['session']['sequence']>=2)
+            def gm(ident,channel='999',mention=False,author='person'):
+                return {'id':ident,'channel_id':channel,'guild_id':None if channel=='555' else 'space-one','author':{'id':author,'bot':author=='1001'},'content':'SILENT Gateway input '+ident,'mentions':[{'id':'1001'}] if mention else [],'timestamp':'2026-11-01T00:00:00Z','attachments':[]}
+            def gmessages():return [m for m in inbox(gr) if (m.get('origin') or {}).get('instance')==gid]
+            first_seq=gateway_fixture.push('MESSAGE_CREATE',gm('50000'))
+            eventually(lambda:len(gmessages())==1)
+            gateway_fixture.push('MESSAGE_CREATE',gm('50001',author='1001'))
+            denied_seq=gateway_fixture.push('MESSAGE_CREATE',gm('50002','777',True))
+            eventually(lambda:msg('gateway_state',instance=gid)['session']['sequence']>=denied_seq)
+            assert len(gmessages())==1,'Gateway bypassed restrictive defaults or self exclusion'
+            current=msg('get',instance=gid)
+            msg('configure_policy',instance=gid,expected_revision=current['revision'],policy={'grants':[grant(gr,'all',None,['receive','read','send','presence'])]})
+            directed=gateway_fixture.push('MESSAGE_CREATE',gm('50003','777',True));gateway_fixture.push('MESSAGE_CREATE',gm('50004','555'))
+            ordinary=gateway_fixture.push('MESSAGE_CREATE',gm('50005','777'))
+            eventually(lambda:msg('gateway_state',instance=gid)['session']['sequence']>=ordinary)
+            assert {m['origin']['native_id'] for m in gmessages()}=={'50000','50003','50004'}
+            eventually(lambda:any(p['status']=='online' for p in gateway_fixture.presences),15)
+            # Native replay resumes at durable acceptance and never duplicates intake.
+            gateway_process.terminate();gateway_process.wait(timeout=5)
+            replay=gateway_fixture.push('MESSAGE_CREATE',gm('50006'))
+            gateway_process=start_gateway();processes.append(gateway_process)
+            eventually(lambda:msg('gateway_state',instance=gid)['session']['sequence']>=replay,15)
+            assert any(a['op']==6 for a in gateway_fixture.auth)
+            assert len([m for m in gmessages() if m['origin']['native_id']=='50006'])==1
+            # Passive own-message reactions are observations, never incoming mail/wakes.
+            eventually(lambda:all(r['status'] in ('completed','interrupted','failed','cancelled') for r in api({'op':'list'})))
+            runs_before=len(api({'op':'list'}));mail_before=len(gmessages())
+            reaction=gateway_fixture.push('MESSAGE_REACTION_ADD',{'channel_id':'999','guild_id':'space-one','message_id':'60000','message_author_id':'1001','user_id':'person','emoji':{'name':'🦊','id':None}})
+            eventually(lambda:msg('gateway_state',instance=gid)['session']['sequence']>=reaction)
+            sources=api({'op':'events','args':{'action':'list'}})['sources'];source=next(s for s in sources if s['name']=='Discord reactions')
+            assert source['retained']==1 and source['audience']==gr
+            reject(lambda:api({'op':'events','args':{'action':'subscribe','spec':{'id':secrets.token_hex(32),'source':source['id'],'target':{'type':'resident','id':r1},'interval_ms':1000,'lifetime':'persistent'}}}))
+            def cpu():
+                value=subprocess.check_output(['ps','-p',str(gateway_process.pid),'-o','time='],text=True).strip();return sum(float(v)*(60**i) for i,v in enumerate(reversed(value.split(':'))))
+            before_cpu=cpu();time.sleep(2);assert cpu()-before_cpu<.15,'Gateway idle transport spins'
+            assert len(api({'op':'list'}))==runs_before and len(gmessages())==mail_before
+            # Invalid resume is legible, then a fresh session accepts new work.
+            gateway_fixture.invalidate=True;gateway_fixture.disconnect()
+            eventually(lambda:msg('gateway_state',instance=gid)['session']['gaps']>=1,15)
+            eventually(lambda:msg('gateway_state',instance=gid)['session']['session_id']=='fixture-session-two',25)
+            fresh=gateway_fixture.push('MESSAGE_CREATE',gm('50007'))
+            eventually(lambda:any(m['origin']['native_id']=='50007' for m in gmessages()))
+            assert 'fixture-a' not in (directory/'gateway.log').read_text()
+            print('PASS native Gateway directed/ordinary attention, restrictive policy, self exclusion, presence, durable resume, passive private reactions, invalid-session recovery and idle CPU')
+        finally:
+            if gateway_process and gateway_process.poll() is None:gateway_process.terminate();gateway_process.wait(timeout=5)
+            gateway_fixture.close()
         # Replayed native input is accepted once, conflicting reuse is legible.
         checkpoint=msg('cursor',instance=aid,conversation='999')['checkpoint']['cursor']
         batch={'instance':aid,'conversation':'999','after':checkpoint,'cursor':'9000','messages':[{'id':'9000','author':{'id':'2222','bot':False},'body':'SILENT dedup proof'}]}

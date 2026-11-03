@@ -258,6 +258,7 @@ def main():
                 archive.add(root / 'tests/fake-codex.py', arcname='tests/fake-codex.py')
                 archive.add(root / 'tests/promotion_checks.py', arcname='tests/promotion_checks.py')
                 archive.add(root / 'tests/event-adapter.py', arcname='tests/event-adapter.py')
+                archive.add(root / 'tests/discord_gateway_fixture.py', arcname='tests/discord_gateway_fixture.py')
                 for name in ['usgs.py','grid-game.py']:
                     archive.add(root/'examples/adapters'/name,arcname='examples/adapters/'+name)
             bundle.seek(0)

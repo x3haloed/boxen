@@ -88,7 +88,9 @@ accounts, credential references and explicit resident/conversation bindings. The
 bundled Discord runner is `boxen discord-connector --instance ID`; addons can use
 the same public intake/outbox protocol without forking the daemon. Private
 narration stays private, and uncertain external sends are never automatically
-repeated. Discord configuration and opt-in live testing are documented separately
+repeated. Discord supports separate permission and attention, native history, reactions,
+retained file uploads, and optional Gateway intake with resumable progress.
+Discord configuration and opt-in live testing are documented separately
 from credential-free regression checks.
 
 ## Live daemon diagnostics

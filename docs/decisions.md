@@ -137,6 +137,9 @@ Messaging uses a shared intake/send/status contract. Boxen mail is bundled; exte
 
 The first [messaging slice](messaging.md) uses the existing correspondence journal for common intake, presentation links, external dispatch claims and honest outcomes. External addons use a public API; the bundled Discord runner is a separate foreground subcommand, not a resident-runtime dependency. Unknown external effects are never automatically replayed. The original mailbox APIs and storage field names remain for existing clients/native session histories; compatibility removal requires an explicit versioned migration.
 
+Discord permission is operator policy; resident attention independently selects permitted input. Defaults preserve exact bound conversations and deny additional surfaces/actions. Broad receiving grants do not implicitly watch ordinary traffic. Native history, reactions and retained local/URL uploads use declared connector operations and the existing correspondence receipts. Optional Gateway intake retains accepted sequence, exposes resume gaps and publishes own-post reactions as passive private observations. Presence requires a separate grant and aggregates shared accounts. See [Discord parity](research/discord-parity.md).
+
+
 ## Built-in resident model changes
 
 An operator can change a built-in inference resident’s model with a revision-checked resident update. Future activations use the saved model while accepted runs, source attribution, identity, memory, mailbox and canonical history remain intact. Backend and working-directory changes, managed-session model switching, and anonymous-thread model switching remain outside this operation. Definition application retains its existing post-execution pins.
