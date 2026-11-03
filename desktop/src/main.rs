@@ -1,5 +1,6 @@
 mod client;
 mod correspondence;
+mod field;
 mod model;
 mod workspace;
 use client::{Bus, Client, Pending, Update, run_key};
@@ -69,6 +70,7 @@ struct Desktop {
     state_path: PathBuf,
     origin: String,
     polls: HashMap<String, Arc<AtomicBool>>,
+    field: Option<Box<field::Field>>,
     palette: bool,
     palette_fresh: bool,
     query: String,
@@ -142,6 +144,7 @@ impl Desktop {
             state_path,
             origin: origin.clone(),
             polls: HashMap::new(),
+            field: None,
             palette: false,
             palette_fresh: false,
             query: String::new(),
@@ -708,6 +711,7 @@ impl Desktop {
             .collect();
         self.choice = self.choice.min(visible.len().saturating_sub(1));
         let mut picked = None;
+        let mut entered = false;
         egui::Window::new("Command palette")
             .id(egui::Id::new("palette"))
             .collapsible(false)
@@ -734,7 +738,11 @@ impl Desktop {
                     self.choice = self.choice.saturating_sub(1);
                 }
                 if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
-                    picked = visible.get(self.choice).map(|(i, _)| *i);
+                    if field::matches(&self.query) {
+                        entered = true;
+                    } else {
+                        picked = visible.get(self.choice).map(|(i, _)| *i);
+                    }
                 }
                 egui::ScrollArea::vertical()
                     .max_height(400.)
@@ -753,6 +761,11 @@ impl Desktop {
             });
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             self.palette = false;
+        }
+        if entered {
+            self.palette = false;
+            self.query.clear();
+            self.field = Some(Box::default());
         }
         if let Some(index) = picked {
             self.palette = false;
@@ -1429,6 +1442,11 @@ impl eframe::App for Desktop {
             }
         }
         self.command_palette(&ctx);
+        if let Some(field) = &mut self.field
+            && !field.show(&ctx)
+        {
+            self.field = None;
+        }
         // Save edited drafts/layout after user interaction, without a permanent repaint loop.
         if self.last_save.elapsed() > Duration::from_secs(1)
             && ctx.input(|i| i.pointer.any_released() || !i.events.is_empty())
