@@ -30,6 +30,14 @@ boxen respond HOST:42424 PEER_KEY RUN_ID REQUEST_ID_JSON RESULT_JSON
 
 Each submission has a client-generated run ID and a Boxen thread ID. The first run normally uses its own ID as the thread ID. Backend thread IDs are separately retained. A completed run stays immutable while follow-up runs resume its backend conversation. Only one run per thread may execute at a time.
 
+Native Codex resume requests use `excludeTurns: true`: the response supplies
+session metadata without embedding the complete historical transcript in one
+JSON line. Codex retains its native history, and Boxen retains its existing run
+journals. This also applies to imported threads and promoted residents; it does
+not reconstruct or truncate their conversations. The 4 MiB incoming-frame bound
+remains in place. Import/promotion smoke tests include a fixture whose full
+resume history exceeds that bound.
+
 Repeating the same run ID, owner, and exact input returns the existing record. Reusing an ID with different input is rejected. The GUI retains an uncertain submission's original input and ID for retry, including across refresh, and distinguishes a confirmed rejection from a connection failure. CLI callers can supply `--id` to obtain the same behavior.
 
 The authenticated submitting machine owns API access to its runs. Other paired identities cannot list, observe, or control those runs through the workload API. Pairing currently also authorizes starting full-access workloads under the destination daemon's OS account; API ownership is not OS-level isolation between mutually trusted peers. Fine-grained grants and domain segregation remain later work.

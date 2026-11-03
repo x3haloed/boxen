@@ -55,6 +55,7 @@ def check_promotion(g):
     assert not any(e['kind']=='backend_session_rebuilt' for e in events)
     assert any(e['kind']=='resident_bridge_result' for e in events)
     resumed=[r for r in log() if r.get('method')=='thread/resume']
+    assert resumed and all(r['params'].get('excludeTurns') is True for r in resumed)
     endpoint=resumed[-1]['params']['config']['mcp_servers.boxen_resident']['url']
     try:
         urllib.request.urlopen(urllib.request.Request(endpoint,data=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',headers={'Content-Type':'application/json'}),timeout=2)

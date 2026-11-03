@@ -264,6 +264,9 @@ for line in sys.stdin:
                 assert "total_prior_events" in request["params"]["developerInstructions"]
                 assert "RESIDENT_" in request["params"]["developerInstructions"]
         result = {"thread": {"id": thread}, "model": "fixture"}
+        if method == 'thread/resume' and (pathlib.Path(request['params']['cwd'])/'fixture-large-resume').exists():
+            if not request['params'].get('excludeTurns', False):
+                result['thread']['turns'] = [{'id':'historical-large-turn','text':'x'*(4*1024*1024)}]
     elif method == "turn/start":
         if promoted_bridge:
             context=request['params']['input'][1]['text']

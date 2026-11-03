@@ -488,7 +488,17 @@ pub fn execute(
     dynamic.extend(crate::agent_tools::observation_tools());
     let result = if let Some(id) = resume {
         params["threadId"] = json!(id);
-        match rpc.request("thread/resume", params.clone()) {
+        // Resuming needs session metadata, not an inline copy of every old turn.
+        // History remains in Codex and Boxen's retained journals.
+        let mut resume_params = params.clone();
+        resume_params["excludeTurns"] = json!(true);
+        run.diagnostic(
+            Level::Debug,
+            "backend.resume.requested",
+            || json!({"backend_thread_id":id,"exclude_turns":true}),
+            || Value::Null,
+        );
+        match rpc.request("thread/resume", resume_params) {
             Ok(result) => result,
             Err(error)
                 if error.downcast_ref::<BackendRejected>().is_some()

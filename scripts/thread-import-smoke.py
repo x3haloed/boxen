@@ -126,6 +126,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-import-') as temporary:
         assert len(operation(0,{'op':'list'}))==1
         print('PASS complete paginated native snapshot, historical provenance, replay and daemon restart')
 
+        # Full hydration exceeds the transport frame bound. Both ordinary imported
+        # follow-ups and promoted activations need metadata-only native resume.
+        (workspace/'fixture-large-resume').touch()
         if os.environ.get('BOXEN_PROMOTION_PROBE')=='1':
             sys.path.insert(0,str(ROOT/'tests'))
             from promotion_checks import check_promotion
@@ -139,6 +142,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-import-') as temporary:
         assert next(e['data']['id'] for e in received if e['kind']=='backend_thread')==NATIVE
         assert not any(e['kind']=='backend_session_rebuilt' for e in received)
         assert operation(0,{'op':'thread_result','id':follow_id})['response']=='Fixture result'
+        assert all(r['params'].get('excludeTurns') is True for r in log() if r.get('method')=='thread/resume')
         assert any(r.get('method')=='turn/start' and r['params']['input'][0]['text']=='New request after import' for r in log())
         slow_spec={'id':secrets.token_hex(32),'thread_id':ident,'backend':'codex','cwd':str(workspace),'model':'fixture','prompt':'SLOW interrupted imported request'}
         operation(0,{'op':'start','spec':slow_spec})
