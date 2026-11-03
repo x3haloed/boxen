@@ -87,6 +87,8 @@ boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--mode
 boxen resident-message HOST:PORT PUBLIC_KEY RESIDENT_ID BODY [--id MESSAGE_ID] [--subject SUBJECT] [--client-id ID]\n\
 boxen mailbox HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
 boxen inbox HOST:PORT PUBLIC_KEY [--client-id ID] [--after SEQUENCE]\n\
+boxen inference-health HOST:PORT PUBLIC_KEY\n\
+boxen inference-resume HOST:PORT PUBLIC_KEY FAILED_RUN_ID [--id NEW_RUN_ID]\n\
 boxen resident-activate HOST:PORT PUBLIC_KEY RESIDENT_ID [--id RUN_ID] [--directions TEXT]\n\
 boxen thread-result HOST:PORT PUBLIC_KEY RUN_ID\n\n\
 boxen platform-check\n\n\
@@ -364,6 +366,35 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &args[0],
                     &args[1],
                     serde_json::json!({"op":"client_inbox","client_id":client,"after":after})
+                )?
+            );
+        }
+        "inference-health" if args.len() == 2 => {
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"inference_health"})
+                )?
+            );
+        }
+        "inference-resume" => {
+            let id = take_option(&mut args, "--id")?.unwrap_or(state::random_hex()?);
+            if args.len() != 3 {
+                return Err(
+                    "inference-resume accepts HOST:PORT PUBLIC_KEY FAILED_RUN_ID [--id NEW_RUN_ID]"
+                        .into(),
+                );
+            }
+            println!(
+                "{}",
+                protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"inference_resume","failed_run_id":args[2],"id":id})
                 )?
             );
         }

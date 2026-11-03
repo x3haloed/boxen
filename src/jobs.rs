@@ -17,6 +17,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "inference_health.rs"]
+pub mod inference_health;
 #[path = "promotion.rs"]
 pub mod promotion;
 #[path = "thread_import.rs"]
@@ -471,6 +473,9 @@ impl History {
                     .find_map(|r| r.snapshot().record.spec.context)
             })
             .unwrap_or_default()
+    }
+    pub fn inference_health_context(&self) -> String {
+        inference_health::context(&self.runs)
     }
     pub fn transcript_context(&self) -> String {
         let sources:Vec<_>=self.runs.iter().filter_map(|r|r.snapshot().record.transcript_import).map(|p|json!({"source":p.source,"message_count":p.message_ids.len(),"history_sha256":p.request_sha256})).collect();

@@ -308,6 +308,12 @@ fn exchange(
                 let failure_reason=event["reason"].as_str().unwrap_or("inference provider exchange failed; partial output remains retained and has not been accepted as conversation state").to_owned();
                 retained.push(event);
                 if failed {
+                    run.diagnostic(
+                        Level::Warn,
+                        "inference.exchange_failed",
+                        || json!({"step":step,"purpose":purpose,"reason":failure_reason}),
+                        || Value::Null,
+                    );
                     return Err(failure_reason.into());
                 }
                 if complete {
@@ -581,6 +587,7 @@ pub fn execute(
         system.push_str(&jobs.residents.instructions(r));
     }
     system.push_str(&history.transcript_context());
+    system.push_str(&history.inference_health_context());
     system.push_str(&trigger_context);
     if let Some(recovery) = &record.recovery {
         system.push_str(&format!("\nRecovery incident: {recovery}"));

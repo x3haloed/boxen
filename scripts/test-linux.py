@@ -22,7 +22,7 @@ import tempfile
 import time
 
 SUITES = ["platform", "smoke", "workload", "transcript-import", "thread-import", "resident-promotion", "recovery", "resident", "resident-class", "mailbox",
-          "logging", "scheduler", "events", "messaging", "inference-runtime", "compaction", "media", "inference-probe"]
+          "logging", "scheduler", "events", "messaging", "inference-runtime", "inference-health", "compaction", "media", "inference-probe"]
 
 
 def worker(binary):

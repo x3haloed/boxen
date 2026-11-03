@@ -104,3 +104,13 @@ legacy mailbox endpoints retain their original behavior.
 `resident_definition` accepts an `args` object with `action`: `list`, `get`, `history`, `create`, `update`, `instantiate`, `instances`, or `apply`. It follows the same authenticated destination envelope and owner scope as resident operations. See [resident definitions](resident-definitions.md) for exact inputs, immutable revisions, manual propagation and runtime pinning. Existing resident, mailbox, scheduling and run APIs operate on instances without a class-specific execution path.
 
 [Resident promotion](resident-promotion.md) preserves an existing native Codex conversation and supplies resident operations through a scoped MCP bridge. The new identity uses ordinary resident/mailbox APIs; historical run records remain unchanged.
+
+## Built-in inference health and continuation
+
+`{"op":"inference_health","offset":0}` returns owner-scoped coalesced incident
+rows with pagination. `{"op":"inference_resume","failed_run_id":"FAILED_RUN_ID","id":"NEW_RUN_ID"}`
+accepts an explicit continuation in the same canonical conversation. The source
+must remain its latest interrupted built-in run; stable exact IDs are retry-safe.
+Neither operation replays historical effects or delivers private narration as
+mail. See [inference incidents](inference-health.md) for classification, agent
+context, recovery semantics and limits.

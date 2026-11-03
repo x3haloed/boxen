@@ -20,7 +20,7 @@ Codex, and model credentials are not prerequisites. The runner checks for the
 optional probe commands before uploading rather than silently skipping tests.
 
 An optional `--codex /absolute/linux/path/to/codex --codex-model MODEL` keeps the
-eighteen controlled suites and changes the final direct-LAN check to a real Codex
+nineteen controlled suites and changes the final direct-LAN check to a real Codex
 app-server workload and native thread follow-up. This opt-in path uses the Linux
 host's existing sign-in and consumes real model usage. The test does not install
 a CLI or copy authentication material. Its report distinguishes real Codex from
@@ -30,7 +30,7 @@ See [headless Codex setup and live evidence](workloads.md#headless-codex-on-linu
 Only the binary, selected test scripts, and controlled Codex fixture are copied
 to a private `/tmp/boxen-linux-*` directory. The worker records the actual OS,
 architecture, kernel, distribution, Python version, binary SHA-256, suite exit
-statuses and timings. These eighteen suites run against the uploaded file:
+statuses and timings. These nineteen suites run against the uploaded file:
 
 - Blocking, notification and idle CPU checks (`platform`).
 - Pairing, authenticated controls and revocation (`smoke`).
@@ -47,6 +47,7 @@ statuses and timings. These eighteen suites run against the uploaded file:
 - Resident/thread scheduled wakes, coalescing, crash recovery and idle CPU (`scheduler`).
 - External observations/adapters, bounded failures, lifecycle, effects and storage (`events`).
 - Built-in inference, actual shell effects and communication (`inference-runtime`).
+- Coalesced inference incidents and exact-ID continuation without effect replay (`inference-health`).
 - Selectable context policies, exact history, review, summary failure and recovery (`compaction`).
 - Native media wire bytes, quotas and snapshot recovery (`media`).
 - SSE/native-state projection and TLS rejection (`inference-probe`).

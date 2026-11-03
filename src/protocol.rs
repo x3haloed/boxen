@@ -397,6 +397,18 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 },
                 request["after"].as_u64().unwrap_or(0),
             ),
+            "inference_health" => {
+                Ok(jobs.inference_health(owner, request["offset"].as_u64().unwrap_or(0) as usize))
+            }
+            "inference_resume" => Ok(serde_json::to_value(
+                jobs.resume_inference(
+                    owner,
+                    request["failed_run_id"]
+                        .as_str()
+                        .ok_or("failed_run_id required")?,
+                    request["id"].as_str().ok_or("id required")?.into(),
+                )?,
+            )?),
             "resident_activate" => Ok(serde_json::to_value(
                 jobs.activate(
                     owner,
