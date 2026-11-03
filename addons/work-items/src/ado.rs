@@ -554,6 +554,18 @@ pub fn sync_once(s: &Store, cfg: &Config, api: &mut impl Source) -> Result<usize
     Ok(ids.len())
 }
 pub fn sync_item(s: &Store, cfg: &Config, api: &mut impl Source, item: i64) -> Result<()> {
+    sync_item_inner(s, cfg, api, item, false)
+}
+pub fn sync_selected_item(s: &Store, cfg: &Config, api: &mut impl Source, item: i64) -> Result<()> {
+    sync_item_inner(s, cfg, api, item, true)
+}
+fn sync_item_inner(
+    s: &Store,
+    cfg: &Config,
+    api: &mut impl Source,
+    item: i64,
+    selected: bool,
+) -> Result<()> {
     let source = cfg.source();
     let old: Option<i64> = s
         .connect()?
@@ -577,7 +589,13 @@ pub fn sync_item(s: &Store, cfg: &Config, api: &mut impl Source, item: i64) -> R
         "Source revision went backwards"
     );
     let (eligible, reason) = eligibility(cfg, &wi);
-    if old.is_none() && !eligible {
+    if selected {
+        ensure!(
+            wi["fields"]["System.TeamProject"] == cfg.project,
+            "Selected item belongs to another project"
+        );
+    }
+    if old.is_none() && !eligible && !selected {
         return Ok(());
     }
     let mut revisions = Vec::new();

@@ -254,6 +254,31 @@ fn description_marker_ignores_script_and_style_text() -> Result<()> {
 }
 
 #[test]
+fn explicit_selection_retains_ineligible_source_without_changing_discovery_rules() -> Result<()> {
+    let (s, cfg, mut api) = fixture()?;
+    api.discover.clear();
+    api.wi["fields"]["System.AssignedTo"]["uniqueName"] = json!("reviewer@example.invalid");
+    sync_once(&s, &cfg, &mut api)?;
+    assert!(s.packet(1).is_err());
+    sync_selected_item(&s, &cfg, &mut api, 1)?;
+    assert_eq!(s.packet(1)?["eligible"], false);
+    assert!(
+        !s.packet(1)?["evidence"]["entities"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let before = event_count(&s)?;
+    api.comment_version += 1;
+    sync_once(&s, &cfg, &mut api)?;
+    assert!(event_count(&s)? > before);
+    api.wi["fields"]["System.TeamProject"] = json!("Another project");
+    assert!(sync_selected_item(&s, &cfg, &mut api, 2).is_err());
+    assert!(s.packet(2).is_err());
+    Ok(())
+}
+
+#[test]
 fn pr_discussion_text_changes_are_mirrored_without_ticket_revision_or_vote_changes() -> Result<()> {
     let (s, cfg, mut api) = fixture()?;
     sync_once(&s, &cfg, &mut api)?;

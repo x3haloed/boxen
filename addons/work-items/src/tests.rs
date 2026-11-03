@@ -169,6 +169,67 @@ fn operator_request_is_exact_and_same_item_cannot_spawn_twice() {
     changed["idempotency_key"] = json!("another request");
     assert!(f.s.assign(&f.cfg, &changed).is_err());
 }
+
+#[test]
+fn explicit_eligibility_exception_is_frozen_and_does_not_bypass_source_freshness() {
+    let f = Fixture::new();
+    let c = f.s.connect().unwrap();
+    let raw = json!({"id":1,"rev":1,"fields":{"System.TeamProject":"Example","System.Title":"Returned work"}});
+    c.execute(
+        "UPDATE ado_items SET eligible=0,reason='Assigned elsewhere',raw=?1 WHERE id=1",
+        [raw.to_string()],
+    )
+    .unwrap();
+    let mut input = f.input(1);
+    assert!(f.s.assign(&f.cfg, &input).is_err());
+    for invalid in [
+        json!({"reason":"Return"}),
+        json!({"reason":"Return","authority":" "}),
+        json!({"reason":"Return","authority":"Operator","extra":true}),
+    ] {
+        input["eligibility_override"] = invalid;
+        assert!(f.s.assign(&f.cfg, &input).is_err());
+    }
+    input["eligibility_override"] =
+        json!({"reason":"Follow-up on reviewed work","authority":"Explicit operator selection"});
+    let accepted = f.s.assign(&f.cfg, &input).unwrap();
+    assert_eq!(f.s.packet(1).unwrap()["eligible"], false);
+    assert_eq!(
+        f.s.assign(&f.cfg, &input).unwrap()["job_id"],
+        accepted["job_id"]
+    );
+    let job = f.s.reserve(1).unwrap().unwrap();
+    let api = Fake::new(&f.cfg);
+    dispatch(&f.s, &f.cfg, &api, &job).unwrap();
+    assert_eq!(api.mail.lock().unwrap().len(), 1);
+    let frozen: String = c
+        .query_row("SELECT packet FROM assignments WHERE job=?1", [&job], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&frozen).unwrap()["eligibility_override"],
+        input["eligibility_override"]
+    );
+    c.execute("UPDATE work SET state='reserved' WHERE id=?1", [&job])
+        .unwrap();
+    c.execute(
+        "UPDATE ado_items SET raw=?1 WHERE id=1",
+        [json!({"id":1,"rev":2,"fields":{"System.TeamProject":"Example"}}).to_string()],
+    )
+    .unwrap();
+    dispatch(&f.s, &f.cfg, &api, &job).unwrap();
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["state"], "needs_refresh");
+    assert_eq!(api.mail.lock().unwrap().len(), 1);
+    c.execute(
+        "UPDATE ado_items SET eligible=0,raw=?1 WHERE id=2",
+        [json!({"id":2,"rev":1,"fields":{"System.TeamProject":"Another project"}}).to_string()],
+    )
+    .unwrap();
+    let mut other = f.input(2);
+    other["eligibility_override"] = input["eligibility_override"].clone();
+    assert!(f.s.assign(&f.cfg, &other).is_err());
+}
 #[test]
 fn capacity_and_conflicting_worktree_claims_are_atomic() {
     let f = Fixture::new();

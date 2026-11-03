@@ -285,9 +285,16 @@ impl Store {
             "Source digest changed; assignment needs current evidence"
         );
         ensure!(
-            packet["eligible"] == true,
-            "Work item is not currently eligible"
+            assignment_eligible(&packet, &input["eligibility_override"]),
+            "Work item is not currently eligible; an explicit operator exception requires reason and attributed authority"
         );
+        if packet["eligible"] != true {
+            ensure!(
+                packet["evidence"]["item"]["fields"]["System.TeamProject"]
+                    == ado::config(self)?.project,
+                "Operator exception cannot cross projects"
+            );
+        }
         ensure!(
             now() - packet["observed"].as_i64().unwrap_or(0) < 30 * 60_000,
             "Mirror is stale; refresh before assignment"
@@ -503,7 +510,15 @@ impl Store {
                 .unwrap_or(Value::Null)
         };
         let mid = hash(&format!("assignment:{job}:{version}"));
-        let bundle = json!({"assignment":assignment,"context":input["context"],"legacy_reconciliation":input["legacy_reconciliation"],"replacement":input["replacement"],"source_packet":packet});
+        if packet["eligible"] != true {
+            Self::log(
+                &tx,
+                &job,
+                "eligibility.overridden",
+                json!({"item":item,"version":version,"override":input["eligibility_override"]}),
+            )?;
+        }
+        let bundle = json!({"assignment":assignment,"context":input["context"],"legacy_reconciliation":input["legacy_reconciliation"],"replacement":input["replacement"],"eligibility_override":input["eligibility_override"],"source_packet":packet});
         let packet_path = self
             .path
             .parent()
@@ -619,6 +634,17 @@ impl Store {
     }
 }
 
+pub fn assignment_eligible(packet: &Value, exception: &Value) -> bool {
+    packet["eligible"] == true
+        || exception.as_object().is_some_and(|v| {
+            v.len() == 2
+                && ["reason", "authority"].iter().all(|k| {
+                    v.get(*k)
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.trim().is_empty() && s.len() <= 4096)
+                })
+        })
+}
 pub fn packet_on(c: &Connection, source: &str, item: i64) -> Result<Value> {
     let (raw, rev, eligible, observed): (String, i64, bool, i64) = c
         .query_row(

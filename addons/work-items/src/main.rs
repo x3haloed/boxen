@@ -60,7 +60,12 @@ fn poll(s: &Store, home: &Path, item: Option<i64>) -> Result<()> {
     ensure!(cfg.enabled, "Mirror is disabled");
     let mut source = ado::AzureCli::new(cfg.clone(), s);
     if let Some(item) = item {
-        return ado::sync_item(s, &cfg, &mut source, item);
+        let result = ado::sync_selected_item(s, &cfg, &mut source, item);
+        event(
+            "mirror.item_selected",
+            json!({"item":item,"accepted":result.is_ok()}),
+        );
+        return result;
     }
     s.connect()?.execute(
         "UPDATE ado_sync SET running=1,requested=0,last_started=?1,error=NULL,examined=0",

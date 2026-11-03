@@ -122,7 +122,10 @@ pub fn dispatch(s: &Store, cfg: &Config, api: &impl Boxen, job: &str) -> Result<
     )?;
     let latest = packet_on(&c, &source, item)?;
     if latest["source_digest"] != digest
-        || latest["eligible"] != true
+        || !crate::assignment_eligible(
+            &latest,
+            &serde_json::from_str::<Value>(&packet)?["eligibility_override"],
+        )
         || now() - latest["observed"].as_i64().unwrap_or(0) > 30 * 60_000
     {
         c.execute("UPDATE work SET state='needs_refresh',error='Source changed or is stale; operator refresh required' WHERE id=?1 AND version=?2",params![job,version])?;

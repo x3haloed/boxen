@@ -98,6 +98,9 @@ and discussions, legacy ownership/decisions, revision, observed time and source
 digest. Attachments remain URLs/metadata; their bytes have not been inspected.
 Historical revisions/author qualifications and current observations are distinct.
 `poll --item` refreshes one item. A busy scan is reported rather than overlapped.
+Explicit selection also retains a previously unseen ineligible item in the
+configured project, such as a ticket assigned to a reviewer. Actual eligibility
+stays false; later polling keeps watching it. Discovery and Azure fields are unchanged.
 
 An assignment request has this outer shape:
 
@@ -125,6 +128,11 @@ valid inputs. The service never runs an assignment-supplied executable.
 
 Context decisions are explicitly supplied by the operator for this slice; they are
 not a claim that a context-agent decision tool or attributed answer authority exists.
+An ineligible assignment additionally requires `eligibility_override` with
+nonempty `reason` and `authority` strings (each at most 4096 bytes). This operator
+exception is frozen in the packet and recorded in workflow events. It cannot
+cross projects, release holds, bypass freshness/capacity or permit publication.
+Source changes still invalidate that exact assignment.
 Existing clarification holds require supplied authoritative-answer references.
 Historical unfinished ownership prohibits a fresh copy. An adopted legacy coder
 must first be imported/promoted by the operator: `new_copy: false` plus `coder_id`
