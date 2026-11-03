@@ -184,6 +184,33 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         continued=activate(r);assert continued['record']['mailbox']['message_ids']==[]
         assert collect(continued)[1]['status']=='completed' and len(inbox())==2
         print('PASS selective resident mail, private narration, no-send completion, shared continuity and distinct child request/response tools')
+        current=api({'op':'resident_get','id':r['id']})
+        changed=api({'op':'resident_update','id':r['id'],'patch':{'expected_revision':current['revision'],'model':'fixture-next'}})
+        assert changed['identity']==current['identity'] and changed['memory']==current['memory']
+        for invalid_model in ['', ' '*3, 'x'*257]:
+            try:
+                api({'op':'resident_update','id':r['id'],'patch':{'expected_revision':changed['revision'],'model':invalid_model}})
+                raise AssertionError('invalid model accepted')
+            except urllib.error.HTTPError as error:assert b'1\xe2\x80\x93256' in error.read()
+        assert api({'op':'resident_get','id':r['id']})==changed
+        try:
+            api({'op':'resident_update','id':r['id'],'patch':{'expected_revision':current['revision'],'model':'stale-model'}})
+            raise AssertionError('stale model update accepted')
+        except urllib.error.HTTPError as error:assert b'revision conflict' in error.read()
+        processes[-1].kill();processes[-1].wait(timeout=5);tokens[1]=daemon(1)
+        before=len(observed);switched=activate(changed,'EMPTY');switched_events,switched_done=collect(switched)
+        assert switched_done['status']=='completed' and observed[before]['model']=='fixture-next'
+        assert switched['record']['spec']['thread_id']==r['id']
+        assert switched['record']['resident']['model']=='fixture-next'
+        assert api({'op':'get','id':activation['record']['spec']['id']})['record']['resident']['model']=='fixture'
+        assert any('inference-memory-proof' in json.dumps(m) for m in observed[before]['messages'])
+        assert any(m.get('role')=='assistant' and m.get('content')=='PRIVATE_ONLY' for m in observed[before]['messages'])
+        assert len(inbox())==2
+        try:
+            api({'op':'start','spec':{**ordinary['record']['spec'],'id':secrets.token_hex(32),'model':'fixture-next','prompt':'EMPTY'}})
+            raise AssertionError('anonymous model pin bypassed')
+        except urllib.error.HTTPError as error:assert b'pins a thread' in error.read()
+        print('PASS revisioned resident model switch, restart persistence, retained continuity and historical model attribution; anonymous model pin preserved')
         assert any('inference.' in line for line in log.read_text().splitlines())
         processes[-1].kill();processes[-1].wait(timeout=5);tokens[1]=daemon(1,fixture=False)
         unconfigured=resident();before=len(observed);missing=activate(unconfigured,'EMPTY')

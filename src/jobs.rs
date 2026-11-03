@@ -1816,7 +1816,9 @@ impl Jobs {
                 return Err("thread already has an active run; another request is accepted after it ends, and steering is a separate control operation".into());
             }
             if prior.record.spec.backend != spec.backend
-                || (spec.backend == "openrouter" && prior.record.spec.model != spec.model)
+                || (spec.backend == "openrouter"
+                    && resident.is_none()
+                    && prior.record.spec.model != spec.model)
             {
                 return Err("this slice pins a thread's runtime and inference model; a new thread can select a different one".into());
             }

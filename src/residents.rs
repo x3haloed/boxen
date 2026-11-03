@@ -168,6 +168,7 @@ pub struct Promotion {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Patch {
+    pub model: Option<String>,
     pub context: Option<crate::context::Settings>,
     pub expected_revision: u64,
     pub name: Option<String>,
@@ -521,6 +522,24 @@ impl Residents {
         }
         let mut stored = prior.clone();
         let r = &mut stored.resident;
+        if let Some(value) = patch.model {
+            if r.backend != "openrouter" || value.trim().is_empty() || value.len() > 256 {
+                logging::record(
+                    Level::Warn,
+                    Target::State,
+                    "resident.model_change_rejected",
+                    Context {
+                        thread_id: Some(id),
+                        peer_id: Some(owner),
+                        ..Context::default()
+                    },
+                    || json!({"backend":r.backend,"model_bytes":value.len()}),
+                    || Value::Null,
+                );
+                return Err("model changes accept 1–256 nonblank bytes on built-in inference residents; managed sessions retain their model".into());
+            }
+            r.model = value;
+        }
         if let Some(value) = patch.context {
             r.context = value;
         }
@@ -570,7 +589,7 @@ impl Residents {
                 peer_id: Some(owner),
                 ..Context::default()
             },
-            || json!({"revision":resident.revision,"used_bytes":resident.used_bytes(),"quota_bytes":resident.quota_bytes}),
+            || json!({"revision":resident.revision,"used_bytes":resident.used_bytes(),"quota_bytes":resident.quota_bytes,"model":resident.model}),
             || Value::Null,
         );
         Ok(resident)
@@ -629,6 +648,7 @@ impl Residents {
                 owner,
                 id,
                 Patch {
+                    model: None,
                     context: None,
                     expected_revision: input
                         .expected_revision

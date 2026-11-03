@@ -111,6 +111,7 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert sum(r is not None for r in outcomes)==1
         resident=get_resident(ident)
         assert resident["revision"]==2
+        rejected({"op":"resident_update","id":ident,"patch":{"expected_revision":2,"model":"other"}},"managed sessions retain their model")
         rejected({"op":"resident_update","id":ident,"patch":{"expected_revision":2,"memory":"x"*300}},"quota exceeded")
         assert get_resident(ident)==resident
         rejected({"op":"resident_update","id":ident,"patch":{"expected_revision":2,"memory":"stolen"}},"different peer",**foreign)

@@ -59,6 +59,8 @@ Preserve `docs/events.md` and its first host-local JSON implementation in `docs/
 
 ## Built-in inference runtime
 
+Resident model switching is backend-dependent. Revision-checked operator updates can change an OpenRouter resident's model for future accepted activations while preserving canonical history, mailbox, identity, memory and historical source-model attribution. Codex residents retain their managed-session model. An accepted run keeps its captured model; a model update does not start inference or replay prior effects. Definition application and anonymous-thread pins remain separate contracts.
+
 The built-in runtime and managed runtimes share the daemon-owned continuity, mailbox, and thread operations in `src/agent_tools.rs`. Preserve that authority rather than adding runtime-specific mail or identity stores. `inference_message` records, native provider frames, and existing run journals own inference continuity; diagnostic logging is not a prerequisite for replay. Partial provider output is observable but is not accepted conversation state before a supported completed projection. A missing tool result stays unknown; context repair does not dispatch the historical call.
 
 Maintain `scripts/inference-runtime-smoke.py` for streamed remote execution, native-state follow-up, truncated/malformed calls, completed-effect retention, unknown-result recovery, cancellation/steering, selective/no-send resident communication, continuity, distinct child requests, and credential failure/recovery. Distinguish its controlled provider from live evidence in `scripts/inference-runtime-live.py`. Actual APE self-launch uses `platform::executable()`; Linux-target Rust host assumptions are not evidence of macOS or Windows behavior.

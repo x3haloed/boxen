@@ -25,7 +25,7 @@ boxen watch HOST:42424 PEER_KEY RUN_ID
 boxen resident-update HOST:42424 PEER_KEY RESIDENT_ID EXPECTED_REVISION --memory-file memory.txt
 ```
 
-Creation supports `--id`, `--identity-file`, `--memory-file`, and `--quota`. Preserve the original ID and exact inputs when retrying an uncertain creation or message. Resident creation remains idempotent even after the resident updates its memory. Identity/memory edits use compare-and-set; on an uncertain response, read the current revision/content rather than blindly overwriting it. Working directory and model are pinned in this first implementation; name, identity, memory, and quota can be edited. Anonymous threads remain available.
+Creation supports `--id`, `--identity-file`, `--memory-file`, and `--quota`. Preserve the original ID and exact inputs when retrying an uncertain creation or message. Resident creation remains idempotent even after the resident updates its memory. Identity/memory edits use compare-and-set; on an uncertain response, read the current revision/content rather than blindly overwriting it. Working directory and backend remain pinned. Built-in inference residents accept a revision-checked `model` patch through `resident_update` or `resident-update ... --model MODEL`; managed residents retain their model. The change affects future accepted activations, including scheduled activations, without starting inference or replacing identity, memory, mailbox or canonical history. Active and historical runs retain their accepted model and continuity snapshots. Original history retains source-model attribution; changing a model does not promise equivalent interpretation or native provider compatibility. Anonymous thread models remain pinned. Name, identity, memory, and quota can also be edited. Anonymous threads remain available.
 
 ## Continuity and environment
 
@@ -65,7 +65,7 @@ Use the existing destination envelope at `POST /api/operation` or the equivalent
 | `resident_create` | `spec`: `id`, `name`, `cwd`, optional `model`, `identity`, `memory`, `quota_bytes` | Saved resident; no inference |
 | `resident_list` | None | Owner-visible residents, including idle ones |
 | `resident_get` | `id` | Current resident |
-| `resident_update` | `id`, `patch`: `expected_revision` and optional `name`, `identity`, `memory`, `quota_bytes` | Committed resident or explicit rejection |
+| `resident_update` | `id`, `patch`: `expected_revision` and optional `name`, `identity`, `memory`, `quota_bytes`, built-in `model` | Committed resident or explicit rejection |
 | `resident_issues` | None | Current host's resident-load incidents (metadata only) |
 | `resident_activate` | Resident `id`, `activation_id`, optional `directions` | Independent activation snapshot; existing run/event streaming contract |
 

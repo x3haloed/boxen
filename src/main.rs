@@ -80,7 +80,7 @@ boxen resident-promote HOST:PORT PUBLIC_KEY JSON_SPEC\n\
 boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|openrouter] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-class HOST:PORT PUBLIC_KEY JSON\n\
 boxen resident-get HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
-boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
+boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--model MODEL] [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-message HOST:PORT PUBLIC_KEY RESIDENT_ID BODY [--id MESSAGE_ID] [--subject SUBJECT] [--client-id ID]\n\
 boxen mailbox HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
 boxen inbox HOST:PORT PUBLIC_KEY [--client-id ID] [--after SEQUENCE]\n\
@@ -271,6 +271,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
             );
         }
         "resident-update" => {
+            let model = take_option(&mut args, "--model")?;
             let context: Option<crate::context::Settings> = take_option(&mut args, "--context")?
                 .map(|s| serde_json::from_str(&s))
                 .transpose()?;
@@ -297,7 +298,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"resident_update","id":args[2],"patch":{"expected_revision":revision,"context":context,"name":name,"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
+                    serde_json::json!({"op":"resident_update","id":args[2],"patch":{"expected_revision":revision,"model":model,"context":context,"name":name,"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
                 )?
             );
         }
