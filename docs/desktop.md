@@ -68,7 +68,7 @@ A peer address locates an already-pinned identity; it grants no new trust.
 
 The presentation is deliberately simple: selectable text, exposed thinking,
 tool activity/output, status and incidents. Rich Markdown, rendered attachments,
-backend input forms, residents, scheduling and observation-source controls are
+backend input forms, resident management, scheduling and observation-source controls are
 not part of this desktop slice. The temporary web client still exposes those
 implemented daemon controls. Framework choice does not settle future visual UX.
 
@@ -134,3 +134,53 @@ used 0.10 CPU seconds over 10.034 wall seconds (about 1% of one core), with
 history, not a large-history performance claim. The shipped native window also
 loaded an existing Mac Mini conversation through the running daemon without
 submitting a production workload.
+
+## Correspondence
+
+The **Correspondence** panel is docked on the left alongside Threads. It aggregates
+mail addressed to this controller's human client across configured machines;
+agent-to-agent traffic and private execution narration are not inbox messages.
+The client ID is the local daemon's stable public machine identity, so its address
+`client:MACHINE:MACHINE` is discoverable by any authorized custom client without
+GUI storage. Mail remains host-local under existing owner scoping; the desktop
+polls each execution host's client inbox rather than moving mail into a second
+store. **Copy mailbox address** exposes that address.
+
+Single-click previews message details; double-click keeps them open. Message and
+thread previews share one global slot across all docking surfaces. Drafting or
+dragging pins a preview. Details include subject, sender, original text and a reply
+composer. **New message** opens a pinned editor with an agent-instance selector
+(machine and short ID distinguish names), subject and body. The palette offers
+**Show correspondence** and **New message**. Layout reset preserves open mail
+editors and drafts, and existing saved layouts gain the new sidebar once.
+
+Sending queues ordinary Boxen mail, with explicit reply provenance when replying.
+Acceptance is not a promise of a reply or proof of reading. No assistant bubble
+or agent activation is fabricated. Replies, selective replies and no-reply
+completion retain the daemon's mailbox contract. Subjects are bounded to 256
+bytes and bodies to 32 KiB. A confirmed send shows its retained receipt/text;
+there is no Sent-folder or activity transcript in this iteration.
+
+The sidebar draft list reopens unfinished new messages after their editors close.
+Drafts, local read markers and exact unresolved requests survive layout changes
+and desktop restart. The exact request ID/spec is saved before transmission.
+Polling reconciles acceptance by that ID but never sends or repeats work. An
+uncertain request retains its text and offers an explicit same-ID retry; closing
+its editor does not discard it or own delivery lifetime. Original correspondence
+and receipts remain in the daemon journal. GUI-local read markers do not claim
+that an agent read or understood a message.
+
+Inbox pages refresh off the render thread, with independent machine cursors and
+explicit per-machine errors. The agent selector refreshes every ten seconds and
+retains only display metadata. The extended desktop smoke test exercises the
+real native client through paired native and actual APE daemons: discovery,
+exact-ID sends/retries, resident-authored incoming mail, reply provenance, and
+completion without a reply. Workspace tests cover cross-kind preview replacement,
+pinning, serialization after layout, and existing pointer-event docking behavior.
+
+Native macOS correspondence verification used a disposable paired-daemon fixture:
+single-click preview replacement, double-click pinning, editing pinning, recipient
+selection, reply and new-message acceptance, retained reply provenance, closing
+and reopening an unsent draft, moving message details into a separate dock group,
+and restoring the saved layout on application restart. These native UI checks
+remain separate from controlled backend tests and do not send production mail.

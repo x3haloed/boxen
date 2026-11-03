@@ -25,6 +25,7 @@ pub struct Pending {
     pub spec: Value,
 }
 pub enum Update {
+    Mail(crate::correspondence::MailUpdate),
     Discovered(Result<Value, String>),
     Catalog(Destination, Result<Vec<Value>, String>),
     Batch(String, u64, Value),
@@ -55,7 +56,7 @@ pub struct Publisher {
     ctx: egui::Context,
 }
 impl Publisher {
-    fn send(&self, event: Update) -> bool {
+    pub(crate) fn send(&self, event: Update) -> bool {
         if self.tx.send(event).is_err() {
             return false;
         }

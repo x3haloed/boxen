@@ -1,4 +1,5 @@
 mod client;
+mod correspondence;
 mod model;
 mod workspace;
 use client::{Bus, Client, Pending, Update, run_key};
@@ -27,6 +28,8 @@ struct Saved {
     hidden_machines: HashSet<String>,
     drafts: Vec<(ThreadKey, String)>,
     pending: Vec<Pending>,
+    mail: correspondence::SavedMail,
+    correspondence_added: bool,
 }
 struct Observing {
     epoch: u64,
@@ -35,8 +38,10 @@ struct Observing {
     error: Option<String>,
     done: bool,
 }
+#[derive(Default)]
 struct Data {
     local_key: String,
+    mail: correspondence::Mailbox,
     saved: Saved,
     catalogs: HashMap<String, Vec<Conversation>>,
     errors: HashMap<String, String>,
@@ -48,6 +53,7 @@ struct Data {
     sending: HashSet<String>,
 }
 enum Action {
+    Mail(correspondence::MailAction),
     Open(ThreadKey, bool),
     Pin(ThreadKey),
     Send(ThreadKey),
@@ -107,14 +113,19 @@ impl Desktop {
             s.visuals.selection.bg_fill = egui::Color32::from_rgb(46, 72, 91);
         });
         let state_path = home.join("desktop.json");
-        let saved = std::fs::read(&state_path)
+        let mut saved: Saved = std::fs::read(&state_path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
+        if !saved.correspondence_added {
+            saved.workspace.show_correspondence();
+            saved.correspondence_added = true;
+        }
         let bus = Bus::new(cc.egui_ctx.clone());
         let mut app = Self {
             data: Data {
                 local_key: String::new(),
+                mail: Default::default(),
                 saved,
                 catalogs: HashMap::new(),
                 errors: HashMap::new(),
@@ -230,6 +241,12 @@ impl Desktop {
             if !self.polls.contains_key(&dest.key) {
                 let stop = Arc::new(AtomicBool::new(false));
                 client.catalog(dest.clone(), self.bus.publisher(), stop.clone());
+                client.mail_poll(
+                    dest.clone(),
+                    self.data.local_key.clone(),
+                    self.bus.publisher(),
+                    stop.clone(),
+                );
                 self.polls.insert(dest.key.clone(), stop);
             }
         }
@@ -237,6 +254,7 @@ impl Desktop {
     fn updates(&mut self) {
         while let Ok(update) = self.bus.rx.try_recv() {
             match update {
+                Update::Mail(update) => self.mail_update(update),
                 Update::Discovered(result) => match result {
                     Ok(status) => self.discovered(status),
                     Err(error) => self.data.notice = format!("Daemon unavailable: {error}"),
@@ -597,11 +615,10 @@ impl Desktop {
     }
     fn action(&mut self, action: Action) {
         match action {
+            Action::Mail(a) => self.mail_action(a),
             Action::Split(pane, direction) => {
                 if let Some(path) = self.data.saved.workspace.dock.find_tab(&pane) {
-                    if let Pane::Thread(ref key) = pane {
-                        self.data.saved.workspace.pin(key);
-                    }
+                    self.data.saved.workspace.pin_pane(&pane);
                     // Move the same pane into a new group; a split never clones conversation state.
                     let target = if self
                         .data
@@ -672,6 +689,8 @@ impl Desktop {
             ("Show thread list".into(), None),
             ("Reset docking layout".into(), None),
             ("Machine connections…".into(), None),
+            ("Show correspondence".into(), None),
+            ("New message…".into(), None),
         ];
         for dest in &self.data.saved.destinations {
             for thread in self.data.catalogs.get(&dest.key).into_iter().flatten() {
@@ -741,30 +760,25 @@ impl Desktop {
                 self.action(Action::Open(key, true))
             } else {
                 match index {
+                    4 => self.data.saved.workspace.show_correspondence(),
+                    5 => self.mail_action(correspondence::MailAction::New),
                     0 => self.new_thread = true,
                     1 => self.data.saved.workspace.show_list(),
                     2 => {
-                        let keys: Vec<_> = self
+                        let panes: Vec<_> = self
                             .data
                             .saved
                             .workspace
                             .dock
                             .iter_all_tabs()
-                            .filter_map(|(_, p)| {
-                                if let Pane::Thread(k) = p {
-                                    Some(k.clone())
-                                } else {
-                                    None
-                                }
+                            .filter(|(_, p)| {
+                                matches!(p, Pane::Thread(_) | Pane::Message(_) | Pane::Compose(_))
                             })
+                            .map(|(_, p)| (p.clone(), self.data.saved.workspace.is_preview(p)))
                             .collect();
-                        let preview = self.data.saved.workspace.preview.clone();
                         self.data.saved.workspace = Workspace::default();
-                        for k in keys {
-                            self.data
-                                .saved
-                                .workspace
-                                .open(k.clone(), preview.as_ref() != Some(&k));
+                        for (pane, preview) in panes {
+                            self.data.saved.workspace.open_editor(pane, !preview);
                         }
                     }
                     3 => self.connection = true,
@@ -849,6 +863,16 @@ impl TabViewer for Viewer<'_> {
     type Tab = Pane;
     fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
         match tab {
+            Pane::Correspondence => "Correspondence".into(),
+            Pane::Compose(_) => "New message".into(),
+            Pane::Message(k) => {
+                let text = RichText::new(correspondence::message_title(self.data, k));
+                if self.data.saved.workspace.is_preview(tab) {
+                    text.italics().into()
+                } else {
+                    text.into()
+                }
+            }
             Pane::Threads => "Threads".into(),
             Pane::Welcome => "Conversation".into(),
             Pane::Thread(key) => {
@@ -867,6 +891,9 @@ impl TabViewer for Viewer<'_> {
     fn id(&mut self, tab: &mut Pane) -> egui::Id {
         match tab {
             Pane::Thread(k) => egui::Id::new((&k.peer, &k.id)),
+            Pane::Message(k) => egui::Id::new(("mail", &k.peer, &k.id)),
+            Pane::Compose(id) => egui::Id::new(("compose", id)),
+            Pane::Correspondence => egui::Id::new("correspondence"),
             Pane::Threads => egui::Id::new("threads"),
             Pane::Welcome => egui::Id::new("welcome"),
         }
@@ -875,6 +902,12 @@ impl TabViewer for Viewer<'_> {
         [false, false]
     }
     fn on_tab_button(&mut self, tab: &mut Pane, response: &egui::Response) {
+        if matches!(tab, Pane::Message(_) | Pane::Compose(_))
+            && (response.double_clicked() || response.drag_started())
+        {
+            self.actions
+                .push(Action::Mail(correspondence::MailAction::Pin(tab.clone())));
+        }
         if let Pane::Thread(key) = tab {
             if response.clicked() {
                 self.data.selected_thread = Some(key.clone())
@@ -888,10 +921,9 @@ impl TabViewer for Viewer<'_> {
         }
     }
     fn context_menu(&mut self, ui: &mut egui::Ui, tab: &mut Pane, _: egui_dock::NodePath) {
-        if let Pane::Thread(key) = tab
-            && ui.button("Keep open").clicked()
-        {
-            self.actions.push(Action::Pin(key.clone()));
+        if matches!(tab, Pane::Thread(_) | Pane::Message(_)) && ui.button("Keep open").clicked() {
+            self.actions
+                .push(Action::Mail(correspondence::MailAction::Pin(tab.clone())));
             ui.close();
         }
         for (label, direction) in [
@@ -908,11 +940,19 @@ impl TabViewer for Viewer<'_> {
     }
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
         match tab {
+            Pane::Correspondence => correspondence::inbox(ui, self.data, self.actions),
+            Pane::Message(_) | Pane::Compose(_) => {
+                egui::ScrollArea::vertical()
+                    .id_salt(("mail-details", format!("{tab:?}")))
+                    .show(ui, |ui| {
+                        correspondence::details(ui, tab, self.data, self.actions)
+                    });
+            }
             Pane::Welcome => {
                 ui.vertical_centered(|ui| {
                     ui.add_space(80.);
                     ui.heading("Boxen");
-                    ui.label("A single click previews a thread. A double-click keeps it open.");
+                    ui.label("A single click previews a thread or message. A double-click keeps it open.");
                     ui.label("Tabs can move to any edge, form groups, and float.");
                     ui.label("⌘/Ctrl + Shift + P opens the command palette.");
                 });

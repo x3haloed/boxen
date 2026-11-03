@@ -5,41 +5,90 @@ use serde::{Deserialize, Serialize};
 pub struct Workspace {
     pub dock: DockState<Pane>,
     pub preview: Option<ThreadKey>,
+    #[serde(default)]
+    pub mail_preview: Option<ThreadKey>,
 }
 impl Default for Workspace {
     fn default() -> Self {
         let mut dock = DockState::new(vec![Pane::Welcome]);
-        dock.main_surface_mut()
-            .split_left(NodeIndex::root(), 0.24, vec![Pane::Threads]);
+        dock.main_surface_mut().split_left(
+            NodeIndex::root(),
+            0.24,
+            vec![Pane::Correspondence, Pane::Threads],
+        );
         Self {
             dock,
             preview: None,
+            mail_preview: None,
         }
     }
 }
 impl Workspace {
     pub fn open(&mut self, key: ThreadKey, pin: bool) {
-        let pane = Pane::Thread(key.clone());
+        self.open_editor(Pane::Thread(key), pin);
+    }
+    pub fn open_message(&mut self, key: ThreadKey, pin: bool) {
+        self.open_editor(Pane::Message(key), pin);
+    }
+    pub fn open_compose(&mut self, id: String) {
+        self.open_editor(Pane::Compose(id), true);
+    }
+    pub fn is_preview(&self, pane: &Pane) -> bool {
+        match pane {
+            Pane::Thread(k) => self.preview.as_ref() == Some(k),
+            Pane::Message(k) => self.mail_preview.as_ref() == Some(k),
+            _ => false,
+        }
+    }
+    pub fn pin_pane(&mut self, pane: &Pane) {
+        match pane {
+            Pane::Thread(k) => self.pin(k),
+            Pane::Message(k) if self.mail_preview.as_ref() == Some(k) => self.mail_preview = None,
+            _ => {}
+        }
+    }
+    fn preview_pane(&self) -> Option<Pane> {
+        self.preview
+            .clone()
+            .map(Pane::Thread)
+            .or_else(|| self.mail_preview.clone().map(Pane::Message))
+    }
+    fn set_preview(&mut self, pane: Pane) {
+        self.preview = None;
+        self.mail_preview = None;
+        match pane {
+            Pane::Thread(k) => self.preview = Some(k),
+            Pane::Message(k) => self.mail_preview = Some(k),
+            _ => {}
+        }
+    }
+    pub fn open_editor(&mut self, pane: Pane, pin: bool) {
         if let Some(path) = self.dock.find_tab(&pane) {
             self.focus(path);
             if pin {
-                self.pin(&key)
+                self.pin_pane(&pane)
             }
             return;
         }
         if !pin
-            && let Some(old) = self.preview.take()
-            && let Some(path) = self.dock.find_tab(&Pane::Thread(old))
+            && let Some(old) = self.preview_pane()
+            && let Some(path) = self.dock.find_tab(&old)
         {
-            self.dock[path.surface][path.node].tabs_mut().unwrap()[path.tab.0] = pane;
+            self.dock[path.surface][path.node].tabs_mut().unwrap()[path.tab.0] = pane.clone();
             self.focus(path);
-            self.preview = Some(key);
+            self.set_preview(pane);
             return;
         }
+        let preview_pane = pane.clone();
         let target = self
             .dock
             .iter_all_tabs()
-            .find(|(_, p)| matches!(p, Pane::Thread(_) | Pane::Welcome))
+            .find(|(_, p)| {
+                matches!(
+                    p,
+                    Pane::Thread(_) | Pane::Message(_) | Pane::Compose(_) | Pane::Welcome
+                )
+            })
             .map(|(p, _)| p);
         if let Some(path) = target {
             let welcome = self.dock.find_tab(&Pane::Welcome);
@@ -54,7 +103,10 @@ impl Workspace {
             }
         } else {
             // The list may have been moved or the last editor closed. A new editor splits beside it.
-            let list = self.dock.find_tab(&Pane::Threads);
+            let list = self
+                .dock
+                .find_tab(&Pane::Threads)
+                .or_else(|| self.dock.find_tab(&Pane::Correspondence));
             if let Some(path) = list {
                 self.dock.split(
                     path.node_path(),
@@ -67,7 +119,7 @@ impl Workspace {
             }
         }
         if !pin {
-            self.preview = Some(key)
+            self.set_preview(preview_pane)
         }
     }
     fn focus(&mut self, path: TabPath) {
@@ -77,6 +129,24 @@ impl Workspace {
     pub fn pin(&mut self, key: &ThreadKey) {
         if self.preview.as_ref() == Some(key) {
             self.preview = None
+        }
+    }
+    pub fn show_correspondence(&mut self) {
+        if let Some(path) = self.dock.find_tab(&Pane::Correspondence) {
+            self.focus(path);
+        } else if let Some(path) = self.dock.find_tab(&Pane::Threads) {
+            let leaf = self.dock.leaf_mut(path.node_path()).unwrap();
+            leaf.tabs.push(Pane::Correspondence);
+            leaf.active = TabIndex(leaf.tabs.len() - 1);
+        } else if self.dock.main_surface().is_empty() {
+            self.dock = DockState::new(vec![Pane::Correspondence]);
+        } else {
+            self.dock.split(
+                egui_dock::NodePath::new(SurfaceIndex::main(), NodeIndex::root()),
+                egui_dock::Split::Left,
+                0.24,
+                egui_dock::Node::leaf(Pane::Correspondence),
+            );
         }
     }
     pub fn show_list(&mut self) {
@@ -129,6 +199,52 @@ mod tests {
                 .count(),
             3
         );
+    }
+    #[test]
+    fn mail_and_threads_share_one_preview_and_pinned_mail_survives() {
+        let mut w = Workspace::default();
+        w.open_message(key("mail-a"), false);
+        let path = w.dock.find_tab(&Pane::Message(key("mail-a"))).unwrap();
+        w.dock.detach_tab(
+            path,
+            eframe::egui::Rect::from_min_size(
+                eframe::egui::pos2(0., 0.),
+                eframe::egui::vec2(300., 300.),
+            ),
+        );
+        w.open(key("thread"), false);
+        assert!(w.dock.find_tab(&Pane::Message(key("mail-a"))).is_none());
+        w.open_message(key("mail-b"), false);
+        assert!(w.dock.find_tab(&Pane::Thread(key("thread"))).is_none());
+        w.open_message(key("mail-b"), true);
+        w.open_message(key("mail-c"), false);
+        assert!(w.dock.find_tab(&Pane::Message(key("mail-b"))).is_some());
+        w.pin_pane(&Pane::Message(key("mail-c")));
+        w.open(key("next"), false);
+        assert!(w.dock.find_tab(&Pane::Message(key("mail-c"))).is_some());
+        struct Draw;
+        impl egui_dock::TabViewer for Draw {
+            type Tab = Pane;
+            fn title(&mut self, _: &mut Pane) -> eframe::egui::WidgetText {
+                "Panel".into()
+            }
+            fn ui(&mut self, _: &mut eframe::egui::Ui, _: &mut Pane) {}
+        }
+        let ctx = eframe::egui::Context::default();
+        let _ = ctx.run_ui(
+            eframe::egui::RawInput {
+                screen_rect: Some(eframe::egui::Rect::from_min_size(
+                    eframe::egui::pos2(0., 0.),
+                    eframe::egui::vec2(1000., 700.),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                egui_dock::DockArea::new(&mut w.dock).show_inside(ui, &mut Draw);
+            },
+        );
+        let restored: Workspace = serde_json::from_slice(&serde_json::to_vec(&w).unwrap()).unwrap();
+        assert!(restored.is_preview(&Pane::Thread(key("next"))));
     }
     #[test]
     fn same_thread_does_not_duplicate_and_peer_keys_are_distinct() {

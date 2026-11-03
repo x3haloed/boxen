@@ -58,6 +58,18 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
         env=os.environ|{'BOXEN_GUI_TEST_HOME':str(homes[0]),'BOXEN_GUI_TEST_URL':f'http://127.0.0.1:{controls[0]}','BOXEN_GUI_TEST_DEST':json.dumps(destination)}
         subprocess.run(['cargo','test','--locked','--manifest-path',str(ROOT/'desktop/Cargo.toml'),'real_daemon_boundary','--','--ignored','--nocapture'],env=env,check=True)
         if args.interactive:
+            # Seed the human inbox through real resident tools, never fabricated journal rows.
+            for name,subject,body in [('Resident demo','Project review','The review is ready. There are two questions worth discussing.'),('Worker instance','Workload status','The requested workload has finished. Its execution record remains available.')]:
+                agent=secrets.token_hex(32)
+                operation({'op':'resident_create','spec':{'id':agent,'name':name,'cwd':temporary,'auto_activate':False}})
+                call={'action':'send','to':{'instance':'boxen','conversation':f'client:{keys[0]}:{keys[0]}'},'subject':subject,'body':body}
+                operation({'op':'mailbox_send','client_id':keys[0],'message':{'id':secrets.token_hex(32),'to':{'type':'resident','id':agent},'subject':'Fixture correspondence','body':'MESSAGING:'+json.dumps(call)}})
+                accepted=operation({'op':'resident_activate','id':agent,'activation_id':secrets.token_hex(32)})
+                end=time.monotonic()+15
+                while True:
+                    status=operation({'op':'get','id':accepted['record']['spec']['id']})['status']
+                    if status in ('completed','failed','interrupted','cancelled'):assert status=='completed';break
+                    assert time.monotonic()<end;time.sleep(.05)
             metadata={'home':str(homes[0]),'url':env['BOXEN_GUI_TEST_URL'],'peer':keys[1],'address':destination['address'],'remote_home':str(homes[1])}
             (ROOT/'work/desktop-fixture.json').write_text(json.dumps(metadata))
             print('Interactive fixture ready: work/desktop-fixture.json (no capability). Ctrl-C cleans up.',flush=True)
