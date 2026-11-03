@@ -54,6 +54,8 @@ pub struct Grant {
     pub effect: String,
     #[serde(default)]
     pub accept_bots: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub except_users: Vec<String>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -68,6 +70,12 @@ impl Policy {
         for g in &self.grants {
             crate::jobs::valid_id(&g.resident)?;
             g.scope.validate()?;
+            if g.except_users.len() > 64 {
+                return Err("grant exceptions contain at most 64 native users".into());
+            }
+            for id in &g.except_users {
+                opaque(id, 256)?;
+            }
             if !matches!(g.effect.as_str(), "allow" | "deny")
                 || g.actions.is_empty()
                 || g.actions.len() > 6
@@ -97,6 +105,9 @@ impl Policy {
                 g.resident == resident
                     && g.actions.iter().any(|a| a == action)
                     && g.scope.matches(conversation, native)
+                    && !native["author"]["id"]
+                        .as_str()
+                        .is_some_and(|id| g.except_users.iter().any(|u| u == id))
             })
             .collect();
         !matches.iter().any(|g| g.effect == "deny")
@@ -111,6 +122,7 @@ impl Policy {
         !self.grants.iter().any(|g| {
             g.resident == resident
                 && g.effect == "deny"
+                && g.except_users.is_empty()
                 && g.actions.iter().any(|a| a == action)
                 && matches!(g.scope.kind.as_str(), "all" | "conversation")
                 && g.scope.possible(conversation)

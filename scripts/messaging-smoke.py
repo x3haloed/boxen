@@ -138,9 +138,29 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
         aid,bid=a['definition']['id'],b['definition']['id']
         reject(lambda:msg('get',i=1,instance=aid))
         reject(lambda:msg('create',definition=a['definition']|{'account':'1002'}))
+        def local_connector(instance,action,**kwargs):
+            body={'peer':keys[1],'connector_instance':instance,'request':{'op':'messaging','args':{'instance':instance,'action':action,**kwargs}}}
+            r=urllib.request.Request(f'http://127.0.0.1:{uis[1]}/api/operation',headers={'Authorization':'Bearer '+tokens[1],'Content-Type':'application/json'},data=json.dumps(body).encode())
+            return json.load(urllib.request.urlopen(r,timeout=20))
+        assert local_connector(aid,'get')['owner']==keys[0]
+        def scoped_request(body,i=1):
+            r=urllib.request.Request(f'http://127.0.0.1:{uis[i]}/api/operation',headers={'Authorization':'Bearer '+tokens[i],'Content-Type':'application/json'},data=json.dumps(body).encode())
+            return json.load(urllib.request.urlopen(r,timeout=20))
+        reject(lambda:scoped_request({'peer':keys[1],'connector_instance':aid,'request':{'op':'messaging','args':{'action':'get','instance':bid}}}))
+        reject(lambda:scoped_request({'peer':keys[1],'connector_instance':aid,'request':{'op':'resident_get','id':r1}}))
+        reject(lambda:scoped_request({'peer':keys[1],'address':f'127.0.0.1:{peers[1]}','connector_instance':aid,'request':{'op':'messaging','args':{'action':'get','instance':aid}}},0))
+
+        reject(lambda:local_connector(aid,'configure_gateway',expected_revision=1,enabled=True))
+        # Ordinary local APIs cannot claim a foreign owner; only the bounded runner route resolves it.
+        reject(lambda:msg('get',i=1,instance=aid))
+        local_key=homes[1]/'runner-local.key';local_key.write_text('fixture-a');local_key.chmod(0o600)
+        def local_runner_once():
+            r=subprocess.run(COMMAND+['--data-dir',str(homes[1]),'discord-connector','--instance',aid,'--credential-file',str(local_key),'--url',f'http://127.0.0.1:{uis[1]}','--api-base',f'http://127.0.0.1:{server.server_port}','--once'],capture_output=True,text=True,timeout=30)
+            assert r.returncode==0,(r.stdout,r.stderr)
         runner(a);runner(b)
+        local_runner_once()
         native=add('SILENT native input')
-        runner(a);runner(b)
+        local_runner_once();runner(b)
         ia,ib,ic=inbox(r1),inbox(r2),inbox(r3)
         assert len(ia)==len(ib)==len(ic)==1
         assert ia[0]['id']!=ib[0]['id']!=ic[0]['id']
@@ -273,6 +293,14 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
         assert msg('native_presence',instance=pid)['status']=='invisible'
         policy(msg('get',instance=pid)['policy']['grants']+[grant(r2,'all',None,['presence'])])
         assert msg('native_presence',instance=pid)['status']=='idle','unpresented mail did not show queued presence'
+        allowed='whitelisted-user'
+        deny=grant(r2,'direct',None,['receive'],'deny');deny['except_users']=[allowed]
+        policy([grant(r2,'all',None),deny])
+        before=len(received(r2))
+        intake('555',{'id':'10010','direct':True,'author':{'id':'other'},'body':'SILENT unlisted DM','mention':True})
+        intake('555',{'id':'10011','direct':True,'author':{'id':allowed},'body':'SILENT listed DM'})
+        intake('777',{'id':'10012','space':'guild-one','author':{'id':'other'},'body':'SILENT guild mention','mention':True})
+        assert len(received(r2))==before+2,'DM restriction either leaked or blocked allowed/guild correspondence'
         saved_policy=msg('get',instance=pid)
         peer_process.kill();peer_process.wait(timeout=5);peer_process,tokens[1]=daemon(1)
         assert msg('get',instance=pid)==saved_policy

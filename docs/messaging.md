@@ -278,7 +278,10 @@ select ordinary room traffic; watching a room alone cannot authorize it.
 
 `configure_policy` takes `instance`, `expected_revision` and `policy.grants`.
 Each grant has `resident`, `scope`, `actions`, optional `effect` (`allow`/`deny`),
-and `accept_bots` (false by default). Scopes are `conversation`, `space` (guild),
+`accept_bots` (false by default), and optional bounded `except_users`. Exceptions
+remove those native authors from that grant; they do not create an allow. For
+example, a broad receive allow plus a direct-message deny excluding selected
+users implements a DM whitelist without restricting guild attention. Scopes are `conversation`, `space` (guild),
 `parent`, `user`, `direct`, or `all`; the first four include `id`. Actions are
 `read`, `receive`, `send`, `react`, `files`, and `presence`. Broad receiving plus
 DM/mention/reply attention approximates Watch; watching `all` selects all permitted
@@ -383,3 +386,21 @@ checks include root-path upgrade validation, restrictive policy, directed versus
 ordinary input, durable restart, invalid sessions, passive reaction audience and
 idle CPU. Live evidence is recorded under ignored `work/` rather than public
 routing IDs or personal deployment notes.
+
+## Moving a runner onto the execution host
+
+A runner without `--peer` uses the authenticated loopback control API's
+`connector_instance` envelope field. The stored instance selects its original
+owner; no peer private key or new resident identity is needed. This local
+operator capability accepts only instance-matched runner actions (get, intake,
+cursors, outbox, claims/outcomes, health, Gateway, presence and attachment reads).
+It cannot configure connectors, access general workload operations, or be
+forwarded to another peer. Ordinary owner-scoped APIs remain unchanged. The
+loopback control token is still a trusted host-administration credential, not a
+least-privilege addon credential.
+
+`--credential-file /absolute/runner/local/key` overrides the definition's file
+reference for that runner. This supports placement changes without rewriting
+historical connector addresses or copying another machine's identity key.
+Secrets remain in owner-only local files. A service manager can restart the
+foreground subcommand independently of the GUI or another machine's controller.

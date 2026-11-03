@@ -199,6 +199,35 @@ fn handle(
     let address = target["address"].as_str().unwrap_or("");
     let operation = &target["request"];
     let local = peer == state.public_key();
+    if let Some(id) = target["connector_instance"].as_str() {
+        let result = if local && request == "POST /api/operation HTTP/1.1" {
+            crate::messaging::local_runner_operation(jobs, id, operation)
+        } else {
+            Err("local connector control cannot be forwarded to a peer or another endpoint".into())
+        };
+        logging::record(
+            if result.is_ok() {
+                Level::Info
+            } else {
+                Level::Warn
+            },
+            Target::Http,
+            "connector.local_control",
+            Context::peer(peer),
+            || json!({"local":local,"accepted":result.is_ok(),"action":operation["args"]["action"]}),
+            || Value::Null,
+        );
+        return match result {
+            Ok(value) => respond(
+                stream,
+                200,
+                "application/json",
+                &serde_json::to_vec(&value)?,
+            ),
+            Err(error) => respond(stream, 422, "text/plain", error.to_string().as_bytes()),
+        };
+    }
+
     logging::record(
         Level::Debug,
         Target::Http,

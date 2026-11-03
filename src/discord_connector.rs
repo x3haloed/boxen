@@ -20,11 +20,12 @@ struct Control {
     peer: String,
     address: String,
     instance: String,
+    local_instance: bool,
 }
 impl Control {
     fn call(&self, mut args: Value) -> Result<Value> {
         args["instance"] = json!(self.instance);
-        let mut r=self.agent.post(format!("{}/api/operation",self.url)).header("Authorization",format!("Bearer {}",self.token)).send_json(json!({"peer":self.peer,"address":self.address,"request":{"op":"messaging","args":args}}))?;
+        let mut r=self.agent.post(format!("{}/api/operation",self.url)).header("Authorization",format!("Bearer {}",self.token)).send_json(json!({"peer":self.peer,"address":self.address,"connector_instance":if self.local_instance {Some(&self.instance)}else{None},"request":{"op":"messaging","args":args}}))?;
         if r.status().as_u16() != 200 {
             return Err(
                 format!("local messaging API rejected request (HTTP {})", r.status()).into(),
@@ -188,6 +189,14 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
             "connector control capabilities are sent only to a loopback HTTP origin".into(),
         );
     }
+    let credential_override =
+        crate::take_option(&mut args, "--credential-file")?.map(std::path::PathBuf::from);
+    if credential_override
+        .as_ref()
+        .is_some_and(|p| !p.is_absolute())
+    {
+        return Err("runner credential override is an absolute local path".into());
+    }
     let peer = crate::take_option(&mut args, "--peer")?;
     let address = crate::take_option(&mut args, "--address")?.unwrap_or_default();
     let api = crate::take_option(&mut args, "--api-base")?.unwrap_or_else(|| API.into());
@@ -222,6 +231,7 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
         agent: agent.clone(),
         url,
         token,
+        local_instance: peer.is_none(),
         peer: peer.unwrap_or_else(|| local["identity"].as_str().unwrap_or("").into()),
         address,
         instance: instance.clone(),
@@ -253,10 +263,10 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
                 pending.clear();
                 return Ok(false);
             }
-            let credential_file =
-                current.definition.credential_file.as_ref().ok_or(
-                    "Discord connector configuration includes a credential-file reference",
-                )?;
+            let credential_file = credential_override
+                .as_ref()
+                .or(current.definition.credential_file.as_ref())
+                .ok_or("Discord connector configuration includes a credential-file reference")?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

@@ -90,6 +90,7 @@ impl Instance {
                         .collect(),
                         effect: "allow".into(),
                         accept_bots: b.accept_bots,
+                        except_users: Vec::new(),
                     })
                     .collect(),
             })
@@ -290,6 +291,14 @@ impl Connectors {
             })
             .cloned()
             .collect()
+    }
+    pub(crate) fn local_runner_instance(&self, id: &str) -> Result<Instance> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "connector instance unavailable".into())
     }
     pub fn get(&self, owner: &str, id: &str) -> Result<Instance> {
         self.inner
@@ -1497,4 +1506,49 @@ fn controls_presence(i: &Instance) -> bool {
         && i.residents()
             .iter()
             .any(|r| i.policy().permits(r, "presence", "", &Value::Null))
+}
+
+/// Only the authenticated loopback control boundary calls this entry point.
+/// The stored instance selects its owner; requests cannot nominate another owner.
+pub(crate) fn local_runner_operation(
+    jobs: &std::sync::Arc<Jobs>,
+    id: &str,
+    request: &Value,
+) -> Result<Value> {
+    let result = (|| -> Result<Value> {
+        jobs::valid_id(id)?;
+        if request["op"] != "messaging"
+            || request["args"]["instance"] != id
+            || !matches!(
+                request["args"]["action"].as_str(),
+                Some(
+                    "get"
+                        | "cursor"
+                        | "ingest"
+                        | "outbox"
+                        | "claim"
+                        | "part"
+                        | "complete"
+                        | "health"
+                        | "gateway_state"
+                        | "gateway_event"
+                        | "native_presence"
+                        | "attachment"
+                )
+            )
+        {
+            return Err(
+                "local connector control accepts only instance-matched runner operations".into(),
+            );
+        }
+        let i = jobs.connectors.local_runner_instance(id)?;
+        crate::protocol::operation(jobs, &i.owner, request)
+    })();
+    event(
+        "",
+        id,
+        "messaging.local_runner_operation",
+        || json!({"action":request["args"]["action"],"accepted":result.is_ok()}),
+    );
+    result
 }
