@@ -68,6 +68,7 @@ boxen [--data-dir PATH] events HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] schedule HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] context HOST:PORT PUBLIC_KEY THREAD_ID JSON\n\
 boxen [--data-dir PATH] runs HOST:PORT PUBLIC_KEY\n\
+boxen [--data-dir PATH] import-transcript HOST:PORT PUBLIC_KEY REQUEST_JSON_FILE\n\
 boxen [--data-dir PATH] import-codex HOST:PORT PUBLIC_KEY NATIVE_THREAD_ID [--id BOXEN_ID]\n\
 boxen [--data-dir PATH] watch HOST:PORT PUBLIC_KEY RUN_ID [--after SEQUENCE] [--once]\n\
 boxen [--data-dir PATH] cancel HOST:PORT PUBLIC_KEY RUN_ID\n\n\
@@ -446,6 +447,31 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &args[0],
                     &args[1],
                     serde_json::json!({"op":"start","spec":spec})
+                )?)?
+            );
+        }
+        "import-transcript" => {
+            use std::io::Read;
+            if args.len() != 3 {
+                return Err(
+                    "import-transcript accepts HOST:PORT PUBLIC_KEY REQUEST_JSON_FILE".into(),
+                );
+            }
+            let mut bytes = Vec::new();
+            std::fs::File::open(&args[2])?
+                .take(384 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 384 * 1024 {
+                return Err("text import file exceeds 384 KiB".into());
+            }
+            let request: crate::jobs::transcript_import::Request = serde_json::from_slice(&bytes)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&protocol::request(
+                    &state,
+                    &args[0],
+                    &args[1],
+                    serde_json::json!({"op":"transcript_import","spec":request})
                 )?)?
             );
         }

@@ -580,6 +580,7 @@ pub fn execute(
     if let Some(r) = &resident {
         system.push_str(&jobs.residents.instructions(r));
     }
+    system.push_str(&history.transcript_context());
     system.push_str(&trigger_context);
     if let Some(recovery) = &record.recovery {
         system.push_str(&format!("\nRecovery incident: {recovery}"));

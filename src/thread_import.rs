@@ -147,6 +147,7 @@ impl Jobs {
                 .saturating_add(1),
         );
         let record = Record {
+            transcript_import: None,
             runtime_policy: Default::default(),
             imported: Some(Provenance {
                 backend_thread_id: spec.backend_thread_id.clone(),
@@ -238,47 +239,7 @@ impl Jobs {
             "status",
             json!({"status":"completed","detail":"History snapshot imported; no model turn was executed. Original turn statuses are retained separately."}),
         )?;
-        let staging = self
-            .directory
-            .parent()
-            .ok_or("runs parent unavailable")?
-            .join("import-staging")
-            .join(state::random_hex()?);
-        state::private_dir(&staging)?;
-        state::write_new(&staging.join("record.json"), &serde_json::to_vec(&record)?)?;
-        let mut bytes = Vec::new();
-        for event in &events {
-            serde_json::to_writer(&mut bytes, event)?;
-            bytes.push(b'\n');
-        }
-        state::write_new(&staging.join("events.jsonl"), &bytes)?;
-        let mut snapshot = Snapshot {
-            record,
-            status: "starting".into(),
-            backend_thread: None,
-            last_seq: 0,
-        };
-        for event in &events {
-            project(&mut snapshot, event);
-        }
-        // Complete files are published together. Interrupted staging is never a run.
-        fs::rename(&staging, self.directory.join(&spec.id))?;
-        let file = OpenOptions::new()
-            .append(true)
-            .open(self.directory.join(&spec.id).join("events.jsonl"))?;
-        runs.insert(
-            spec.id.clone(),
-            Arc::new(Run {
-                inner: Mutex::new(Inner {
-                    cancel_requested: false,
-                    snapshot: snapshot.clone(),
-                    events,
-                    file,
-                    control: None,
-                }),
-                changed: Condvar::new(),
-            }),
-        );
+        let snapshot = self.publish_history(record, events, &mut runs)?;
         logging::record(
             Level::Info,
             Target::Workload,
@@ -477,5 +438,59 @@ impl Drop for NativeReader {
             || json!({"pid":self.child.id(),"status":status.map(|v|v.to_string()).unwrap_or_else(|e|e.to_string())}),
             || Value::Null,
         );
+    }
+}
+
+impl Jobs {
+    pub(super) fn publish_history(
+        &self,
+        record: Record,
+        events: Vec<Event>,
+        runs: &mut HashMap<String, Arc<Run>>,
+    ) -> Result<Snapshot> {
+        let id = record.spec.id.clone();
+        let staging = self
+            .directory
+            .parent()
+            .ok_or("runs parent unavailable")?
+            .join("import-staging")
+            .join(state::random_hex()?);
+        state::private_dir(&staging)?;
+        state::write_new(&staging.join("record.json"), &serde_json::to_vec(&record)?)?;
+        let mut bytes = Vec::new();
+        for event in &events {
+            serde_json::to_writer(&mut bytes, event)?;
+            bytes.push(b'\n');
+        }
+        state::write_new(&staging.join("events.jsonl"), &bytes)?;
+        let mut snapshot = Snapshot {
+            record,
+            status: "starting".into(),
+            backend_thread: None,
+            last_seq: 0,
+        };
+        for event in &events {
+            project(&mut snapshot, event);
+        }
+        let file = OpenOptions::new()
+            .append(true)
+            .open(staging.join("events.jsonl"))?;
+        // Complete files are published together. Interrupted staging is never a run.
+        fs::rename(&staging, self.directory.join(&id))?;
+        runs.insert(
+            snapshot.record.spec.id.clone(),
+            Arc::new(Run {
+                inner: Mutex::new(Inner {
+                    cancel_requested: false,
+                    snapshot: snapshot.clone(),
+                    events,
+                    file,
+                    control: None,
+                }),
+                changed: Condvar::new(),
+            }),
+        );
+
+        Ok(snapshot)
     }
 }

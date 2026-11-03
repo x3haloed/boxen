@@ -21,6 +21,8 @@ use std::{
 pub mod promotion;
 #[path = "thread_import.rs"]
 pub mod thread_import;
+#[path = "transcript_import.rs"]
+pub mod transcript_import;
 
 pub fn now() -> u64 {
     SystemTime::now()
@@ -44,6 +46,7 @@ mod tests {
         let record = Record {
             runtime_policy: Default::default(),
             imported: None,
+            transcript_import: None,
             observations: Vec::new(),
             scheduled: None,
             owner: owner.clone(),
@@ -124,6 +127,8 @@ pub struct Record {
     pub runtime_policy: crate::runtime_policy::Policy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported: Option<thread_import::Provenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_import: Option<transcript_import::Provenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observations: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -466,6 +471,17 @@ impl History {
                     .find_map(|r| r.snapshot().record.spec.context)
             })
             .unwrap_or_default()
+    }
+    pub fn transcript_context(&self) -> String {
+        let sources:Vec<_>=self.runs.iter().filter_map(|r|r.snapshot().record.transcript_import).map(|p|json!({"source":p.source,"message_count":p.message_ids.len(),"history_sha256":p.request_sha256})).collect();
+        if sources.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nThis canonical conversation includes operator-imported text history. Its user and assistant roles preserve the source speakers; imported assistant messages originate from the declared source, rather than the currently selected model. Original text and source attribution remain retained; hidden source prompts, reasoning, audio and provider session state are not reconstructed. {}",
+                json!(sources)
+            )
+        }
     }
     pub fn reconstruction(&self) -> Result<String> {
         let mut recent = std::collections::VecDeque::new();
@@ -1909,6 +1925,7 @@ impl Jobs {
         let record = Record {
             runtime_policy,
             imported: None,
+            transcript_import: None,
             observations: self.observations.batches(owner, &spec.thread_id),
             scheduled,
             spec: spec.clone(),
