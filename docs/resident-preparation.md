@@ -19,7 +19,8 @@ falling back; restoring a valid file allows new work without manual receipts.
   "providers": ["deepinfra"],
   "allow_fallbacks": false,
   "max_output_tokens": 8192,
-  "max_message_sends": 2
+  "max_message_sends": 2,
+  "max_exchanges": 16
 }
 ```
 
@@ -36,6 +37,16 @@ Defaults are no explicit provider restriction, fallbacks enabled, 2048 output
 tokens and 16 message attempts per run. Output tokens range from 1 to 131072;
 message attempts from 0 to 256; at most 16 bounded provider slugs are accepted.
 The policy file is limited to 16 KiB. Model/provider limits can be lower.
+
+Each of `max_output_tokens`, `max_message_sends` and `max_exchanges` accepts
+`null` to remove that Boxen budget entirely. A null output setting omits
+`max_tokens` from workload requests, leaving the provider/model to determine its
+output limit. Null message/exchange settings allow continued work until normal
+completion, cancellation or a runtime failure. These are not large numeric
+stand-ins for unlimited operation. Omitted settings retain the existing defaults:
+2048 output tokens, 16 message attempts and 16 workload exchanges. Explicit
+exchange budgets range from 1 to 65536. Transport timeouts, context selection,
+media bounds and managed-backend settings remain independent.
 
 The shared resident-tool boundary reserves each outgoing message attempt in the
 existing run journal before dispatch. Legacy `boxen_send_message` and generic
@@ -106,7 +117,9 @@ or evidence that a resident has reviewed, accepted or understood its new home.
 The inference runtime smoke exercises captured wire routing/output settings,
 legacy and generic send budgets in one activation, retained limit notices,
 continued private narration, producer metadata, restart/replay, fresh activation
-budgets and invalid-policy recovery across restart. The Linux rotation includes
+budgets and invalid-policy recovery across restart. Null-cap checks complete 21 workload
+exchanges with 20 delivered messages and no request output cap; an explicitly
+configured two-exchange budget is also verified. The Linux rotation includes
 this controlled suite. These checks establish runtime behavior, not resident
 comprehension or consent to migration.
 
@@ -117,3 +130,9 @@ and remote cleanup. A separately supervised Linux installation completed one
 real MiMo v2.6 Flash exchange with DeepInfra reported in retained metadata,
 without tools; its pairing and completed result survived service restart. No
 resident activation or Discord traffic was part of that installation check.
+
+The explicit-null budget follow-up passed native and actual APE runtime/platform
+checks, 27 Rust unit tests, strict Clippy, and all seventeen Linux suites plus
+direct LAN replay and cleanup with the identical installed portable executable.
+The controlled resident completed 21 exchanges and 20 delivered messages without
+a Boxen output-token cap; explicit finite limits and restart recovery also passed.

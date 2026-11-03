@@ -9,16 +9,18 @@ use std::{io::Read, path::Path};
 pub struct Policy {
     pub providers: Vec<String>,
     pub allow_fallbacks: bool,
-    pub max_output_tokens: u32,
-    pub max_message_sends: u32,
+    pub max_output_tokens: Option<u32>,
+    pub max_message_sends: Option<u32>,
+    pub max_exchanges: Option<usize>,
 }
 impl Default for Policy {
     fn default() -> Self {
         Self {
             providers: vec![],
             allow_fallbacks: true,
-            max_output_tokens: 2048,
-            max_message_sends: 16,
+            max_output_tokens: Some(2048),
+            max_message_sends: Some(16),
+            max_exchanges: Some(16),
         }
     }
 }
@@ -40,8 +42,15 @@ impl Policy {
         Ok(policy)
     }
     pub fn validate(&self) -> Result<()> {
-        if !(1..=131072).contains(&self.max_output_tokens) || self.max_message_sends > 256 {
-            return Err("runtime policy output tokens range is 1–131072 and message attempts range is 0–256".into());
+        if self
+            .max_output_tokens
+            .is_some_and(|n| !(1..=131072).contains(&n))
+            || self.max_message_sends.is_some_and(|n| n > 256)
+            || self
+                .max_exchanges
+                .is_some_and(|n| !(1..=65536).contains(&n))
+        {
+            return Err("runtime policy numeric ranges are output tokens 1–131072, message attempts 0–256, exchanges 1–65536; null removes the corresponding cap".into());
         }
         if self.providers.len() > 16
             || self.providers.iter().any(|p| {

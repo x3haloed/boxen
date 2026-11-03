@@ -332,7 +332,7 @@ impl Run {
             .filter(|e| e.kind == "message_send_reserved")
             .count();
         let limit = inner.snapshot.record.runtime_policy.max_message_sends;
-        if count >= limit as usize {
+        if limit.is_some_and(|limit| count >= limit as usize) {
             if !inner
                 .events
                 .iter()

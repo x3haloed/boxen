@@ -59,6 +59,10 @@ class Provider(http.server.BaseHTTPRequestHandler):
                     outputs=[json.loads(m['content']) for m in tools]
                     assert all('error' in o for o in outputs[2:]),outputs
                     text('PRIVATE_BUDGET_COMPLETE')
+                elif direction=='UNLIMITED':
+                    assert 'max_tokens' not in body,body
+                    if len(tools)<20:call('boxen_send_message',{'to':batch['messages'][0]['reply_to'],'subject':'Unbounded proof','body':'UNLIMITED_'+str(len(tools))})
+                    else:text('UNLIMITED_COMPLETE')
                 elif direction=='CONTINUITY' and len(tools)==0:call('boxen_continuity',{'action':'read'})
                 elif direction=='CONTINUITY' and len(tools)==1:
                     current=json.loads(tools[-1]['content']);call('boxen_continuity',{'action':'write','expected_revision':current['revision'],'memory':'inference-memory-proof'})
@@ -190,7 +194,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         print('PASS idle resident creation without credentials, legible failed activation and continued availability after configuration recovery')
         print('PASS structured opt-in inference diagnostics; existing daemon/journal authority retained')
         policy=data[1]/'runtime-policy.json'
-        setting={'providers':['fixture-only'],'allow_fallbacks':False,'max_output_tokens':8192,'max_message_sends':2}
+        setting={'providers':['fixture-only'],'allow_fallbacks':False,'max_output_tokens':8192,'max_message_sends':2,'max_exchanges':16}
         policy.write_text(json.dumps(setting))
         limited=resident();send(limited,'BUDGET_INPUT');before=len(inbox())
         burst=activate(limited,'BURST');assert burst['record']['runtime_policy']==setting
@@ -204,6 +208,17 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         replay,_=collect(burst);assert replay==events
         send(limited,'BUDGET_INPUT');again=activate(limited,'BURST');assert collect(again)[1]['status']=='completed'
         assert len(inbox())==before+4
+        unbounded={**setting,'max_output_tokens':None,'max_message_sends':None,'max_exchanges':None}
+        policy.write_text(json.dumps(unbounded));send(limited,'UNLIMITED_INPUT');before_unlimited=len(inbox())
+        unlimited=activate(limited,'UNLIMITED');events,done=collect(unlimited)
+        assert done['status']=='completed',done
+        assert len(inbox())==before_unlimited+20
+        assert sum(e['kind']=='message_send_reserved' for e in events)==20
+        assert not any(e['kind']=='message_send_limited' for e in events)
+        policy.write_text(json.dumps({**unbounded,'max_exchanges':2}));send(limited,'UNLIMITED_INPUT')
+        finite=activate(limited,'UNLIMITED');events,done=collect(finite)
+        assert done['status']=='interrupted' and any(e['kind']=='status' and '2-exchange budget' in e['data'].get('detail','') for e in events),done
+        print('PASS null caps omit output limit and complete 21 exchanges/20 sends; explicit finite exchange budget stays effective')
         policy.write_text('{broken')
         try:start('POLICY_REJECTION')
         except urllib.error.HTTPError as e:assert e.code==422

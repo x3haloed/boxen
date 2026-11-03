@@ -614,7 +614,17 @@ pub fn execute(
         "Built-in inference runtime is executing on this machine",
     )?;
     let mut pending = Vec::new();
-    for step in 0..16 {
+    let policy = run.snapshot().record.runtime_policy;
+    for step in 0usize.. {
+        if policy.max_exchanges.is_some_and(|limit| step >= limit) {
+            run.diagnostic(
+                Level::Warn,
+                "inference.exchange_limit",
+                || json!({"exchanges":step,"limit":policy.max_exchanges}),
+                || Value::Null,
+            );
+            return Err(format!("activation reached its {step}-exchange budget; completed tool effects remain retained and are not replayed automatically").into());
+        }
         if controls(&run, &controls_rx, &mut pending)? {
             run.status("cancelled", "Cancelled before the next inference exchange")?;
             return Ok(());
@@ -730,6 +740,9 @@ pub fn execute(
             );
         }
         let mut body = json!({"model":model,"messages":wire_messages,"tools":tools,"stream":true,"stream_options":{"include_usage":true},"max_tokens":run.snapshot().record.runtime_policy.max_output_tokens,"provider":run.snapshot().record.runtime_policy.provider()});
+        if policy.max_output_tokens.is_none() {
+            body.as_object_mut().unwrap().remove("max_tokens");
+        }
         if pdf {
             body["plugins"] = json!([{"id":"file-parser","pdf":{"engine":"native"}}]);
         }
@@ -876,7 +889,7 @@ pub fn execute(
             );
         }
     }
-    Err("activation reached its 16-exchange budget; completed tool effects remain retained and are not replayed automatically".into())
+    unreachable!("unbounded exchange iterator ends only through a run outcome")
 }
 
 #[cfg(test)]
