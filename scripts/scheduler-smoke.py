@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Paired real daemons + controlled Codex: durable timing, contracts, recovery."""
 import hashlib
+from smoke_helpers import fake_codex, windows_cpu
 import json
 import pathlib
 import os
@@ -25,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-schedules-') as temporary:
     keys=[cli(i,'identity') for i in range(2)]
     for i in range(2):cli(i,'trust',keys[1-i],'Schedule fixture peer')
     def daemon(i):
-        p=subprocess.Popen(COMMAND+['--data-dir',str(data[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(ROOT/'tests/fake-codex.py')],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        p=subprocess.Popen(COMMAND+['--data-dir',str(data[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(fake_codex())],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         processes.append(p);lines=[p.stdout.readline() for _ in range(3)];assert 'Local controls:' in lines[-1],lines
         return p,lines[-1].strip().split('#')[1]
     p0,t0=daemon(0);p1,t1=daemon(1)
@@ -66,6 +67,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-schedules-') as temporary:
         try:call();raise AssertionError('operation was accepted unexpectedly')
         except urllib.error.HTTPError as e:assert e.code==422
     def cpu(pid):
+        if os.name == 'nt':
+            assert pid == p1.pid
+            return windows_cpu(p1)
         path=pathlib.Path(f'/proc/{pid}/stat')
         if path.exists():
             parts=path.read_text().rsplit(')',1)[1].split();return (int(parts[11])+int(parts[12]))/os.sysconf('SC_CLK_TCK')

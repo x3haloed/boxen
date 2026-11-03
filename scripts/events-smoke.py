@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real paired daemons, external adapter processes, bounded event delivery."""
 import hashlib
+from smoke_helpers import fake_codex, windows_cpu
 import json
 import pathlib
 import os
@@ -25,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-schedules-') as temporary:
     keys=[cli(i,'identity') for i in range(2)]
     for i in range(2):cli(i,'trust',keys[1-i],'Schedule fixture peer')
     def daemon(i):
-        p=subprocess.Popen(COMMAND+['--data-dir',str(data[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(ROOT/'tests/fake-codex.py')],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        p=subprocess.Popen(COMMAND+['--data-dir',str(data[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(fake_codex())],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         processes.append(p);lines=[p.stdout.readline() for _ in range(3)];assert 'Local controls:' in lines[-1],lines
         return p,lines[-1].strip().split('#')[1]
     p0,t0=daemon(0);p1,t1=daemon(1)
@@ -66,6 +67,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-schedules-') as temporary:
         try:call();raise AssertionError('operation was accepted unexpectedly')
         except urllib.error.HTTPError as e:assert e.code==422
     def cpu(pid):
+        if os.name == 'nt':
+            assert pid == p1.pid
+            return windows_cpu(p1)
         path=pathlib.Path(f'/proc/{pid}/stat')
         if path.exists():
             parts=path.read_text().rsplit(')',1)[1].split();return (int(parts[11])+int(parts[12]))/os.sysconf('SC_CLK_TCK')
@@ -114,7 +118,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-schedules-') as temporary:
             self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(json.dumps(data).encode())
     http=http.server.ThreadingHTTPServer(('127.0.0.1',0),Feed);threading.Thread(target=http.serve_forever,daemon=True).start()
     try:
-        passive=resident();awake=resident();usgs=source(['python3',str(ROOT/'examples/adapters/usgs.py'),'--url',f'http://127.0.0.1:{http.server_port}/feed'])
+        passive=resident();awake=resident();usgs=source([sys.executable,str(ROOT/'examples/adapters/usgs.py'),'--url',f'http://127.0.0.1:{http.server_port}/feed'])
         psub=subscribe(usgs,passive['id']);wsub=subscribe(usgs,awake['id'],True)
         until(lambda:current(usgs)['seq']==1);until(lambda:substate(psub)['cutoff']==1)
         assert runs(passive['id'])==[]
@@ -127,7 +131,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-schedules-') as temporary:
         print('PASS real USGS adapter parsing, independent collection, passive/waking batches, private resident activation, deduplication and owner isolation',flush=True)
 
         anonymous=start('Anonymous game thread seed');collect(anonymous);thread=anonymous['record']['spec']['thread_id'];game_path=directory/'game-state.json'
-        game=source(['python3',str(ROOT/'examples/adapters/grid-game.py'),str(game_path)],mode='latest',interval=60000,tools=[{'name':'look','description':'look returns current position, legal moves and revision.','kind':'query'},{'name':'move','description':'move accepts direction and current revision; stale revisions are rejected.','kind':'action'}]);gsub=subscribe(game,thread,kind='thread')
+        game=source([sys.executable,str(ROOT/'examples/adapters/grid-game.py'),str(game_path)],mode='latest',interval=60000,tools=[{'name':'look','description':'look returns current position, legal moves and revision.','kind':'query'},{'name':'move','description':'move accepts direction and current revision; stale revisions are rejected.','kind':'action'}]);gsub=subscribe(game,thread,kind='thread')
         play=start('EVENT_GAME:'+json.dumps({'subscription_id':gsub['spec']['id'],'source_generation':game['generation']}),thread)
         events,done=collect(play);assert done['status']=='completed',events[-3:]
         assert json.loads(game_path.read_text())['position']==[2,2]
@@ -151,7 +155,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-schedules-') as temporary:
         assert runs(slow['id'])==[]
         print('PASS slow-consumer retention bounds, explicit loss, duplicate producer input and finite activity expiry without activation',flush=True)
 
-        control=directory/'connector-mode';control.write_text('fail');broken=source(['python3',str(ROOT/'tests/event-adapter.py'),str(control)])
+        control=directory/'connector-mode';control.write_text('fail');broken=source([sys.executable,str(ROOT/'tests/event-adapter.py'),str(control)])
         ignored=resident();badsub=subscribe(broken,ignored['id'])
         until(lambda:current(broken)['health']['failures']>=3,seconds=15)
         health=current(broken)['health'];assert health['notice_seq']==1 and health['next_probe_ms']>health['last_failure_ms'];assert not current(broken)['items'];assert runs(ignored['id'])==[]
@@ -166,7 +170,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-schedules-') as temporary:
         rejected(lambda:push(broken,1,[item(1)]))
         print('PASS unattended retry backoff, bounded health notices, recovery/flapping state, oversized adapter output and stale generation rejection',flush=True)
 
-        action_control=directory/'action-mode';action_control.write_text('effect');effect=source(['python3',str(ROOT/'tests/event-adapter.py'),str(action_control)],interval=60000,tools=[{'name':'act','kind':'action','description':'A controlled effect followed by an interrupted response.'}])
+        action_control=directory/'action-mode';action_control.write_text('effect');effect=source([sys.executable,str(ROOT/'tests/event-adapter.py'),str(action_control)],interval=60000,tools=[{'name':'act','kind':'action','description':'A controlled effect followed by an interrupted response.'}])
         esub=subscribe(effect,thread,kind='thread')
         pending=start('EVENT_CALL:'+json.dumps({'subscription_id':esub['spec']['id'],'source_generation':1,'tool':'act','arguments':{}}),thread);assert tool_started(pending)
         until(lambda:action_control.with_suffix('.effect').exists())

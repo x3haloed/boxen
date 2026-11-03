@@ -2,6 +2,7 @@
 """Paired daemon native-media verification. --live spends real OpenRouter credit.
 Live fixtures need Pillow, ffmpeg and macOS say; daemon has no such dependencies.
 """
+import os
 import argparse, base64, hashlib, http.server, json, pathlib, secrets, socket
 import subprocess, tempfile, threading, urllib.request, shutil
 
@@ -124,7 +125,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-media-') as temp:
                     assert replay(ident)==events
                     _,_,follow=execute('FOLLOWUP',thread=ident);assert follow['status']=='completed'
                     assert any(p.get('type')==part for m in observed[-1]['messages'] if isinstance(m['content'],list) for p in m['content'])
-                    snapshot_file=data[1]/'runs'/ident/'artifacts'/result['sha256'];assert snapshot_file.stat().st_mode & 0o777 == 0o600; snapshot_file.write_bytes(b'corrupt')
+                    snapshot_file=data[1]/'runs'/ident/'artifacts'/result['sha256'];assert os.name == 'nt' or snapshot_file.stat().st_mode & 0o777 == 0o600; snapshot_file.write_bytes(b'corrupt')
                     _,bad,follow=execute('FOLLOWUP',thread=ident);assert follow['status']=='completed'
                     assert any(e['kind']=='artifact_unavailable' for e in bad)
                 assert replay(ident)==events

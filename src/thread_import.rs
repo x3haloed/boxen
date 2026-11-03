@@ -472,11 +472,14 @@ impl Jobs {
         for event in &events {
             project(&mut snapshot, event);
         }
+        // Complete files are published together. Windows cannot rename a directory
+        // while a journal inside it is open, even when the file shares deletes.
+        // Interrupted staging is never a run; published history is recoverable.
+        let published = self.directory.join(&id);
+        fs::rename(&staging, &published)?;
         let file = OpenOptions::new()
             .append(true)
-            .open(staging.join("events.jsonl"))?;
-        // Complete files are published together. Interrupted staging is never a run.
-        fs::rename(&staging, self.directory.join(&id))?;
+            .open(published.join("events.jsonl"))?;
         runs.insert(
             snapshot.record.spec.id.clone(),
             Arc::new(Run {

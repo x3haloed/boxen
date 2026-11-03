@@ -3,6 +3,7 @@
 import http.server
 import email.parser
 import email.policy
+from smoke_helpers import fake_codex, windows_cpu
 import json
 import os
 import pathlib
@@ -87,7 +88,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
     for i in range(2):cli(i,'trust',keys[1-i],'Messaging fixture peer')
     tokens=[]
     def daemon(i):
-        p=subprocess.Popen(COMMAND+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(ROOT/'tests/fake-codex.py')],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+        p=subprocess.Popen(COMMAND+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(fake_codex())],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
         processes.append(p);lines=[p.stdout.readline() for _ in range(3)];assert 'Local controls:' in lines[-1],lines
         return p,lines[-1].strip().split('#')[1]
     for i in range(2):p,t=daemon(i);tokens.append(t)
@@ -381,6 +382,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
                 if value:return value
                 time.sleep(.05)
             raise AssertionError('Gateway state did not converge')
+        gateway_log=None
         try:
             gr=resident('Gateway resident')
             api({'op':'resident_update','id':gr,'patch':{'expected_revision':1,'auto_activate':True}})
@@ -424,6 +426,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
             assert source['retained']==1 and source['audience']==gr
             reject(lambda:api({'op':'events','args':{'action':'subscribe','spec':{'id':secrets.token_hex(32),'source':source['id'],'target':{'type':'resident','id':r1},'interval_ms':1000,'lifetime':'persistent'}}}))
             def cpu():
+                if os.name == 'nt':return windows_cpu(gateway_process)
                 value=subprocess.check_output(['ps','-p',str(gateway_process.pid),'-o','time='],text=True).strip();return sum(float(v)*(60**i) for i,v in enumerate(reversed(value.split(':'))))
             before_cpu=cpu();time.sleep(2);assert cpu()-before_cpu<.15,'Gateway idle transport spins'
             assert len(api({'op':'list'}))==runs_before and len(gmessages())==mail_before
@@ -437,6 +440,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
             print('PASS native Gateway directed/ordinary attention, restrictive policy, self exclusion, presence, durable resume, passive private reactions, invalid-session recovery and idle CPU')
         finally:
             if gateway_process and gateway_process.poll() is None:gateway_process.terminate();gateway_process.wait(timeout=5)
+            if gateway_log:gateway_log.close()
             gateway_fixture.close()
         # Replayed native input is accepted once, conflicting reuse is legible.
         checkpoint=msg('cursor',instance=aid,conversation='999')['checkpoint']['cursor']

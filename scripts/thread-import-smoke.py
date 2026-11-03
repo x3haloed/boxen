@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-import-') as temporary:
             return e.read().decode()
         raise AssertionError('invalid operation was accepted')
     def import_request(ident,native=NATIVE):return {'op':'thread_import','spec':{'id':ident,'backend_thread_id':native}}
-    def log():return [json.loads(line) for line in (workspace/'requests.jsonl').read_text().splitlines()]
+    def log():return [json.loads(line) for path in workspace.glob('requests-*.jsonl') for line in path.read_text().splitlines()]
     try:
         start(0);start(1)
         diagnostics=base/'import-diagnostics.jsonl'

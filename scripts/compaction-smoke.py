@@ -4,6 +4,7 @@
 The provider is deterministic test evidence, not a claim about model recall.
 """
 import http.server
+from smoke_helpers import python_shell
 import json
 import pathlib
 import secrets
@@ -61,7 +62,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
                     text = 'PRIVATE_ACTIVITY'
                 elif prompt == 'EFFECT' and not any(m['role'] == 'tool' for m in body['messages']):
                     emit({'tool_calls': [{'index': 0, 'id': 'effect-call', 'type': 'function', 'function': {
-                        'name': 'boxen_shell', 'arguments': json.dumps({'command': 'printf once >> effect.txt; python3 -c "print(\'build-observation-\' * 4000)"'})}}]}, 'tool_calls')
+                        'name': 'boxen_shell', 'arguments': json.dumps({'command': python_shell("open('effect.txt','a').write('once'); print('build-observation-' * 4000)")})}}]}, 'tool_calls')
                     self.wfile.write(b'data: [DONE]\n\n')
                     self.wfile.flush()
                     return

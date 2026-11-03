@@ -1,5 +1,12 @@
 # Platform testing rotation
 
+The smoke scripts use the host Python interpreter for controlled Codex fixtures
+and shell effects. Windows launchers, timed pipe reads and process CPU sampling
+live in `scripts/smoke_helpers.py`; the Linux upload includes this helper too.
+`inference-probe-smoke.py` requires OpenSSL on the test process's PATH to exercise
+untrusted-certificate rejection. Native fixture success is not APE or Linux
+coverage, and live Codex checks remain separate from controlled-provider tests.
+
 Runtime and packaging changes are checked with native and portable builds on
 authorized development hosts. Hostnames, accounts and machine inventory belong
 in private local configuration.

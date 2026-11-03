@@ -252,6 +252,7 @@ def main():
             with tarfile.open(fileobj=bundle, mode='w') as archive:
                 archive.add(binary, arcname='boxen.com')
                 archive.add(pathlib.Path(__file__).resolve(), arcname='scripts/test-linux.py')
+                archive.add(root / 'scripts/smoke_helpers.py', arcname='scripts/smoke_helpers.py')
                 for suite in SUITES:
                     name = 'smoke.py' if suite == 'smoke' else suite + '-smoke.py'
                     archive.add(root / 'scripts' / name, arcname='scripts/' + name)

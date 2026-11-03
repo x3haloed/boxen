@@ -359,6 +359,15 @@ fn shell(
     }
     let mut command = if platform::host_os() == "windows" {
         let mut c = Command::new("cmd.exe");
+        // cmd parses shell text rather than the C argv quoting used by arg().
+        // /S removes only the outer pair, preserving quotes in the command.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.args(["/D", "/S", "/C"])
+                .raw_arg(format!("\"{}\"", input.command));
+        }
+        #[cfg(not(windows))]
         c.args(["/C", &input.command]);
         c
     } else {

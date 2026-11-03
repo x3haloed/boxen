@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Two real paired daemons; controlled HTTP inference, actual tools/journals/mailboxes."""
 import http.server
+from smoke_helpers import fake_codex
+from smoke_helpers import python_shell
 import json
 import pathlib
 import secrets
@@ -79,15 +81,15 @@ class Provider(http.server.BaseHTTPRequestHandler):
             elif prompt=='RECOVER':
                 assert any(m.get('role')=='tool' for m in messages)
                 text('RECOVERED_WITHOUT_REPLAY')
-            elif prompt=='WAIT_EFFECT' and not tools:call('boxen_shell',{'command':'printf once >> effect.txt; sleep .15; printf command-output'})
+            elif prompt=='WAIT_EFFECT' and not tools:call('boxen_shell',{'command':python_shell("import time; open('effect.txt','a').write('once'); time.sleep(.15); print('command-output',end='')")})
             elif prompt=='WAIT_EFFECT':text('ORDINARY_RESPONSE')
-            elif prompt=='INTERRUPT_AFTER_EFFECT' and not tools:call('boxen_shell',{'command':'printf once >> uncertain.txt'})
+            elif prompt=='INTERRUPT_AFTER_EFFECT' and not tools:call('boxen_shell',{'command':python_shell("open('uncertain.txt','a').write('once')")})
             elif prompt=='INTERRUPT_AFTER_EFFECT':emit(frame({'content':'unaccepted partial'}));return
             elif prompt=='TRUNCATED':call('boxen_shell',{'command':'touch forbidden.txt'},finish='length')
-            elif prompt=='SLOW_SHELL' and not tools:call('boxen_shell',{'command':'sleep 30 & echo $! > descendant.pid; printf started > started.txt; wait'})
+            elif prompt=='SLOW_SHELL' and not tools:call('boxen_shell',{'command':python_shell("import subprocess,sys; child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); open('descendant.pid','w').write(str(child.pid)); open('started.txt','w').write('started'); child.wait()")})
             elif prompt=='BAD_ARGUMENTS' and not tools:call('boxen_shell','{"command":')
             elif prompt=='BAD_ARGUMENTS':text('ARGUMENT_REJECTION_OBSERVED')
-            elif prompt=='STEER_ME' and not tools:call('boxen_shell',{'command':'sleep .5; printf ready'})
+            elif prompt=='STEER_ME' and not tools:call('boxen_shell',{'command':python_shell("import time; time.sleep(.5); print('ready',end='')")})
             elif prompt=='STEER_ME':text('UNSTEERED')
             elif prompt=='STEERING_TEXT':text('STEERED_RESPONSE')
             elif prompt=='EMPTY':text('')
@@ -106,7 +108,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
     for i in range(2):cli(i,'trust',keys[1-i],'Other')
     def daemon(i, fixture=True):
         p=subprocess.Popen(command+['--data-dir',str(data[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}',
-            '--codex',str(root/'tests/fake-codex.py')]+(['--openrouter-endpoint',f'http://127.0.0.1:{provider.server_port}/chat'] if fixture else []),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            '--codex',str(fake_codex())]+(['--openrouter-endpoint',f'http://127.0.0.1:{provider.server_port}/chat'] if fixture else []),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         processes.append(p);lines=[p.stdout.readline() for _ in range(3)];assert 'Local controls:' in lines[-1],lines
         return lines[-1].strip().split('#')[1]
     tokens=[daemon(i) for i in range(2)]

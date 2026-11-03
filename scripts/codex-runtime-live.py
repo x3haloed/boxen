@@ -5,6 +5,7 @@ Optional live check; not part of the credential-free fixture rotation.
 """
 import argparse
 import json
+import os
 import pathlib
 import secrets
 import socket
@@ -47,7 +48,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-codex-live-') as temp:
             raise AssertionError('stream ended early')
         marker='boxen-live-'+secrets.token_hex(5);ident=secrets.token_hex(32)
         run=api({'op':'start','spec':{'id':ident,'thread_id':ident,'backend':'codex','cwd':temp,'model':args.model,
-            'prompt':f'Please run a shell command `printf {marker} > proof.txt; cat proof.txt`, then respond with the marker.'}})
+            'prompt':f'Please run a shell command appropriate for this host that writes exactly {marker} to proof.txt with no newline or byte-order mark, then reads it back. Respond with the marker.'}})
         events=collect(run);assert (root/'proof.txt').read_text()==marker
         assert marker in api({'op':'thread_result','id':ident})['response']
         assert any(e['data'].get('method')=='item/completed' and e['data'].get('params',{}).get('item',{}).get('type')=='commandExecution' for e in events) and any(e['data'].get('method')=='item/agentMessage/delta' for e in events)
@@ -73,5 +74,10 @@ with tempfile.TemporaryDirectory(prefix='boxen-codex-live-') as temp:
 
     finally:
         for p in processes:
-            if p.poll() is None:p.kill()
+            if p.poll() is None:
+                if os.name == 'nt':
+                    # The daemon may still be tearing down its final app-server.
+                    # Only this disposable daemon's owned descendants are stopped.
+                    subprocess.run(['taskkill','/PID',str(p.pid),'/T','/F'],check=True,stdout=subprocess.DEVNULL)
+                else:p.kill()
             p.wait(timeout=5)

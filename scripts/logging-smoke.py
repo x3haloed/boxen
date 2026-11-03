@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Verify hot diagnostics through two real daemons and authenticated CLI streams."""
+from smoke_helpers import fake_codex, PipeLines
 import json
 import pathlib
 import secrets
-import select
 import socket
 import subprocess
 import sys
@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix="boxen-logging-") as temporary:
     def daemon(index):
         process = subprocess.Popen(command + ["--data-dir", directories[index], "serve", "--listen",
             f"127.0.0.1:{peer_ports[index]}", "--ui", f"127.0.0.1:{ui_ports[index]}",
-            "--codex", str(root / "tests/fake-codex.py")], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            "--codex", str(fake_codex())], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         processes.append(process)
         lines = [process.stdout.readline().strip() for _ in range(3)]
         assert "Local controls:" in lines[-1], lines
@@ -74,9 +74,9 @@ with tempfile.TemporaryDirectory(prefix="boxen-logging-") as temporary:
             time.sleep(.02)
         secret = "sk-this-is-a-test-not-a-real-credential"
         ping("Bearer " + secret)
-        assert select.select([stream.stdout], [], [], 5)[0], "no live diagnostic record"
+        live = PipeLines(stream.stdout)
         for _ in range(20):
-            record = json.loads(stream.stdout.readline())
+            record = json.loads(live.get(5))
             if record.get("payload", {}).get("op") == "ping":
                 break
         else:

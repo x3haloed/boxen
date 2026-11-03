@@ -196,7 +196,8 @@ for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
     if import_root:
-        with (import_root / 'requests.jsonl').open('a', encoding='utf-8') as log:
+        # Concurrent read-only captures must not share a Windows append cursor.
+        with (import_root / f'requests-{os.getpid()}.jsonl').open('a', encoding='utf-8') as log:
             log.write(json.dumps(request)+'\n')
     if method is None:
         if request.get("id") == "approval-1": approved.set()

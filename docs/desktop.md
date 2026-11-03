@@ -19,8 +19,10 @@ open work/Boxen.app
 
 On other platforms the script builds `desktop/target/release/boxen-desktop`
 (`.exe` on Windows). It requires the platform's native graphics/windowing build
-dependencies. macOS ARM64 is the currently exercised desktop platform; Linux and
-Windows desktop execution are not yet verified. This is not a notarized release
+dependencies. Native macOS ARM64 and Windows x86_64 desktop execution have been
+exercised; Linux desktop execution is not yet verified. Windows checks include
+the real-daemon client/correspondence tests and opening the native workspace and
+resident-recipient composer. This is not a notarized release
 or installer. The GUI has its own Cargo manifest/lockfile and never enters the
 Cosmopolitan daemon dependency graph.
 

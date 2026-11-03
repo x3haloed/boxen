@@ -2,6 +2,7 @@
 """Paired daemon text import: exact roles/provenance, no inference/effect replay, real next-input projection."""
 import concurrent.futures
 import http.server
+from smoke_helpers import fake_codex
 import json
 import pathlib
 import secrets
@@ -33,7 +34,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-transcript-import-') as temp:
  keys=[cli(i,'identity') for i in range(2)]
  for i in range(2):cli(i,'trust',keys[1-i],'Transcript test peer')
  def daemon(i):
-  p=subprocess.Popen(COMMAND+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(ROOT/'tests/fake-codex.py'),'--openrouter-endpoint',f'http://127.0.0.1:{provider.server_port}/chat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+  p=subprocess.Popen(COMMAND+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(fake_codex()),'--openrouter-endpoint',f'http://127.0.0.1:{provider.server_port}/chat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
   processes[i]=p;lines=[p.stdout.readline() for _ in range(3)];assert 'Local controls:' in lines[-1];tokens[i]=lines[-1].strip().split('#')[1]
  def api(request,i=0):
   r=urllib.request.Request(f'http://127.0.0.1:{uis[i]}/api/operation',headers={'Authorization':'Bearer '+tokens[i],'Content-Type':'application/json'},data=json.dumps({'peer':keys[1],'address':f'127.0.0.1:{peers[1]}','request':request}).encode());return json.load(urllib.request.urlopen(r,timeout=20))

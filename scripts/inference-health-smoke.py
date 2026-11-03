@@ -2,6 +2,8 @@
 """Paired daemon text import: exact roles/provenance, no inference/effect replay, real next-input projection."""
 import concurrent.futures
 import http.server
+from smoke_helpers import fake_codex
+from smoke_helpers import python_shell
 import json
 import pathlib
 import secrets
@@ -27,7 +29,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
   self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
   def emit(delta,finish=None):self.wfile.write(('data: '+json.dumps({'id':'fixture','choices':[{'index':0,'delta':delta,'finish_reason':finish}]})+'\n\n').encode());self.wfile.flush()
   if mode=='effect_then_payment':
-   emit({'tool_calls':[{'index':0,'id':'effect-once','type':'function','function':{'name':'boxen_shell','arguments':json.dumps({'command':'printf x >> effect.txt'})}}]});emit({},'tool_calls')
+   emit({'tool_calls':[{'index':0,'id':'effect-once','type':'function','function':{'name':'boxen_shell','arguments':json.dumps({'command':python_shell("from pathlib import Path; p=Path('effect.txt'); p.open('a').write('x')")})}}]});emit({},'tool_calls')
   else:emit({'content':'PRIVATE_RESUMED'});emit({},'stop')
   self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
 def port():
@@ -39,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-health-') as temp:
  keys=[cli(i,'identity') for i in range(2)]
  for i in range(2):cli(i,'trust',keys[1-i],'Transcript test peer')
  def daemon(i):
-  p=subprocess.Popen(COMMAND+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(ROOT/'tests/fake-codex.py'),'--openrouter-endpoint',f'http://127.0.0.1:{provider.server_port}/chat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+  p=subprocess.Popen(COMMAND+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(fake_codex()),'--openrouter-endpoint',f'http://127.0.0.1:{provider.server_port}/chat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
   processes[i]=p;lines=[p.stdout.readline() for _ in range(3)];assert 'Local controls:' in lines[-1];tokens[i]=lines[-1].strip().split('#')[1]
  def api(request,i=0):
   r=urllib.request.Request(f'http://127.0.0.1:{uis[i]}/api/operation',headers={'Authorization':'Bearer '+tokens[i],'Content-Type':'application/json'},data=json.dumps({'peer':keys[1],'address':f'127.0.0.1:{peers[1]}','request':request}).encode());return json.load(urllib.request.urlopen(r,timeout=20))

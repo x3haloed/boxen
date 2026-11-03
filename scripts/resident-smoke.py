@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Test real daemons/transport/storage against a deterministic backend fixture."""
+from smoke_helpers import fake_codex
 import json
 import concurrent.futures
 import os
@@ -16,8 +17,7 @@ import urllib.request
 root = pathlib.Path(__file__).resolve().parent.parent
 binary = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else root / "target/release/boxen").resolve()
 command = (["/bin/bash"] if binary.suffix == ".com" else []) + [str(binary)]
-fixture = root / "tests/fake-codex.py"
-fixture.chmod(0o755)
+fixture = fake_codex()
 
 
 def port():
