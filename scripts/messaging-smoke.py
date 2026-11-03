@@ -73,7 +73,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
     def inbox(r):return msg('inbox',conversation='resident:'+r)['messages']
     def instance(name,account,residents,key):
         credential=directory/(name+'.key');credential.write_text(key);credential.chmod(0o600)
-        d={'id':secrets.token_hex(32),'name':name,'provider':'discord','account':account,'credential_file':str(credential),'capabilities':['send','receive','replies','native_metadata'],'bindings':[{'conversation':'999','resident':r} for r in residents]}
+        d={'id':secrets.token_hex(32),'name':name,'provider':'discord','account':account,'credential_file':str(credential),'capabilities':['send','receive','replies','native_metadata'],'bindings':[{'conversation':'999','resident':r,'accept_bots':True} for r in residents]}
         value=msg('create',definition=d);assert msg('create',definition=d)==value
         return value
     def runner(instance,expected=0):
@@ -116,6 +116,19 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
         assert ia[0]['origin']['native_id']==ib[0]['origin']['native_id']==native['id']
         assert ia[0]['from']['instance']==aid and ib[0]['from']['instance']==bid
         assert ia[0]['origin']['author']['id']=='2222'
+        own_a=add('SILENT own account A',{'id':'1001','bot':True})
+        own_b=add('SILENT own account B',{'id':'1002','bot':True})
+        human=add('SILENT human after bots')
+        runner(a);runner(b)
+        ids=lambda resident:{m['origin']['native_id'] for m in inbox(resident) if m.get('origin',{}).get('provider')=='discord'}
+        assert own_a['id'] not in ids(r1) and own_b['id'] in ids(r1) and human['id'] in ids(r1), inbox(r1)
+        for resident_id in [r2,r3]:
+            assert own_b['id'] not in ids(resident_id) and own_a['id'] in ids(resident_id) and human['id'] in ids(resident_id)
+        tail=add('SILENT self-only tail',{'id':'1001','bot':True});before=len(inbox(r1))
+        skipped=runner(a)
+        assert msg('cursor',instance=aid,conversation='999')['checkpoint']['cursor']==tail['id']
+        assert any(json.loads(line).get('event')=='discord.self_echo_skipped' and json.loads(line)['fields']['count']==1 for line in skipped.stdout.splitlines())
+        runner(a);assert len(inbox(r1))==before
         local=command(r1,{'definition':{'id':'boxen'}},body='SILENT generic Boxen mail',conversation='resident:'+r2,subject='Local connector proof');assert any(m['id']==local and m['from']['instance']=='boxen' for m in inbox(r2))
         custom=msg('create',definition={'id':secrets.token_hex(32),'name':'Credential-free custom addon','provider':'custom','account':'public-room','capabilities':['receive','native_metadata'],'settings':{'endpoint':'example.invalid'},'bindings':[{'conversation':'a:b','resident':r3,'send':False},{'conversation':'a','resident':r3,'send':False}]})
         custom_id=custom['definition']['id']
@@ -172,7 +185,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
         activate(r1)
         content=log.read_text();assert 'messaging.instance_created' in content and 'messaging.intake_accepted' in content and 'messaging.operation' in content
         assert 'fixture-a' not in content and 'fixture-b' not in content and 'SILENT native input' not in content
-        print(json.dumps({'messaging_smoke':'passed','instances':2,'resident_bindings':3,'native_account_isolation':True,'explicit_bot_sharing':True,'subject_free_send':True,'reply_provenance':True,'private_narration':True,'uncertain_effect_not_replayed':True,'restart_continuity':True,'bad_instance_isolation':True,'discord_backend':'controlled_http'}))
+        print(json.dumps({'messaging_smoke':'passed','instances':2,'resident_bindings':3,'native_account_isolation':True,'explicit_bot_sharing':True,'self_echo_excluded':True,'self_only_cursor_advances':True,'other_bot_intake':True,'subject_free_send':True,'reply_provenance':True,'private_narration':True,'uncertain_effect_not_replayed':True,'restart_continuity':True,'bad_instance_isolation':True,'discord_backend':'controlled_http'}))
     finally:
         server.shutdown();server.server_close()
         for p in processes:

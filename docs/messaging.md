@@ -31,6 +31,12 @@ Reusing the same external account in multiple instances is explicit configuratio
 Boxen does not pool connections or deduplicate across those instances. Such
 instances still represent the same identity to the external service.
 
+The bundled Discord runner excludes posts authored by its own configured native
+account from intake, including when multiple residents share that account. Other
+bots and humans retain the existing binding rules, including `accept_bots`. Self-only batches still advance
+the durable native cursor; filtered posts cannot repeatedly wake residents on
+later polls or runner restarts. Historical echoes already retained remain history.
+
 `credential_file` is optional for generic addons. A credential-free source or an
 addon using another local authentication mechanism needs no fabricated bot key.
 The bundled Discord runner requires a private file containing its bot token and

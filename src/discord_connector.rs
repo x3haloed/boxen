@@ -257,7 +257,12 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
                 {
                     continue;
                 }
-                match poll(&control, &mut discord, conversation) {
+                match poll(
+                    &control,
+                    &mut discord,
+                    conversation,
+                    &current.definition.account,
+                ) {
                     Ok(()) => {
                         if let Some((count, _)) = channel_failures.remove(conversation) {
                             notices(
@@ -333,7 +338,7 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
         std::thread::sleep(Duration::from_secs(2));
     }
 }
-fn poll(control: &Control, discord: &mut Discord, conversation: &str) -> Result<()> {
+fn poll(control: &Control, discord: &mut Discord, conversation: &str, account: &str) -> Result<()> {
     snowflake(conversation)?;
     let checkpoint = control.call(json!({"action":"cursor","conversation":conversation}))?;
     let after = checkpoint["checkpoint"]["cursor"].as_str();
@@ -408,9 +413,22 @@ fn poll(control: &Control, discord: &mut Discord, conversation: &str) -> Result<
             bytes += next;
             end += 1;
         }
-        let messages = &normalized[offset..end];
-        let next = messages.last().unwrap()["id"].as_str().unwrap();
+        // The native cursor covers self posts too, so self-only pages advance
+        // durably without being presented as new correspondence on every poll.
+        let batch = &normalized[offset..end];
+        let next = batch.last().unwrap()["id"].as_str().unwrap();
+        let messages: Vec<_> = batch
+            .iter()
+            .filter(|v| v["author"]["id"].as_str() != Some(account))
+            .collect();
         control.call(json!({"action":"ingest","conversation":conversation,"after":cursor,"cursor":next,"messages":messages}))?;
+        if messages.len() != batch.len() {
+            notices(
+                "discord.self_echo_skipped",
+                &control.instance,
+                json!({"conversation":conversation,"count":batch.len()-messages.len(),"cursor":next}),
+            );
+        }
         cursor = next.into();
         offset = end;
     }
