@@ -2,6 +2,7 @@
 //! credential, while the daemon owns routing, accepted intake and send receipts.
 use crate::{Result, messaging::Instance, state};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -434,6 +435,30 @@ fn poll(control: &Control, discord: &mut Discord, conversation: &str, account: &
     }
     Ok(())
 }
+fn text_parts(mut body: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    while !body.is_empty() {
+        let mut units = 0;
+        let mut end = body.len();
+        let mut boundary = 0;
+        for (i, c) in body.char_indices() {
+            if units + c.len_utf16() > 2000 {
+                end = i;
+                break;
+            }
+            units += c.len_utf16();
+            if units >= 1000 && c.is_whitespace() {
+                boundary = i + c.len_utf8();
+            }
+        }
+        if end < body.len() && boundary > 0 {
+            end = boundary;
+        }
+        parts.push(&body[..end]);
+        body = &body[end..];
+    }
+    parts
+}
 fn deliver(control: &Control, discord: &mut Discord) -> Result<()> {
     let outbox = control.call(json!({"action":"outbox"}))?;
     if outbox["enabled"] != true {
@@ -457,46 +482,82 @@ fn deliver(control: &Control, discord: &mut Discord) -> Result<()> {
         if claimed["claimed"] != true {
             continue;
         }
-        let mut payload = json!({"content":body,"allowed_mentions":{"parse":[]},"nonce":&message["id"].as_str().ok_or("outgoing message id unavailable")?[..25],"enforce_nonce":true});
-        if let Some(reply) = claimed["native_reply"].as_str() {
-            payload["message_reference"] = json!({"message_id":reply,"fail_if_not_exists":false});
-        }
         let (status, external_id, reason) = if !valid_conversation {
             ("rejected", None, Some("invalid_native_conversation".into()))
-        } else if body.chars().count() > 2000 || body.is_empty() {
-            ("rejected", None, Some("text_limit_or_empty_body".into()))
+        } else if body.is_empty() {
+            ("rejected", None, Some("empty_body".into()))
         } else {
-            match discord.call(
-                "POST",
-                &format!("/channels/{conversation}/messages"),
-                Some(payload),
-            ) {
-                Ok(Reply::Ok(value)) => {
-                    if let Some(id) = value["id"].as_str() {
-                        ("accepted", Some(id.to_owned()), None)
-                    } else {
-                        (
-                            "uncertain",
-                            None,
-                            Some("service_message_id_unavailable".into()),
-                        )
-                    }
+            let parts = text_parts(body);
+            let mut first_id = None;
+            let mut aggregate = ("accepted", None);
+            for (index, part) in parts.iter().enumerate() {
+                control.call(json!({"action":"part","id":message["id"],"claim_id":claim_id,"index":index,"total":parts.len(),"status":"claimed"}))?;
+                let nonce = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        format!("{}:{index}", message["id"].as_str().unwrap()).as_bytes()
+                    )
+                );
+                let mut payload = json!({"content":part,"allowed_mentions":{"parse":[]},"nonce":&nonce[..25],"enforce_nonce":true});
+                if index == 0
+                    && let Some(reply) = claimed["native_reply"].as_str()
+                {
+                    payload["message_reference"] =
+                        json!({"message_id":reply,"fail_if_not_exists":false});
                 }
-                Ok(Reply::Rejected(code)) => (
-                    if (400..500).contains(&code) {
-                        "rejected"
-                    } else {
-                        "uncertain"
-                    },
-                    None,
-                    Some(format!("http_{code}")),
-                ),
-                Err(_) => (
-                    "uncertain",
-                    None,
-                    Some("transport_or_response_unavailable".into()),
-                ),
+                let (part_status, part_id, part_reason) = match discord.call(
+                    "POST",
+                    &format!("/channels/{conversation}/messages"),
+                    Some(payload),
+                ) {
+                    Ok(Reply::Ok(value)) => {
+                        if let Some(id) = value["id"].as_str() {
+                            ("accepted", Some(id.to_owned()), None)
+                        } else {
+                            (
+                                "uncertain",
+                                None,
+                                Some("service_message_id_unavailable".into()),
+                            )
+                        }
+                    }
+                    Ok(Reply::Rejected(code)) => (
+                        if (400..500).contains(&code) {
+                            "rejected"
+                        } else {
+                            "uncertain"
+                        },
+                        None,
+                        Some(format!("http_{code}")),
+                    ),
+                    Err(_) => (
+                        "uncertain",
+                        None,
+                        Some("transport_or_response_unavailable".into()),
+                    ),
+                };
+                control.call(json!({"action":"part","id":message["id"],"claim_id":claim_id,"index":index,"total":parts.len(),"status":part_status,"external_id":part_id,"reason":part_reason}))?;
+                notices(
+                    "discord.send_part_outcome",
+                    &control.instance,
+                    json!({"message_id":message["id"],"index":index,"total":parts.len(),"status":part_status,"external_id":part_id,"reason":part_reason}),
+                );
+                if first_id.is_none() && part_status == "accepted" {
+                    first_id = part_id;
+                }
+                if part_status != "accepted" {
+                    aggregate = (
+                        if index > 0 { "uncertain" } else { part_status },
+                        if index > 0 {
+                            Some("partial_delivery".into())
+                        } else {
+                            part_reason
+                        },
+                    );
+                    break;
+                }
             }
+            (aggregate.0, first_id, aggregate.1)
         };
         control.call(json!({"action":"complete","id":message["id"],"claim_id":claim_id,"status":status,"external_id":external_id,"reason":reason}))?;
         notices(

@@ -637,6 +637,28 @@ pub fn operation(
                         result["native_reply"] = native_reply;
                         Ok(result)
                     }
+                    "part" => {
+                        jobs.connectors.get(owner, id)?;
+                        jobs.mailboxes.part(
+                            owner,
+                            id,
+                            args["id"].as_str().ok_or("message id required")?,
+                            args["claim_id"].as_str().ok_or("claim_id required")?,
+                            args["index"]
+                                .as_u64()
+                                .filter(|n| *n < 32)
+                                .ok_or("part index is 0–31")? as usize,
+                            args["total"]
+                                .as_u64()
+                                .filter(|n| *n <= 32)
+                                .ok_or("part total is 1–32")? as usize,
+                            crate::mailbox::DeliveryOutcome {
+                                status: args["status"].as_str().ok_or("status required")?,
+                                external_id: args["external_id"].as_str(),
+                                reason: args["reason"].as_str(),
+                            },
+                        )
+                    }
                     "complete" => {
                         jobs.connectors.get(owner, id)?;
                         jobs.mailboxes.complete(
@@ -665,7 +687,7 @@ pub fn operation(
         Target::State,
         "messaging.operation",
         Context::peer(owner),
-        || json!({"action":action,"instance_id":id,"resident_id":resident,"message_id":args["id"],"conversation":args["conversation"],"claimed":result.as_ref().ok().and_then(|v|v.get("claimed")),"delivery":result.as_ref().ok().and_then(|v|v.get("status")),"accepted":result.is_ok(),"error":result.as_ref().err().map(|e|e.to_string())}),
+        || json!({"action":action,"instance_id":id,"resident_id":resident,"message_id":args["id"],"conversation":args["conversation"],"part_index":args["index"],"parts_total":args["total"],"part_status":args["status"],"claimed":result.as_ref().ok().and_then(|v|v.get("claimed")),"delivery":result.as_ref().ok().and_then(|v|v.get("status")),"accepted":result.is_ok(),"error":result.as_ref().err().map(|e|e.to_string())}),
         || Value::Null,
     );
     result

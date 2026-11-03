@@ -22,7 +22,7 @@ def port():
     with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
 
 class Discord(http.server.BaseHTTPRequestHandler):
-    messages=[];sent=[];counter=100;rate_limit=False;unknown=False
+    messages=[];sent=[];counter=100;rate_limit=False;unknown=False;reject_after=0;unknown_after=0;crash_after=0
     def log_message(self,*args):pass
     def reply(self,status,value):
         data=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
@@ -39,8 +39,18 @@ class Discord(http.server.BaseHTTPRequestHandler):
         account=self.account();assert account
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         assert body['allowed_mentions']=={'parse':[]},body
+        assert len(body['content'].encode('utf-16-le'))//2<=2000,body
+        if Discord.reject_after:
+            Discord.reject_after-=1
+            if not Discord.reject_after:self.reply(400,{'error':'controlled part rejection'});return
         if Discord.rate_limit:Discord.rate_limit=False;self.reply(429,{'retry_after':0.01,'global':False});return
         value=add(body['content'],account);Discord.sent.append({'account':account['id'],'body':body,'id':value['id']})
+        if Discord.crash_after:
+            Discord.crash_after-=1
+            if not Discord.crash_after:peer_process.kill();peer_process.wait(timeout=5)
+        if Discord.unknown_after:
+            Discord.unknown_after-=1
+            if not Discord.unknown_after:Discord.unknown=True
         if Discord.unknown:Discord.unknown=False;self.connection.shutdown(socket.SHUT_RDWR);self.connection.close();return
         self.reply(200,value)
 def add(body,author=None):
@@ -149,6 +159,34 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
         second=command(r2,b);runner(b);assert Discord.sent[-1]['account']=='1002'
         shared=command(r3,b);runner(b);assert Discord.sent[-1]['account']=='1002'
         assert msg('status',id=second)['delivery']['status']=='accepted' and msg('status',id=shared)['delivery']['status']=='accepted'
+        long_body=('Unicode 🦊 and text\n'*220)+'END'
+        before=len(Discord.sent);long_id=command(r1,a,long_body,reply=ia[0]['id']);Discord.rate_limit=True;runner(a)
+        sent=Discord.sent[before:];receipt=msg('status',id=long_id)['delivery']
+        assert ''.join(p['body']['content'] for p in sent)==long_body and len(sent)>1
+        assert receipt['status']=='accepted' and receipt['parts_total']==len(sent)
+        assert [p['external_id'] for p in receipt['parts']]==[p['id'] for p in sent]
+        assert sent[0]['body']['message_reference']['message_id']==native['id']
+        assert all('message_reference' not in p['body'] for p in sent[1:])
+        assert len({p['body']['nonce'] for p in sent})==len(sent)
+        runner(a);assert len(Discord.sent)==before+len(sent)
+        reject(lambda:msg('part',instance=aid,id=long_id,claim_id=receipt['claim_id'],index=0,total=len(sent),status='accepted',external_id='different'))
+        for boundary_body in ['x'*2000, '🦊'*1100+'tail', 'm'*32000]:
+            before=len(Discord.sent);boundary=command(r1,a,boundary_body);runner(a)
+            assert ''.join(p['body']['content'] for p in Discord.sent[before:])==boundary_body
+            assert msg('status',id=boundary)['delivery']['status']=='accepted'
+        partial=command(r1,a,'p'*4500);before=len(Discord.sent);Discord.reject_after=2;runner(a)
+        receipt=msg('status',id=partial)['delivery'];assert receipt['status']=='uncertain' and receipt['reason']=='partial_delivery'
+        assert [p['status'] for p in receipt['parts']]==['accepted','rejected'] and len(Discord.sent)==before+1
+        lost=command(r1,a,'q'*4500);before=len(Discord.sent);Discord.unknown_after=2;runner(a)
+        receipt=msg('status',id=lost)['delivery'];assert [p['status'] for p in receipt['parts']]==['accepted','uncertain']
+        assert len(Discord.sent)==before+2
+        crashed=command(r1,a,'z'*4500);before=len(Discord.sent);Discord.crash_after=2;runner(a,1)
+        peer_process,tokens[1]=daemon(1)
+        receipt=msg('status',id=crashed)['delivery'];assert receipt['status']=='uncertain'
+        assert [p['status'] for p in receipt['parts']]==['accepted','claimed'] and receipt['parts_total']==3
+        runner(a);assert len(Discord.sent)==before+2,'partial multipart effects replayed after restart'
+        resumed=command(r1,a,'Fresh send after interrupted multipart');runner(a)
+        assert msg('status',id=resumed)['delivery']['status']=='accepted'
         # Replayed native input is accepted once, conflicting reuse is legible.
         checkpoint=msg('cursor',instance=aid,conversation='999')['checkpoint']['cursor']
         batch={'instance':aid,'conversation':'999','after':checkpoint,'cursor':'9000','messages':[{'id':'9000','author':{'id':'2222','bot':False},'body':'SILENT dedup proof'}]}
@@ -185,7 +223,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
         activate(r1)
         content=log.read_text();assert 'messaging.instance_created' in content and 'messaging.intake_accepted' in content and 'messaging.operation' in content
         assert 'fixture-a' not in content and 'fixture-b' not in content and 'SILENT native input' not in content
-        print(json.dumps({'messaging_smoke':'passed','instances':2,'resident_bindings':3,'native_account_isolation':True,'explicit_bot_sharing':True,'self_echo_excluded':True,'self_only_cursor_advances':True,'other_bot_intake':True,'subject_free_send':True,'reply_provenance':True,'private_narration':True,'uncertain_effect_not_replayed':True,'restart_continuity':True,'bad_instance_isolation':True,'discord_backend':'controlled_http'}))
+        print(json.dumps({'messaging_smoke':'passed','instances':2,'resident_bindings':3,'native_account_isolation':True,'explicit_bot_sharing':True,'self_echo_excluded':True,'self_only_cursor_advances':True,'other_bot_intake':True,'multipart_exact_unicode':True,'multipart_partial_and_crash_recovery':True,'subject_free_send':True,'reply_provenance':True,'private_narration':True,'uncertain_effect_not_replayed':True,'restart_continuity':True,'bad_instance_isolation':True,'discord_backend':'controlled_http'}))
     finally:
         server.shutdown();server.server_close()
         for p in processes:

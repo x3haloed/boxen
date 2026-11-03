@@ -508,7 +508,25 @@ impl Mailboxes {
         if status == "accepted" && external_id.is_none() {
             return Err("external acceptance includes the service message id".into());
         }
-        let receipt = json!({"status":status,"claim_id":claim_id,"external_id":external_id,"reason":reason,"at":jobs::now()});
+        let mut receipt = json!({"status":status,"claim_id":claim_id,"external_id":external_id,"reason":reason,"at":jobs::now()});
+        if let Some(value) = prior.get("parts") {
+            let parts = value
+                .as_array()
+                .ok_or("retained multipart outcomes are unavailable")?;
+            let total = prior["parts_total"]
+                .as_u64()
+                .ok_or("retained part count is unavailable")?;
+            if status == "accepted"
+                && (parts.len() as u64 != total || parts.iter().any(|p| p["status"] != "accepted"))
+            {
+                return Err("multipart acceptance requires every declared part to have a retained accepted outcome".into());
+            }
+            if status == "rejected" && parts.iter().any(|p| p["status"] != "rejected") {
+                return Err("a multipart dispatch with accepted or unknown effects cannot be relabeled rejected".into());
+            }
+            receipt["parts"] = value.clone();
+            receipt["parts_total"] = prior["parts_total"].clone();
+        }
         if prior["status"] != "uncertain" {
             return if prior["status"] == status
                 && prior["external_id"] == json!(external_id)
@@ -519,6 +537,104 @@ impl Mailboxes {
                 Err("an established external outcome cannot be relabeled".into())
             };
         }
+        Self::append(
+            &mut inner,
+            json!({"kind":"connector_receipt","id":id,"receipt":receipt}),
+        )?;
+        Ok(receipt)
+    }
+    /// Progress belongs to the existing correspondence receipt, never a second
+    /// adapter database. A claimed part may have taken effect after a crash.
+    pub fn part(
+        &self,
+        owner: &str,
+        instance: &str,
+        id: &str,
+        claim_id: &str,
+        index: usize,
+        total: usize,
+        outcome: DeliveryOutcome<'_>,
+    ) -> Result<Value> {
+        self.check()?;
+        if total == 0 || total > 32 || index >= total {
+            return Err("multipart delivery contains 1–32 ordered parts".into());
+        }
+        if !matches!(
+            outcome.status,
+            "claimed" | "accepted" | "rejected" | "uncertain"
+        ) || (outcome.status == "accepted" && outcome.external_id.is_none())
+        {
+            return Err(
+                "part outcomes are claimed, accepted with a service id, rejected or uncertain"
+                    .into(),
+            );
+        }
+        if let Some(v) = outcome.external_id {
+            crate::messaging::opaque(v, 256)?;
+        }
+        if let Some(v) = outcome.reason {
+            crate::messaging::opaque(v, 64)?;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .ids
+            .get(id)
+            .and_then(|i| inner.messages.get(*i))
+            .filter(|m| {
+                m.owner == owner && matches!(&m.to,Address::Connector{instance:i,..} if i==instance)
+            })
+            .ok_or("outgoing message unavailable in connector scope")?;
+        let prior = inner
+            .receipts
+            .get(id)
+            .ok_or("part has no retained dispatch claim")?;
+        if prior["claim_id"] != claim_id {
+            return Err("part belongs to another dispatch claim".into());
+        }
+        if prior
+            .get("parts_total")
+            .is_some_and(|n| n.as_u64() != Some(total as u64))
+        {
+            return Err("declared part count cannot change within a dispatch".into());
+        }
+        let mut parts = match prior.get("parts") {
+            Some(value) => value
+                .as_array()
+                .ok_or("retained multipart outcomes are unavailable")?
+                .clone(),
+            None => Vec::new(),
+        };
+        let mut part = json!({"index":index,"status":outcome.status,"external_id":outcome.external_id,"reason":outcome.reason});
+        if let Some(old) = parts.get(index) {
+            if ["index", "status", "external_id", "reason"]
+                .iter()
+                .all(|k| old[*k] == part[*k])
+            {
+                return Ok(prior.clone());
+            }
+            if old["status"] != "claimed" || outcome.status == "claimed" {
+                return Err("an established part outcome cannot be relabeled".into());
+            }
+        } else if index != parts.len()
+            || outcome.status != "claimed"
+            || parts.iter().any(|p| p["status"] != "accepted")
+        {
+            return Err(
+                "a new part follows accepted predecessors and begins with a durable claim".into(),
+            );
+        }
+        if prior["status"] != "uncertain" {
+            return Err("completed dispatch cannot acquire new part outcomes".into());
+        }
+        part["at"] = json!(jobs::now());
+        if index == parts.len() {
+            parts.push(part);
+        } else {
+            parts[index] = part;
+        }
+        let mut receipt = prior.clone();
+        receipt["parts"] = json!(parts);
+        receipt["parts_total"] = json!(total);
         Self::append(
             &mut inner,
             json!({"kind":"connector_receipt","id":id,"receipt":receipt}),

@@ -197,6 +197,15 @@ be relabeled. This favors honest uncertainty and continued availability over
 repeating possibly completed effects. It does not provide distributed exactly-once
 delivery or prove that a person read a service-accepted message.
 
+Multipart addon progress uses the operator-only `part` action with `instance`,
+message `id`, `claim_id`, zero-based `index`, bounded `total` (1–32), and
+`status` (`claimed`, `accepted`, `rejected`, `uncertain`). Accepted outcomes
+include `external_id`; optional `reason` is bounded metadata. Parts begin with a
+retained claim and follow accepted predecessors. Exact progress retries are
+idempotent; changed established outcomes, totals, scope or claim IDs reject.
+`complete` retains these parts in the same journal-owned receipt; legacy addons
+without multipart progress keep their existing contract.
+
 The existing append-only `mailboxes/events.jsonl` is the shared correspondence
 journal, including intake, cursors, dispatch claims and outcomes. The directory
 and `record.mailbox` field names remain for storage/API compatibility; their
@@ -242,8 +251,17 @@ an applicable exemption. See [the Discord research](research/messaging-connector
 Per-channel read failures back off independently; other channels and outgoing
 work can proceed. Repeated health failures update counters with bounded notices,
 not an accumulating resident error feed. Sending disables automatic mention
-parsing. Text beyond Discord's supported 2000-character boundary is rejected
-without a service request. Replies preserve native message references. Discord's
+parsing. Long text is automatically split into ordered posts bounded to 2000 UTF-16
+units each, preferring whitespace boundaries. Submitted part payloads concatenate to the
+original text; Discord may trim whitespace at post edges. The original authored
+body remains retained exactly in Boxen. The first post carries the native reply reference;
+all posts disable mentions and have distinct stable nonces. The existing
+correspondence receipt retains a durable claim before each part and its service
+outcome afterward. Overall acceptance requires all parts accepted. Partial
+failure retains accepted IDs and an explicit `partial_delivery` outcome; a crash
+leaves any claimed part uncertain. Neither a partial send nor an unknown effect
+is automatically replayed, and later new messages remain available. Empty bodies
+remain rejected. Historical rejected messages are not automatically resubmitted. Discord's
 nonce facility supplements duplicate protection but is not treated as durable,
 unbounded idempotency. Gateway push, native edits/deletes, posting files, rich
 components, DMs initiated by user lookup, and other Discord operations are not
