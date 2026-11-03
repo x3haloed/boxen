@@ -102,6 +102,21 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
         assert len(api({'op':'resident_list'}))==3 and len(api({'op':'list'}))==4
         assert len(json.loads(command('messages').stdout)['messages'])==4
         assert packet.exists() and (home/'evidence'/r1['job_id']/'1/packet.json').exists()
+        # Explicit idle continuation retains the same live reservation without a
+        # cleanup assertion, a capacity gap or another resident.
+        stop(worker)
+        retained=assignment(1,'retained-runtime-continuation',False)
+        retained['coder_id']=r4['coder_id']
+        retained['continuation']={'expected_version':3,'expected_coder':r4['coder_id'],'reason':'Controlled environment recovered; existing allocation retained'}
+        retained_file=request_file('retained-continuation',retained)
+        rretained=json.loads(command('assign','--request-file',retained_file).stdout)
+        assert rretained['version']==4 and rretained['state']=='reserved' and rretained['coder_id']==r4['coder_id']
+        assert json.loads(command('assign','--request-file',retained_file).stdout)['idempotent']
+        with database(home/'work-items.sqlite3') as c:
+            assert c.execute('select holds_slot from work where id=?',(r1['job_id'],)).fetchone()[0]==1
+            assert c.execute('select count(*) from reservations where job=?',(r1['job_id'],)).fetchone()[0]>0
+        start_worker();wait(lambda:state(r1['job_id'])=='delivered');wait(idle)
+        assert len(api({'op':'resident_list'}))==3 and len(api({'op':'list'}))==5
         # Enable supervision for new assignments only. No old plain messages become outcomes.
         stop(worker)
         release['job_id']=r1['job_id'];command('release','--request-file',request_file('pause-supervised',release))
@@ -132,7 +147,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
         command('supervise','--test-notification','controlled-route-proof')
         notices=api({'op':'client_inbox','client_id':observer,'after':0})['messages']
         assert sum(json.loads(m['body'])['condition']=='delivery_test' for m in notices)==1
-        print('PASS real Boxen create/send/activation/reply, durable migration, exact retries, restart without replay, capacity queue/release, same-coder continuation, explicit owner transfer, immutable packets, supervised handoffs, one report-only recovery, durable notifications and private final isolation')
+        print('PASS real Boxen create/send/activation/reply, durable migration, exact retries, restart without replay, capacity queue/release, same-coder continuation with retained reservations, explicit owner transfer, immutable packets, supervised handoffs, one report-only recovery, durable notifications and private final isolation')
     finally:
         stop(worker);stop(daemon)
         if daemon:daemon.stdout.close()

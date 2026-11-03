@@ -245,6 +245,106 @@ fn capacity_and_conflicting_worktree_claims_are_atomic() {
     assert!(f.s.reserve(1).unwrap().is_none());
     assert!(f.s.reserve(2).unwrap().is_some());
 }
+
+#[test]
+fn retained_continuation_preserves_lease_owner_history_and_report_versions() {
+    let mut f = Fixture::new();
+    f.cfg.supervision = Some(supervision::Settings {
+        notify_to: json!({"type":"client","machine":f.cfg.owner,"id":hash("observer")}),
+        start_timeout_seconds: 2,
+        inactivity_seconds: 3,
+        report_grace_seconds: 1,
+    });
+    let initial = f.s.assign(&f.cfg, &f.input(1)).unwrap();
+    let job = f.s.reserve(1).unwrap().unwrap();
+    let mut api = Fake::new(&f.cfg);
+    dispatch(&f.s, &f.cfg, &api, &job).unwrap();
+    let blocked =
+        json!({"outcome":"blocked","summary":"Browser stopped; evidence retained"}).to_string();
+    f.s.connect()
+        .unwrap()
+        .execute(
+            "UPDATE supervision SET report=?1,phase='report_received' WHERE job=?2 AND version=1",
+            params![blocked, job],
+        )
+        .unwrap();
+    let mut next = f.input(1);
+    next["idempotency_key"] = json!("continuation-one");
+    next["new_copy"] = json!(false);
+    next["coder_id"] = initial["coder_id"].clone();
+    next["continuation"] = json!({"expected_version":1,"expected_coder":initial["coder_id"],"reason":"Runtime recovered; existing effects and blocked report remain retained"});
+    api.active = true;
+    assert!(transport::continue_assignment(&f.s, &f.cfg, &api, &next).is_err());
+    api.active = false;
+    struct Queued<'a>(&'a Fake);
+    impl Boxen for Queued<'_> {
+        fn call(&self, request: Value) -> Result<Value> {
+            let queued = request["op"] == "resident_inbox";
+            let mut value = self.0.call(request)?;
+            if queued {
+                for m in value["messages"].as_array_mut().unwrap() {
+                    m["delivery"] = json!("queued");
+                }
+            }
+            Ok(value)
+        }
+    }
+    assert!(transport::continue_assignment(&f.s, &f.cfg, &Queued(&api), &next).is_err());
+    let mut changed = next.clone();
+    changed["assignment"]["worktree"] = json!(f.root.join("worktree-2"));
+    assert!(transport::continue_assignment(&f.s, &f.cfg, &api, &changed).is_err());
+    let mut stale = next.clone();
+    stale["continuation"]["expected_version"] = json!(2);
+    assert!(transport::continue_assignment(&f.s, &f.cfg, &api, &stale).is_err());
+    let mut replacement = next.clone();
+    replacement["new_copy"] = json!(true);
+    assert!(transport::continue_assignment(&f.s, &f.cfg, &api, &replacement).is_err());
+    let second = transport::continue_assignment(&f.s, &f.cfg, &api, &next).unwrap();
+    assert_eq!(second["version"], 2);
+    assert_eq!(second["state"], "reserved");
+    assert_eq!(second["coder_id"], initial["coder_id"]);
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["holds_slot"], true);
+    assert_eq!(f.s.assign(&f.cfg, &next).unwrap()["version"], 2);
+    assert!(f.s.reserve(1).unwrap().is_none());
+    dispatch(&f.s, &f.cfg, &api, &job).unwrap();
+    assert_eq!(api.created.lock().unwrap().len(), 1);
+    assert_eq!(api.mail.lock().unwrap().len(), 2);
+    let c = f.s.connect().unwrap();
+    let old: (String, i64, String) = c
+        .query_row(
+            "SELECT report,closed,phase FROM supervision WHERE job=?1 AND version=1",
+            [&job],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(old, (blocked, 1, "superseded".into()));
+    assert!(
+        c.query_row(
+            "SELECT report IS NULL AND closed=0 FROM supervision WHERE job=?1 AND version=2",
+            [&job],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM assignments WHERE job=?1",
+            [&job],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM reservations WHERE job=?1",
+            [&job],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
 #[test]
 fn lost_mail_response_and_restart_do_not_duplicate_copy_or_assignment() {
     let f = Fixture::new();

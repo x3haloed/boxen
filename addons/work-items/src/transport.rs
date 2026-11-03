@@ -228,6 +228,74 @@ pub fn dispatch(s: &Store, cfg: &Config, api: &impl Boxen, job: &str) -> Result<
     );
     Ok(())
 }
+pub fn continue_assignment(
+    s: &Store,
+    cfg: &Config,
+    api: &impl Boxen,
+    input: &Value,
+) -> Result<Value> {
+    let source = ado::config(s)?.source();
+    let c = s.connect()?;
+    let (job, coder, version, held): (String, String, i64, i64) = c.query_row(
+        "SELECT id,coder,version,holds_slot FROM work WHERE source=?1 AND item=?2",
+        params![source, input["item"].as_i64().context("Item required")?],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    let _lock = job_lock(s, &job)?;
+    ensure!(
+        held == 1
+            && input["continuation"]["expected_version"] == version
+            && input["continuation"]["expected_coder"] == coder,
+        "Continuation owner/version changed"
+    );
+    let runs = api.call(json!({"op":"list"}))?;
+    for run in runs.as_array().context("Boxen run catalog unavailable")? {
+        if run["record"]["spec"]["thread_id"] == coder {
+            ensure!(
+                matches!(
+                    run["status"].as_str(),
+                    Some("completed" | "failed" | "interrupted" | "cancelled")
+                ),
+                "Continuation waits for idle coder execution; resources remain held"
+            );
+        }
+    }
+    let message: String = c.query_row(
+        "SELECT message FROM assignments WHERE job=?1 AND version=?2",
+        params![job, version],
+        |r| r.get(0),
+    )?;
+    let mid: Value = serde_json::from_str(&message)?;
+    let mut after = 0;
+    let mut presented = false;
+    let mut complete = false;
+    for _ in 0..100 {
+        let page = api.call(json!({"op":"resident_inbox","id":coder,"after":after}))?;
+        let messages = page["messages"]
+            .as_array()
+            .context("Resident inbox unavailable")?;
+        for m in messages {
+            ensure!(
+                m["delivery"] == "presented",
+                "Continuation waits for queued mailbox presentation"
+            );
+            if m["id"] == mid["id"] {
+                presented = true;
+            }
+        }
+        let next = page["next_after"].as_u64().unwrap_or(after);
+        if messages.is_empty() || next <= after {
+            complete = true;
+            break;
+        }
+        after = next;
+    }
+    ensure!(
+        presented && complete,
+        "Continuation requires prior assignment presentation"
+    );
+    s.assign(cfg, input)
+}
 pub fn release(
     s: &Store,
     api: &impl Boxen,

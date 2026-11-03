@@ -432,15 +432,36 @@ impl Store {
         };
         let new_copy = input["new_copy"] == true;
         let replacement = input.get("replacement").filter(|v| !v.is_null());
+        let continuation = input.get("continuation").filter(|v| !v.is_null());
+        let mut retained_from = None;
+        ensure!(
+            continuation.is_none() || old.is_some(),
+            "Continuation requires existing work"
+        );
         ensure!(
             replacement.is_none() || old.is_some(),
             "Replacement requires an existing assignment"
         );
         let (job, coder, version) = if let Some((job, coder, version, held)) = old {
             ensure!(
-                held == 0,
+                held == 0 || continuation.is_some(),
                 "Current reservation must be released after the coder becomes idle before refreshing"
             );
+            if let Some(continuation) = continuation {
+                ensure!(
+                    held == 1
+                        && input["new_copy"] == false
+                        && replacement.is_none()
+                        && input["coder_id"] == coder
+                        && continuation["expected_coder"] == coder
+                        && continuation["expected_version"] == version
+                        && continuation["reason"]
+                            .as_str()
+                            .is_some_and(|s| !s.trim().is_empty() && s.len() <= 4096),
+                    "Retained continuation requires the expected held owner/version, same coder and reason"
+                );
+                retained_from = Some(version);
+            }
             if let Some(replacement) = replacement {
                 let state: String =
                     tx.query_row("SELECT state FROM work WHERE id=?1", [&job], |r| r.get(0))?;
@@ -501,6 +522,32 @@ impl Store {
             (job, coder, 1)
         };
         let claims = resource_claims(assignment)?;
+        if let Some(previous) = retained_from {
+            let raw: String = tx.query_row(
+                "SELECT claims FROM assignments WHERE job=?1 AND version=?2",
+                params![job, previous],
+                |r| r.get(0),
+            )?;
+            let old_claims: Vec<String> = serde_json::from_str(&raw)?;
+            let held_claims = tx
+                .prepare("SELECT resource FROM reservations WHERE job=?1 ORDER BY resource")?
+                .query_map([&job], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ensure!(
+                claims == old_claims && claims == held_claims,
+                "Retained continuation requires identical existing resource claims"
+            );
+            tx.execute(
+                "UPDATE supervision SET closed=1,phase='superseded' WHERE job=?1 AND version=?2",
+                params![job, previous],
+            )?;
+            Self::log(
+                &tx,
+                &job,
+                "assignment.continued",
+                json!({"previous_version":previous,"version":version,"coder":coder,"continuation":continuation,"resources_retained":true}),
+            )?;
+        }
         let instantiate = if new_copy {
             json!({"op":"resident_definition","args":{"action":"instantiate","spec":{"id":coder,"definition_id":cfg.definition_id,"definition_revision":cfg.definition_revision,"overrides":{"name":format!("coder~{coder}")}}}})
         } else {
@@ -518,7 +565,7 @@ impl Store {
                 json!({"item":item,"version":version,"override":input["eligibility_override"]}),
             )?;
         }
-        let bundle = json!({"assignment":assignment,"context":input["context"],"legacy_reconciliation":input["legacy_reconciliation"],"replacement":input["replacement"],"eligibility_override":input["eligibility_override"],"source_packet":packet});
+        let bundle = json!({"assignment":assignment,"context":input["context"],"legacy_reconciliation":input["legacy_reconciliation"],"replacement":input["replacement"],"continuation":continuation,"eligibility_override":input["eligibility_override"],"source_packet":packet});
         let packet_path = self
             .path
             .parent()
@@ -539,7 +586,12 @@ impl Store {
             "Assignment/source packet exceeds mailbox body bound; no partial assignment was accepted"
         );
         let message = json!({"id":mid,"to":{"type":"resident","id":coder},"subject":format!("Work item {item}: assignment v{version}"),"body":body});
-        tx.execute("INSERT INTO work(id,source,item,coder,state,version,created) VALUES(?1,?2,?3,?4,'queued',?5,?6) ON CONFLICT(source,item) DO UPDATE SET coder=excluded.coder,state='queued',version=excluded.version,error=NULL",params![job,source,item,coder,version,now()])?;
+        let next_state = if retained_from.is_some() {
+            "reserved"
+        } else {
+            "queued"
+        };
+        tx.execute("INSERT INTO work(id,source,item,coder,state,version,created) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(source,item) DO UPDATE SET coder=excluded.coder,state=excluded.state,version=excluded.version,error=NULL",params![job,source,item,coder,next_state,version,now()])?;
         tx.execute(
             "INSERT INTO assignments VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
@@ -570,7 +622,7 @@ impl Store {
         }
         tx.commit()?;
         Ok(
-            json!({"job_id":job,"coder_id":coder,"version":version,"state":"queued","message_id":mid}),
+            json!({"job_id":job,"coder_id":coder,"version":version,"state":next_state,"message_id":mid}),
         )
     }
     pub fn reserve(&self, capacity: usize) -> Result<Option<String>> {

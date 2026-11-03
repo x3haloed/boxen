@@ -252,6 +252,16 @@ fn execute() -> Result<()> {
             )?;
             if !known {
                 inspect_assignment(&s, &cfg, &input)?;
+                if input.get("continuation").is_some_and(|v| !v.is_null()) {
+                    let result =
+                        transport::continue_assignment(&s, &cfg, &Control::new(&cfg)?, &input);
+                    eprintln!(
+                        "{}",
+                        json!({"event":"assignment.continuation_checked","at":now(),"data":{"item":input["item"],"expected_version":input["continuation"]["expected_version"],"accepted":result.is_ok()}})
+                    );
+                    println!("{}", serde_json::to_string_pretty(&result?)?);
+                    return Ok(());
+                }
                 if input.get("replacement").is_some_and(|v| !v.is_null()) {
                     let item = input["item"].as_i64().context("Work item ID required")?;
                     let (job, coder, version, state, held): (String, String, i64, String, i64) = s.connect()?.query_row("SELECT id,coder,version,state,holds_slot FROM work WHERE source=?1 AND item=?2", rusqlite::params![ado::config(&s)?.source(),item], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;

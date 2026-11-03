@@ -169,6 +169,17 @@ fails. Later unfinished work uses `new_copy: false`, retains the coder and advan
 the version after the previous reservation is released. A coder merely planned
 before a failed/stale dispatch retains its original creation intent and ID too.
 
+An idle coder can instead continue with an unchanged held allocation. An explicit
+`continuation` object names `expected_version`, `expected_coder` and a nonempty
+`reason`; `new_copy` is false and `coder_id` names that same coder. CLI preflight
+requires idle Boxen execution, presented prior assignment and no queued mailbox
+input. The transaction requires exactly the same stored and held resource claims.
+It accepts a new immutable assignment version directly into `reserved`, retaining
+capacity and every reservation without claiming cleanup or replaying old work.
+The old supervision/report remains retained as `superseded`; the new version has
+its own report slot. Different resources, ownership, stale versions and active
+execution are rejected. Ordinary source freshness and publication limits apply.
+
 The full assignment/source packet is projected to an immutable SHA-256-addressed
 file under `evidence/JOB/VERSION/packet.json` before mail is sent. Mail carries the
 frozen assignment, path and checksum, avoiding silent truncation of large ticket
