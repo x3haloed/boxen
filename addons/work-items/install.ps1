@@ -30,6 +30,6 @@ $action=New-ScheduledTaskAction -Execute $powershell -Argument $arguments
 $trigger=New-ScheduledTaskTrigger -AtLogOn -User $userName
 $principal=New-ScheduledTaskPrincipal -UserId $userName -LogonType Interactive -RunLevel Limited
 $settings=New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Read-only Azure mirror and explicitly operator-assigned Boxen coder work; no automatic assignment.' -Force | Out-Null
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Durable Azure mirror and supervised Boxen coder assignments; optional operator-configured automatic development-to-PR workflow.' -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName
 [pscustomobject]@{task=$taskName;executable=$exe;home=$runtimeHome;log=$log} | ConvertTo-Json
