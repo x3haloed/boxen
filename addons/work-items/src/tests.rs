@@ -1179,6 +1179,77 @@ fn workflow_step(
     }
 }
 #[test]
+fn operator_resume_keeps_coder_versions_assignment_and_deduplicates_after_dispatch() {
+    let (f, api, settings, mut driver) = workflow_fixture(false);
+    fs::write(
+        f.s.path.parent().unwrap().join("workflow.json"),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
+    for _ in 0..10 {
+        workflow_step(&f, &api, &settings, &mut driver);
+        if workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"] == "coding" {
+            break;
+        }
+    }
+    let c = f.s.connect().unwrap();
+    let (job, coder): (String, String) = c
+        .query_row("SELECT id,coder FROM work", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    c.execute(
+        "UPDATE supervision SET report=json_set(report,'$.outcome','blocked')",
+        [],
+    )
+    .unwrap();
+    for _ in 0..3 {
+        workflow_step(&f, &api, &settings, &mut driver);
+    }
+    let id = workflow::snapshot(&f.s).unwrap()["attempts"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"],
+        "held"
+    );
+    let request = json!({"idempotency_key":"resume-browser-v1","attempt_id":id,"expected_version":1,"expected_coder":coder,"reason":"Human approved the supported browser fallback; resume normal required validation"});
+    let mut wrong = request.clone();
+    wrong["expected_version"] = json!(2);
+    assert!(workflow::resume(&f.s, &api, &wrong).is_err());
+    let receipt = workflow::resume(&f.s, &api, &request).unwrap();
+    for _ in 0..25 {
+        workflow_step(&f, &api, &settings, &mut driver);
+    }
+    assert_eq!(
+        workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"],
+        "published"
+    );
+    assert_eq!(
+        workflow::resume(&Store::open(&f.s.path).unwrap(), &api, &request).unwrap(),
+        receipt
+    );
+    let state: (String, i64) = c
+        .query_row("SELECT coder,version FROM work WHERE id=?1", [job], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(state, (coder, 2));
+    assert_eq!(
+        api.actors
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|v| v["definition_id"] == f.cfg.definition_id)
+            .count(),
+        1
+    );
+    let mut conflict = request;
+    conflict["reason"] = json!("Different authority");
+    assert!(workflow::resume(&f.s, &api, &conflict).is_err());
+}
+#[test]
 fn automatic_loop_returns_findings_to_same_coder_and_publishes_exact_full_pr() {
     let (f, api, mut settings, mut driver) = workflow_fixture(true);
     settings.project["browser_workflow"] =

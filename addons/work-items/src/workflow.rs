@@ -72,6 +72,7 @@ pub fn migrate(c: &Connection) -> Result<()> {
     CREATE INDEX IF NOT EXISTS workflow_source_events ON ado_events(source,item,seq DESC);
     CREATE TABLE IF NOT EXISTS workflow_mail(id TEXT PRIMARY KEY,attempt TEXT,role TEXT,recipient TEXT,request TEXT,accepted INTEGER NOT NULL DEFAULT 0,response TEXT,next_due INTEGER NOT NULL DEFAULT 0,error TEXT);
     CREATE TABLE IF NOT EXISTS workflow_receipts(id TEXT PRIMARY KEY,accepted INTEGER,reason TEXT);
+    CREATE TABLE IF NOT EXISTS workflow_resumes(k TEXT PRIMARY KEY,input TEXT NOT NULL,receipt TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS workflow_questions(id TEXT PRIMARY KEY,item INTEGER,request TEXT,state TEXT,receipt TEXT,attempt TEXT,next_due INTEGER NOT NULL DEFAULT 0,error TEXT);")?;
     Ok(())
 }
@@ -522,6 +523,103 @@ fn fresh(s: &Store, a: &Attempt) -> Result<bool> {
     Ok(eligible && digest == a.digest && now() - observed < 30 * 60_000)
 }
 
+/// Explicit operator continuation of held workflow work; correspondence cannot invoke it.
+pub fn resume(s: &Store, api: &impl Boxen, input: &Value) -> Result<Value> {
+    let k = input["idempotency_key"]
+        .as_str()
+        .context("Resume idempotency key required")?;
+    ensure!(!k.trim().is_empty() && k.len() <= 256, "Invalid resume key");
+    let mut c = s.connect()?;
+    let prior: Option<(String, String)> = c
+        .query_row(
+            "SELECT input,receipt FROM workflow_resumes WHERE k=?1",
+            [k],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((original, receipt)) = prior {
+        ensure!(
+            serde_json::from_str::<Value>(&original)? == *input,
+            "Resume key has different inputs"
+        );
+        return Ok(serde_json::from_str(&receipt)?);
+    }
+    let settings = Settings::read(s)?.context("Workflow configuration required")?;
+    ensure!(settings.enabled, "Workflow is disabled");
+    let id = input["attempt_id"]
+        .as_str()
+        .context("Attempt ID required")?;
+    let mut a = load(s, id)?;
+    ensure!(
+        a.stage == "held" && fresh(s, &a)?,
+        "Resume requires held work with fresh unchanged source"
+    );
+    ensure!(
+        settings.items.is_empty() || settings.items.contains(&a.item),
+        "Attempt is outside enabled item scope"
+    );
+    ensure!(
+        input["reason"]
+            .as_str()
+            .is_some_and(|v| !v.trim().is_empty() && v.len() <= 8192),
+        "Resume reason required"
+    );
+    let job = a.data["job_id"]
+        .as_str()
+        .context("Held workflow has no assignment")?
+        .to_string();
+    let (coder, version, state, slot): (String, i64, String, i64) = c.query_row(
+        "SELECT coder,version,state,holds_slot FROM work WHERE id=?1",
+        [&job],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    ensure!(
+        state == "paused"
+            && slot == 0
+            && input["expected_coder"] == coder
+            && input["expected_version"] == version
+            && a.data["assignment_version"] == version,
+        "Resume owner/version or released pause state changed"
+    );
+    ensure!(
+        assignment(s, &a)?["context"]["workflow_id"] == a.id,
+        "Only workflow-owned assignments can resume here"
+    );
+    ensure!(idle(api, &coder)?, "Resume waits for idle coder execution");
+    let allocation_key = format!("workflow:{}:resume:{}", a.id, hash(k));
+    let report: Option<String> = c.query_row(
+        "SELECT report FROM supervision WHERE job=?1 AND version=?2",
+        params![job, version],
+        |r| r.get(0),
+    )?;
+    a.data["operator_resume"] = json!({"request":input,"prior_report":report.map(|v|serde_json::from_str::<Value>(&v)).transpose()?});
+    a.data["allocation_request_key"] = json!(allocation_key);
+    let receipt = json!({"attempt_id":a.id,"item":a.item,"coder_id":coder,"expected_version":version,"state":"ready","new_copy":false});
+    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = tx.execute("UPDATE workflow_attempts SET stage='ready',data=?2,error=NULL,next_due=0 WHERE id=?1 AND stage='held' AND EXISTS(SELECT 1 FROM work WHERE id=?3 AND version=?4 AND coder=?5 AND state='paused' AND holds_slot=0)",params![a.id,a.data.to_string(),job,version,coder])?;
+    ensure!(changed == 1, "Resume state changed concurrently");
+    tx.execute(
+        "INSERT INTO workflow_resumes VALUES(?1,?2,?3)",
+        params![k, input.to_string(), receipt.to_string()],
+    )?;
+    Store::log(
+        &tx,
+        &job,
+        "workflow.operator_resumed",
+        json!({"attempt":a.id,"item":a.item,"coder":coder,"version":version,"request":input}),
+    )?;
+    tx.commit()?;
+    event("workflow.operator_resumed", receipt.clone());
+    Ok(receipt)
+}
+
+fn allocation_key(a: &Attempt) -> String {
+    a.data["allocation_request_key"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("workflow:{}:assignment", a.id))
+}
+
 fn discover(s: &Store, settings: &Settings) -> Result<()> {
     let source = ado::config(s)?.source();
     let c = s.connect()?;
@@ -681,7 +779,7 @@ fn advance(
     a: &mut Attempt,
 ) -> Result<()> {
     if a.stage == "ready" {
-        let key = format!("workflow:{}:assignment", a.id);
+        let key = allocation_key(a);
         let saved: Option<(String, i64)> = s
             .connect()?
             .query_row(
@@ -1074,7 +1172,7 @@ fn advance(
             if let Some(browser) = settings.project["browser_workflow"].as_str() {
                 assigned["task"]["browser_workflow"] = json!(browser);
             }
-            let mut input = json!({"item":a.item,"source_digest":a.digest,"new_copy":existing.is_none(),"idempotency_key":format!("workflow:{}:assignment",a.id),"context":{"decision":if existing.is_some(){"return_to_coder"}else{"new_implementation"},"workflow_id":a.id,"authority":settings.authority,"authoritative_answers":a.data["authoritative_answers"],"evidence":[a.data["interpretation_request"]],"interpretation":a.data["interpretation"]},"legacy_reconciliation":a.data["interpretation"].to_string(),"assignment":assigned});
+            let mut input = json!({"item":a.item,"source_digest":a.digest,"new_copy":existing.is_none(),"idempotency_key":allocation_key(a),"context":{"decision":if existing.is_some(){"return_to_coder"}else{"new_implementation"},"workflow_id":a.id,"operator_resume":a.data["operator_resume"],"authority":settings.authority,"authoritative_answers":a.data["authoritative_answers"],"evidence":[a.data["interpretation_request"]],"interpretation":a.data["interpretation"]},"legacy_reconciliation":a.data["interpretation"].to_string(),"assignment":assigned});
             if let Some((_, coder, _, _)) = existing {
                 input["coder_id"] = json!(coder);
             }

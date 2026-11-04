@@ -144,3 +144,18 @@ protocol fixtures for correction, source invalidation, capacity, forgery, restar
 lost PR-create response. `tests/project-driver-smoke.py --pwsh ABS_PWSH` uses real
 local Git and native Azure/SQL fixtures to exercise the Windows driver without
 cloud writes. These checks remain distinct from a real model/application pilot.
+
+
+## Resuming held implementation
+
+`workflow-resume --request-file ABS` is an explicit local operator operation. Its
+JSON contains `idempotency_key`, `attempt_id`, `expected_version`, `expected_coder`
+and `reason`. It requires an enabled item scope, a held workflow-owned assignment,
+fresh unchanged source, the expected paused owner/version with released capacity,
+and idle execution. It retains the prior report and resume request. The next normal
+workflow tick reserves capacity and prepares a new immutable assignment for the
+same coder, using current project guidance. It does not create another coder or
+turn a policy-update message into permission to resume. Manual pauses outside this
+workflow remain unchanged. Exact retries return the original receipt even after
+dispatch; changed input under the same key rejects. Source changes require fresh
+interpretation instead of this unchanged-source continuation.

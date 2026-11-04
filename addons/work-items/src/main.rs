@@ -163,7 +163,7 @@ fn execute() -> Result<()> {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args.iter().any(|a| a == "--help") {
         println!(
-            "boxen-work-items --home ABS init --config-file ABS --legacy-db ABS\nboxen-work-items --home ABS run\nboxen-work-items --home ABS status\nboxen-work-items --home ABS workflow\nboxen-work-items --home ABS packet ITEM\nboxen-work-items --home ABS poll [--item ITEM]\nboxen-work-items --home ABS assign --request-file ABS\nboxen-work-items --home ABS release --request-file ABS\nboxen-work-items --home ABS messages [--after SEQ]\nboxen-work-items --home ABS supervise [--test-notification STABLE_KEY]\nLocal service CLI. Automatic dispatch and publication are opt-in through workflow.json. No GUI changes. Ordinary mail is not parsed into operator commands."
+            "boxen-work-items --home ABS init --config-file ABS --legacy-db ABS\nboxen-work-items --home ABS run\nboxen-work-items --home ABS status\nboxen-work-items --home ABS workflow\nboxen-work-items --home ABS workflow-resume --request-file ABS\nboxen-work-items --home ABS packet ITEM\nboxen-work-items --home ABS poll [--item ITEM]\nboxen-work-items --home ABS assign --request-file ABS\nboxen-work-items --home ABS release --request-file ABS\nboxen-work-items --home ABS messages [--after SEQ]\nboxen-work-items --home ABS supervise [--test-notification STABLE_KEY]\nLocal service CLI. Automatic dispatch and publication are opt-in through workflow.json. No GUI changes. Ordinary mail is not parsed into operator commands."
         );
         return Ok(());
     }
@@ -330,6 +330,15 @@ fn execute() -> Result<()> {
             )?;
             result?;
             println!("{}", supervision::snapshot(&s)?);
+        }
+        "workflow-resume" => {
+            let file = option(&mut args, "--request-file")?.context("--request-file required")?;
+            ensure!(args.is_empty(), "Unexpected workflow-resume arguments");
+            let _lock = lock(&home, "workflow.lock")?;
+            println!(
+                "{}",
+                workflow::resume(&s, &Control::new(&cfg)?, &read_json(&file)?)?
+            );
         }
         "workflow" => {
             ensure!(args.is_empty(), "Unexpected workflow arguments");
