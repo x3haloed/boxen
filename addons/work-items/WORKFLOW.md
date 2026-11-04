@@ -54,7 +54,13 @@ poll interval.
 A configured `post_clarifications` flag allows questions explicitly routed to
 `work_item` to become attributed automated ADO comments. Stable question IDs and
 remote marker readback prevent routine reposts. An `existing_comment_id` references
-an original question already posted. Operator/support questions remain mailbox
+an original question already posted; positive integer and decimal-string IDs are
+accepted. A paraphrased interpretation can reuse a stable question only when its
+explicit reference matches both the retained posted receipt and the exact
+comment version in the frozen source. The original request, receipt and authorship
+remain unchanged; the summary is neither a replacement comment nor a new post.
+Changed text without that verified reference still rejects.
+Operator/support questions remain mailbox
 notifications. Answer references retain the exact original comment/version or
 requirement revision/field and require an author in the configured decision role;
 a service-authored question does not become an authority answer.

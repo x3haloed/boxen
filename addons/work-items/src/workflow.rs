@@ -3,6 +3,37 @@
 use crate::{transport::Boxen, *};
 use std::path::PathBuf;
 
+pub(crate) fn existing_question_comment<'a>(
+    question: &Value,
+    entities: &'a Value,
+) -> Result<Option<(i64, &'a Value)>> {
+    let reference = &question["existing_comment_id"];
+    if reference.is_null() {
+        return Ok(None);
+    }
+    let existing = reference
+        .as_i64()
+        .or_else(|| {
+            reference
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 19 && s.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|s| s.parse::<i64>().ok())
+        })
+        .filter(|id| *id > 0)
+        .context("Existing question comment ID is invalid")?;
+    let original = entities
+        .as_array()
+        .context("Source comments unavailable")?
+        .iter()
+        .find(|v| v["id"] == existing && v["isDeleted"] != true)
+        .context("Existing question comment is absent from frozen source")?;
+    ensure!(
+        original["version"].as_i64().is_some_and(|v| v > 0),
+        "Existing question comment version is missing"
+    );
+    Ok(Some((existing, original)))
+}
+
 pub(crate) fn retained_prior_delivery(root: &std::path::Path, raw: &str) -> Result<Value> {
     let previous: Value = serde_json::from_str(raw)?;
     let digest = hash(raw);
@@ -982,24 +1013,35 @@ fn advance(
                     ));
                     let payload = json!({"item":a.item,"key":key,"question":text}).to_string();
                     let c = s.connect()?;
-                    let old: Option<String> = c
+                    let old: Option<(String, String, Option<String>)> = c
                         .query_row(
-                            "SELECT request FROM workflow_questions WHERE id=?1",
+                            "SELECT request,state,receipt FROM workflow_questions WHERE id=?1",
                             [&key],
-                            |r| r.get(0),
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                         )
                         .optional()?;
+                    let existing = existing_question_comment(
+                        question,
+                        &a.data["packet"]["evidence"]["entities"],
+                    )?;
+                    if let (Some((_, state, receipt)), Some((id, original))) = (&old, &existing) {
+                        let receipt: Value =
+                            serde_json::from_str(receipt.as_deref().unwrap_or("null"))?;
+                        ensure!(
+                            state == "posted"
+                                && receipt["comment_id"] == *id
+                                && receipt["comment_version"] == original["version"],
+                            "Stable question reference differs from its posted receipt"
+                        );
+                        // An explicit, verified reference reuses the canonical asked question.
+                        // Interpretation wording is a summary, never a replacement or new post.
+                        continue;
+                    }
                     ensure!(
-                        old.as_ref().is_none_or(|v| v == &payload),
+                        old.as_ref().is_none_or(|v| v.0 == payload),
                         "Stable question ID has changed text"
                     );
-                    if let Some(existing) = question["existing_comment_id"].as_i64() {
-                        let original = a.data["packet"]["evidence"]["entities"]
-                            .as_array()
-                            .context("Source comments unavailable")?
-                            .iter()
-                            .find(|v| v["id"] == existing && v["isDeleted"] != true)
-                            .context("Existing question comment is absent from frozen source")?;
+                    if let Some((existing, original)) = existing {
                         let receipt = json!({"comment_id":existing,"comment_version":original["version"],"service_authored":false});
                         c.execute("INSERT OR IGNORE INTO workflow_questions(id,item,request,state,receipt,attempt)VALUES(?1,?2,?3,'posted',?4,?5)",params![key,a.item,payload,receipt.to_string(),a.id])?;
                     } else {

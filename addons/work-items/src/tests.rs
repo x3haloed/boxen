@@ -1555,6 +1555,74 @@ fn uncertain_clarification_comment_creation_reconciles_without_duplicate() {
     assert!(api.actors.lock().unwrap().is_empty());
 }
 
+#[test]
+fn existing_clarification_reference_reuses_original_text_without_duplicate_posts() {
+    for case in [
+        "string-id",
+        "integer-id",
+        "wrong-receipt",
+        "changed-version",
+        "deleted",
+        "no-reference",
+    ] {
+        let (f, mut api, mut settings, mut driver) = workflow_fixture(false);
+        api.auto_answer = false;
+        settings.post_clarifications = true;
+        workflow_step(&f, &api, &settings, &mut driver);
+        let request = api
+            .mail
+            .lock()
+            .unwrap()
+            .values()
+            .find(|m| m["subject"].as_str().unwrap().contains("interpretation"))
+            .unwrap()
+            .clone();
+        let c = f.s.connect().unwrap();
+        let (attempt, raw): (String, String) = c
+            .query_row("SELECT id,data FROM workflow_attempts", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        let mut data: Value = serde_json::from_str(&raw).unwrap();
+        data["packet"]["evidence"]["entities"] = json!([{"id":9,"version":if case=="changed-version"{2}else{1},"isDeleted":case=="deleted","text":"Original asked wording"}]);
+        c.execute("UPDATE workflow_attempts SET data=?1", [data.to_string()])
+            .unwrap();
+        let key = hash(&format!(
+            "question:{}:1:which-field",
+            ado::config(&f.s).unwrap().source()
+        ));
+        let original = json!({"item":1,"key":key,"question":"Original asked wording"}).to_string();
+        let receipt=json!({"comment_id":if case=="wrong-receipt"{8}else{9},"comment_version":1,"service_authored":true}).to_string();
+        c.execute("INSERT INTO workflow_questions(id,item,request,state,receipt,attempt)VALUES(?1,1,?2,'posted',?3,?4)",params![key,original,receipt,attempt]).unwrap();
+        let mut question = json!({"id":"which-field","question":"Paraphrased summary; original comment already asks","existing_comment_id":if case=="integer-id"{json!(9)}else{json!("9")},"route":"work_item"});
+        if case == "no-reference" {
+            question
+                .as_object_mut()
+                .unwrap()
+                .remove("existing_comment_id");
+        }
+        api.answer(&request,json!({"protocol":"boxen.interpretation.v1","decision":"clarification_required","questions":[question],"holds":[]}),request["to"].clone());
+        workflow_step(&f, &api, &settings, &mut driver);
+        let (stage, error): (String, Option<String>) = c
+            .query_row("SELECT stage,error FROM workflow_attempts", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        if case == "string-id" || case == "integer-id" {
+            assert_eq!(stage, "held", "{case}");
+            assert!(error.is_none(), "{case}");
+        } else {
+            assert_eq!(stage, "interpreting", "{case}");
+            assert!(error.is_some(), "{case}");
+        }
+        let (stored,stored_receipt,count):(String,String,i64)=c.query_row("SELECT request,receipt,(SELECT count(*) FROM workflow_questions) FROM workflow_questions",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(stored, original);
+        assert_eq!(stored_receipt, receipt);
+        assert_eq!(count, 1);
+        assert!(!driver.calls.iter().any(|op| op == "post_question"));
+    }
+}
+
 struct ApprovalApi {
     snapshot: Value,
     controls: Mutex<Vec<Value>>,
