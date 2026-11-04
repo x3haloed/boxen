@@ -1,5 +1,8 @@
 //! Read-only resident/status projections of the existing authenticated APIs.
-use crate::{Data, model::Destination};
+use crate::{
+    Action, Data,
+    model::{Destination, ThreadKey},
+};
 use eframe::egui::{self, Color32, RichText};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -41,6 +44,7 @@ struct Peer {
     definitions: HashMap<String, String>,
     incidents: Vec<Value>,
     latest: HashMap<String, Activity>,
+    histories: HashMap<String, Vec<Value>>,
     metadata_error: Option<String>,
     runs_error: Option<String>,
     loaded: bool,
@@ -50,6 +54,36 @@ pub struct State {
     peers: HashMap<String, Peer>,
 }
 impl State {
+    pub fn resident(&self, key: &ThreadKey) -> Option<&Value> {
+        self.peers
+            .get(&key.peer)?
+            .residents
+            .iter()
+            .find(|r| r["id"] == key.id)
+    }
+    pub fn history(&self, key: &ThreadKey) -> Option<&[Value]> {
+        let p = self.peers.get(&key.peer)?;
+        let thread = p
+            .residents
+            .iter()
+            .find(|r| r["id"] == key.id)
+            .and_then(|r| r["thread_id"].as_str())
+            .unwrap_or(&key.id);
+        if !p.loaded {
+            return None;
+        }
+        Some(
+            p.histories
+                .get(thread)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+        )
+    }
+    pub fn error(&self, key: &ThreadKey) -> Option<&str> {
+        let p = self.peers.get(&key.peer)?;
+        p.runs_error.as_deref().or(p.metadata_error.as_deref())
+    }
+
     pub fn metadata(
         &mut self,
         peer: &str,
@@ -91,6 +125,41 @@ impl State {
         p.loaded = true;
         p.runs_error = None;
         p.latest.clear();
+        p.histories.clear();
+        let identities: std::collections::HashSet<&str> = runs
+            .iter()
+            .filter(|r| {
+                !r["record"]["resident"].is_null() || r["record"]["spec"]["resident_id"].is_string()
+            })
+            .filter_map(|r| r["record"]["spec"]["thread_id"].as_str())
+            .chain(
+                p.residents
+                    .iter()
+                    .filter_map(|r| r["thread_id"].as_str().or_else(|| r["id"].as_str())),
+            )
+            .collect();
+        for r in runs {
+            if let Some(thread) = r["record"]["spec"]["thread_id"]
+                .as_str()
+                .filter(|t| identities.contains(t))
+            {
+                // Catalog metadata only; original input and output arrive through retained-event replay.
+                let compact = serde_json::json!({"record":{"spec":{"id":r["record"]["spec"]["id"],"thread_id":thread,"backend":r["record"]["spec"]["backend"]},"created_at":r["record"]["created_at"],"resident_activation":!r["record"]["resident"].is_null() || r["record"]["spec"]["resident_id"].is_string(),"mailbox":{"reason":r["record"]["mailbox"]["reason"]},"transcript_import":r["record"]["transcript_import"],"imported":r["record"]["imported"]},"status":r["status"],"last_seq":r["last_seq"]});
+                p.histories.entry(thread.into()).or_default().push(compact);
+            }
+        }
+        for history in p.histories.values_mut() {
+            history.sort_by_key(|r| {
+                (
+                    r["record"]["created_at"].as_u64().unwrap_or(0),
+                    r["record"]["spec"]["id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+            });
+        }
+
         for r in runs {
             if !r["record"]["transcript_import"].is_null() || !r["record"]["imported"].is_null() {
                 continue;
@@ -224,8 +293,9 @@ fn row(
     signal: Signal,
     detail: &str,
     interactive: bool,
-) -> bool {
+) -> (bool, bool) {
     let mut clicked = false;
+    let mut double_clicked = false;
     ui.horizontal(|ui| {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(10., 10.), egui::Sense::hover());
         ui.painter()
@@ -249,6 +319,7 @@ fn row(
                 });
             }
             clicked |= response.clicked();
+            double_clicked |= response.double_clicked();
             response.on_hover_text(detail);
             let response = ui.add(
                 egui::Label::new(RichText::new(line).small().weak())
@@ -256,12 +327,13 @@ fn row(
                     .sense(sense),
             );
             clicked |= response.clicked();
+            double_clicked |= response.double_clicked();
             response.on_hover_text(detail);
         });
     });
-    clicked
+    (clicked, double_clicked)
 }
-pub fn panel(ui: &mut egui::Ui, data: &Data) {
+pub fn panel(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
     egui::ScrollArea::vertical()
         .id_salt("agents-list")
         .auto_shrink([false, false])
@@ -299,21 +371,27 @@ pub fn panel(ui: &mut egui::Ui, data: &Data) {
                             ui.ctx(), egui::Id::new(("agent-class", &destination.key, &definition)), false,
                         ).show_header(ui, |ui| {
                             let detail = format!("{}\nClass: {definition}\n{unknown} instances with unavailable status", destination.label);
-                            clicked = row(ui, &g.name, &line, aggregate(&signals), &detail,true);
+                            clicked = row(ui, &g.name, &line, aggregate(&signals), &detail,true).0;
                         });
                         if clicked {header.toggle();}
                         header.body(|ui| {
-                            for r in g.residents {resident_row(ui, p, r, destination);}
+                            for r in g.residents {resident_row(ui, p, r, destination,actions);}
                         });
                     } else {
-                        resident_row(ui, p, g.residents[0], destination);
+                        resident_row(ui, p, g.residents[0], destination,actions);
                     }
                 }
             }
             if !any {ui.weak("No residents discovered yet.");}
         });
 }
-fn resident_row(ui: &mut egui::Ui, p: &Peer, r: &Value, dest: &Destination) {
+fn resident_row(
+    ui: &mut egui::Ui,
+    p: &Peer,
+    r: &Value,
+    dest: &Destination,
+    actions: &mut Vec<Action>,
+) {
     let id = r["id"].as_str().unwrap_or_default();
     let (signal, line, detail) = status(p, id);
     let detail = format!(
@@ -322,14 +400,23 @@ fn resident_row(ui: &mut egui::Ui, p: &Peer, r: &Value, dest: &Destination) {
         r["backend"].as_str().unwrap_or_default(),
         r["model"].as_str().unwrap_or_default()
     );
-    row(
+    let (clicked, pin) = row(
         ui,
         r["name"].as_str().unwrap_or("Resident"),
         &format!("{line} · {}", dest.label),
         signal,
         &detail,
-        false,
+        true,
     );
+    if clicked || pin {
+        actions.push(Action::OpenActivity(
+            ThreadKey {
+                peer: dest.key.clone(),
+                id: id.into(),
+            },
+            pin,
+        ));
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -382,6 +469,70 @@ mod tests {
         );
     }
     #[test]
+    fn resident_click_opens_preview_and_double_click_pins() {
+        use egui::{Event, Modifiers, PointerButton, pos2, vec2};
+        let mut data = Data::default();
+        data.saved.destinations.push(Destination {
+            key: "p".into(),
+            label: "Host".into(),
+            address: "127.0.0.1:1".into(),
+        });
+        data.agents.metadata(
+            "p",
+            &Ok(vec![json!({"id":"resident","name":"A resident"})]),
+            Ok(json!({"definitions":[]})),
+            Ok(json!({"incidents":[]})),
+        );
+        let ctx = egui::Context::default();
+        let mut time = 0.;
+        let mut frame = |events| {
+            time += 1. / 60.;
+            let mut actions = vec![];
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(pos2(0., 0.), vec2(400., 500.))),
+                    events,
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| panel(ui, &data, &mut actions),
+            );
+            (out, actions)
+        };
+        let (out, _) = frame(vec![]);
+        let pos = out
+            .shapes
+            .iter()
+            .find_map(|s| {
+                if let egui::epaint::Shape::Text(t) = &s.shape {
+                    (t.galley.job.text == "A resident").then_some(t.pos + t.galley.size() / 2.)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        for pinned in [false, true] {
+            frame(vec![
+                Event::PointerMoved(pos),
+                Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+            ]);
+            let (_, actions) = frame(vec![Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }]);
+            assert!(
+                matches!(&actions[..],[Action::OpenActivity(k,p)] if k.peer=="p" && k.id=="resident" && *p==pinned)
+            );
+        }
+    }
+    #[test]
     fn class_name_click_expands_instances() {
         use egui::{Event, Modifiers, PointerButton, pos2, vec2};
         let mut data = Data::default();
@@ -410,7 +561,7 @@ mod tests {
                     time: Some(time),
                     ..Default::default()
                 },
-                |ui| panel(ui, &data),
+                |ui| panel(ui, &data, &mut vec![]),
             )
         };
         let out = frame(vec![]);
@@ -510,10 +661,98 @@ mod tests {
                 .1
                 .contains("no activations")
         }));
-        client.operation(&dest,json!({"op":"resident_activate","id":active,"activation_id":crate::new_id(),"directions":"SLOW"})).unwrap();
+        let accepted=client.operation(&dest,json!({"op":"resident_activate","id":active,"activation_id":crate::new_id(),"directions":"SLOW"})).unwrap();
+        let run_id = accepted["record"]["spec"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let rows = client.operation(&dest, json!({"op":"list"})).unwrap();
         state.activity(&dest.key, &Ok(rows.as_array().unwrap().clone()));
         assert_eq!(status(&state.peers[&dest.key], &active).0, Signal::Running);
+        let history_key = ThreadKey {
+            peer: dest.key.clone(),
+            id: active.clone(),
+        };
+        assert_eq!(state.history(&history_key).unwrap().len(), 1);
+        let watching = Arc::new(AtomicBool::new(false));
+        client.watch(
+            dest.clone(),
+            run_id.clone(),
+            0,
+            900,
+            bus.publisher(),
+            watching.clone(),
+        );
+        let mut transcript = crate::model::Transcript::default();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut early = false;
+        loop {
+            assert!(std::time::Instant::now() < deadline);
+            if let Update::Batch(_, 900, batch) =
+                bus.rx.recv_timeout(Duration::from_secs(12)).unwrap()
+            {
+                for event in batch["events"].as_array().unwrap() {
+                    transcript.apply(event).unwrap();
+                }
+                if batch["done"] != true {
+                    early = true;
+                }
+                if batch["done"] == true {
+                    break;
+                }
+            }
+        }
+        assert!(early, "Resident activity streams before completion");
+        for label in ["Thinking", "Command", "Agent", "Activation input"] {
+            assert!(
+                transcript.rows.iter().any(|r| r.label == label),
+                "Missing {label}"
+            );
+        }
+        let snapshot = client
+            .operation(&dest, json!({"op":"get","id":run_id}))
+            .unwrap();
+        assert_eq!(transcript.seq, snapshot["last_seq"].as_u64().unwrap());
+        let inbox = client
+            .operation(
+                &dest,
+                json!({"op":"client_inbox","client_id":client.status().unwrap()["identity"]}),
+            )
+            .unwrap();
+        assert!(
+            !inbox["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["sender"]["id"] == active),
+            "Observation delivered private narration"
+        );
+        let before = transcript.rows.len();
+        client.watch(
+            dest.clone(),
+            run_id,
+            transcript.seq,
+            901,
+            bus.publisher(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        loop {
+            if let Update::Batch(_, 901, batch) =
+                bus.rx.recv_timeout(Duration::from_secs(12)).unwrap()
+            {
+                for event in batch["events"].as_array().unwrap() {
+                    transcript.apply(event).unwrap();
+                }
+                if batch["done"] == true {
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            transcript.rows.len(),
+            before,
+            "Cursor replay duplicated activity"
+        );
         state.activity(&dest.key, &Err("Disconnected fixture".into()));
         assert_eq!(status(&state.peers[&dest.key], &active).0, Signal::Unknown);
         println!(

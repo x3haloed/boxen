@@ -152,7 +152,9 @@ impl Client {
                 let lease = Duration::from_millis(500);
                 let agent: ureq::Agent = ureq::Agent::config_builder()
                     .timeout_connect(Some(Duration::from_secs(3)))
-                    .timeout_recv_response(Some(Duration::from_secs(5)))
+                    // The loopback controller authenticates the remote peer before
+                    // sending headers; address-family fallback can take more than five seconds.
+                    .timeout_recv_response(Some(Duration::from_secs(12)))
                     .timeout_recv_body(Some(lease))
                     .build()
                     .into();
@@ -244,6 +246,59 @@ pub fn run_key(peer: &str, id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delayed_remote_setup_still_delivers_the_retained_batch() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
+        let home = std::env::temp_dir().join(format!("boxen-delayed-view-{}", crate::new_id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("control-token"), "fixture-only").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            std::thread::sleep(Duration::from_secs(6));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{\"events\":[{\"seq\":1,\"kind\":\"status\",\"data\":{\"status\":\"completed\"}}],\"done\":true}\n").unwrap();
+        });
+        let client = Client::new(format!("http://{address}"), &home).unwrap();
+        let bus = Bus::new(egui::Context::default());
+        client.watch(
+            Destination {
+                key: "peer".into(),
+                label: "Host".into(),
+                address: "example.invalid:42424".into(),
+            },
+            "run".into(),
+            0,
+            42,
+            bus.publisher(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        match bus.rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            Update::Batch(_, 42, batch) => assert_eq!(batch["events"][0]["seq"], 1),
+            _ => panic!("Delayed setup did not produce a retained batch"),
+        }
+        server.join().unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
     #[test]
     fn capability_stays_on_loopback() {
         for url in [

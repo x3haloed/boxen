@@ -10,6 +10,7 @@ pub struct ThreadKey {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pane {
     Agents,
+    Activity(ThreadKey),
     Threads,
     Correspondence,
     Message(ThreadKey),
@@ -88,6 +89,7 @@ pub struct Transcript {
     pub seq: u64,
     pub rows: Vec<Row>,
     positions: BTreeMap<String, usize>,
+    imported: bool,
 }
 impl Transcript {
     fn put(&mut self, id: String, label: &str, text: String, append: bool) {
@@ -122,6 +124,12 @@ impl Transcript {
         let kind = event["kind"].as_str().unwrap_or("");
         let text = |key: &str| data[key].as_str().unwrap_or("").to_owned();
         match kind {
+            "activation_input" => self.put(format!("event-{seq}"),"Activation input",text("text"),false),
+            "transcript_imported" => {self.imported=true;self.put(format!("event-{seq}"),"Imported history",display(data),false);}
+            "inference_message" if self.imported => self.put(format!("event-{seq}"),if data["role"]=="user" {"Imported user"} else {"Imported assistant"},display(&data["content"]),false),
+            "scheduled_event" => self.put(format!("event-{seq}"),"Schedule",display(data),false),
+            "context_boundary" => self.put(format!("event-{seq}"),"Context",format!("Policy: {} · {} of {} source entries selected · {} observation bodies masked. Original history remains retained.",data["settings"]["mode"].as_str().unwrap_or("unknown"),data["selected"].as_array().map_or(0,Vec::len),data["source_count"],data["masked"].as_array().map_or(0,Vec::len)),false),
+            "inference_frame" if data["event"]["type"]=="response_headers" && data["event"]["status"].as_u64().is_some_and(|s|s>=400) => self.put(format!("event-{seq}"),"Incident",format!("Inference provider response: HTTP {}\nGeneration: {}",data["event"]["status"],data["event"]["generation_id"].as_str().unwrap_or("not supplied")),false),
             "user_message" => self.put(format!("event-{seq}"), "You", text("text"), false),
             "assistant_delta" | "reasoning_delta" | "assistant_message" => self.put(
                 text("id"),
@@ -247,6 +255,22 @@ pub fn display(value: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn activation_and_import_roles_remain_distinct_from_delivered_mail() {
+        let mut t = Transcript::default();
+        t.apply(
+            &json!({"seq":1,"kind":"activation_input","data":{"text":"Authored incoming batch"}}),
+        )
+        .unwrap();
+        t.apply(&json!({"seq":2,"kind":"inference_message","data":{"role":"assistant","content":"Not a second rendered copy"}})).unwrap();
+        assert_eq!(t.rows.len(), 1);
+        assert_eq!(t.rows[0].label, "Activation input");
+        let mut imported = Transcript::default();
+        imported.apply(&json!({"seq":1,"kind":"transcript_imported","data":{"source":{"provider":"example"}}})).unwrap();
+        imported.apply(&json!({"seq":2,"kind":"inference_message","data":{"role":"assistant","content":"Original source"}})).unwrap();
+        assert_eq!(imported.rows[1].label, "Imported assistant");
+        assert_eq!(imported.rows[1].text, "Original source");
+    }
     #[test]
     fn identity_excludes_whole_conversation() {
         let runs = vec![

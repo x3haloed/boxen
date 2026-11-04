@@ -217,8 +217,42 @@ refresh (about ten seconds). Definition metadata and available inference-health
 records enrich grouping/failure descriptions. Older daemons without health
 projection retain generic interrupted/failed labels. It issues only authenticated
 read operations; viewing/expanding a resident never activates it or delivers
-private narration. Activity transcripts and agent controls remain separate work.
+private narration. Resident activity is described below; agent controls remain separate work.
 
 Desktop tests cover grouping/isolation, imported-history exclusion, state
 transitions, disconnected caches, saved docking migration, and real paired-daemon
 resident/definition discovery with running and credential-blocked fixtures.
+
+## Resident activity
+
+Single-clicking a resident or an expanded class instance opens its **Activity**
+view as the workspace preview; double-clicking pins it. Activity, ordinary threads
+and correspondence share one preview across docking groups, floating surfaces
+and machines. Dragging an activity tab or choosing **Keep open** pins it. Class
+headers continue to expand their instances rather than open a combined identity.
+Layout reset and saved-workspace restoration preserve pinned activity tabs.
+
+Activity observes the resident instance's canonical conversation. Its private
+narration, backend-exposed thinking, tools/results, accepted activation input,
+status, incidents and context-cut metadata are grouped by run. Historical imports
+are labeled separately from execution and retain source-role labels. This is an
+audit view: private narration is not a delivered reply, and viewing, replaying or
+loading older activity never submits mail, starts inference or repeats effects.
+Correspondence remains the message-sending surface.
+
+A view initially observes the latest ten runs. **Load earlier activity** extends
+its retained-history window by ten. Its earliest loaded run remains anchored when
+new runs arrive. Run snapshots are compact catalog metadata; original event
+journals supply all displayed activity through the existing authenticated replay
+stream. Stream cursors, per-viewer generations, completed-item replacement and
+reconnection retain the ordinary thread-view guarantees. Live runs are observed
+before historical replay under the existing sixteen-stream bound. Closing or
+replacing an activity preview detaches its observers without cancelling execution.
+
+Tests cover real pointer preview/pinning, global preview replacement across
+floating surfaces, anchored history windows, private/imported role projections,
+and streamed resident activation replay against native and actual APE daemons.
+Remote observation setup allows twelve seconds for the loopback controller to
+resolve/connect/authenticate its peer before HTTP headers arrive. A delayed-setup
+regression verifies that a six-second setup still delivers retained activity;
+observation workers retain their finite body leases and cursor-based renewal.

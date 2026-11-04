@@ -94,7 +94,7 @@ impl Client {
                             v.as_array()
                                 .map(|rows| {
                                     rows.iter()
-                                        .map(|r| json!({"id":r["id"],"name":r["name"],"backend":r["backend"],"model":r["model"],"definition":r["definition"]}))
+                                        .map(|r| json!({"id":r["id"],"name":r["name"],"backend":r["backend"],"model":r["model"],"definition":r["definition"],"thread_id":r["thread_id"]}))
                                         .collect()
                                 })
                                 .ok_or("Invalid resident list".into())

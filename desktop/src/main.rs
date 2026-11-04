@@ -1,3 +1,4 @@
+mod activity;
 mod agents;
 mod client;
 mod correspondence;
@@ -46,6 +47,7 @@ struct Data {
     local_key: String,
     mail: correspondence::Mailbox,
     agents: agents::State,
+    activity: HashMap<ThreadKey, activity::Window>,
     saved: Saved,
     catalogs: HashMap<String, Vec<Conversation>>,
     errors: HashMap<String, String>,
@@ -57,6 +59,7 @@ struct Data {
     sending: HashSet<String>,
 }
 enum Action {
+    OpenActivity(ThreadKey, bool),
     Mail(correspondence::MailAction),
     Open(ThreadKey, bool),
     Pin(ThreadKey),
@@ -136,6 +139,7 @@ impl Desktop {
                 local_key: String::new(),
                 mail: Default::default(),
                 agents: Default::default(),
+                activity: Default::default(),
                 saved,
                 catalogs: HashMap::new(),
                 errors: HashMap::new(),
@@ -466,26 +470,33 @@ impl Desktop {
         let Some(client) = self.client.as_ref() else {
             return;
         };
-        let open: HashSet<ThreadKey> = self
-            .data
-            .saved
-            .workspace
-            .dock
-            .iter_all_tabs()
-            .filter_map(|(_, p)| {
-                if let Pane::Thread(k) = p {
-                    Some(k.clone())
-                } else {
-                    None
+        let mut selected = Vec::new();
+        for (_, pane) in self.data.saved.workspace.dock.iter_all_tabs() {
+            match pane {
+                Pane::Thread(key) => {
+                    if let Some(thread) = find_thread(&self.data, key) {
+                        for run in &thread.runs {
+                            selected.push((key.clone(), run.clone()));
+                        }
+                    }
                 }
-            })
-            .collect();
+                Pane::Activity(key) => {
+                    for run in activity::runs(&self.data, key) {
+                        selected.push((key.clone(), run));
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Live work gets an observer before older replay, across every open surface.
+        selected.sort_by_key(|(_, r)| {
+            (
+                terminal(r),
+                std::cmp::Reverse(r["record"]["created_at"].as_u64().unwrap_or(0)),
+            )
+        });
         let mut needed = HashSet::new();
-        for key in open {
-            let Some(thread) = find_thread(&self.data, &key) else {
-                continue;
-            };
-            let runs = thread.runs.clone();
+        for (key, run) in selected {
             let Some(dest) = self
                 .data
                 .saved
@@ -496,53 +507,56 @@ impl Desktop {
             else {
                 continue;
             };
-            for run in runs {
-                let id = run["record"]["spec"]["id"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_owned();
-                let tag = run_key(&key.peer, &id);
-                needed.insert(tag.clone());
-                let seq = self.data.transcripts.get(&tag).map(|t| t.seq).unwrap_or(0);
-                if terminal(&run) && seq >= run["last_seq"].as_u64().unwrap_or(0) {
+            let id = run["record"]["spec"]["id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let tag = run_key(&key.peer, &id);
+            if !needed.insert(tag.clone()) {
+                continue;
+            }
+            let seq = self.data.transcripts.get(&tag).map_or(0, |t| t.seq);
+            let last = run["last_seq"].as_u64().unwrap_or(0);
+            if terminal(&run) && seq >= last {
+                continue;
+            }
+            let retry = match self.data.watches.get(&tag) {
+                None => true,
+                Some(w) => {
+                    (w.done && seq < last) || (w.error.is_some() && Instant::now() >= w.retry)
+                }
+            };
+            if retry {
+                if self
+                    .data
+                    .watches
+                    .values()
+                    .filter(|w| !w.done && w.error.is_none())
+                    .count()
+                    >= 16
+                {
                     continue;
                 }
-                let retry = match self.data.watches.get(&tag) {
-                    None => true,
-                    Some(w) => w.error.is_some() && Instant::now() >= w.retry,
-                };
-                if retry {
-                    // Bound simultaneously observed runs. Replay of additional runs proceeds as streams finish.
-                    let active = self
-                        .data
-                        .watches
-                        .values()
-                        .filter(|w| !w.done && w.error.is_none())
-                        .count();
-                    if active >= 16 {
-                        continue;
-                    }
-                    let stop = Arc::new(AtomicBool::new(false));
-                    self.next_watch += 1;
-                    client.watch(
-                        dest.clone(),
-                        id.clone(),
-                        seq,
-                        self.next_watch,
-                        self.bus.publisher(),
-                        stop.clone(),
-                    );
-                    self.data.watches.insert(
-                        tag,
-                        Observing {
-                            epoch: self.next_watch,
-                            stop,
-                            retry: Instant::now(),
-                            error: None,
-                            done: false,
-                        },
-                    );
-                }
+                let stop = Arc::new(AtomicBool::new(false));
+                self.next_watch += 1;
+                client.watch(
+                    dest,
+                    id,
+                    seq,
+                    self.next_watch,
+                    self.bus.publisher(),
+                    stop.clone(),
+                );
+                self.data.watches.insert(
+                    tag,
+                    Observing {
+                        epoch: self.next_watch,
+                        stop,
+                        retry: Instant::now(),
+                        error: None,
+                        done: false,
+                    },
+                );
             }
         }
         self.data.watches.retain(|id, w| {
@@ -629,6 +643,11 @@ impl Desktop {
     }
     fn action(&mut self, action: Action) {
         match action {
+            Action::OpenActivity(key, pin) => self
+                .data
+                .saved
+                .workspace
+                .open_editor(Pane::Activity(key), pin),
             Action::Mail(a) => self.mail_action(a),
             Action::Split(pane, direction) => {
                 if let Some(path) = self.data.saved.workspace.dock.find_tab(&pane) {
@@ -798,7 +817,13 @@ impl Desktop {
                             .dock
                             .iter_all_tabs()
                             .filter(|(_, p)| {
-                                matches!(p, Pane::Thread(_) | Pane::Message(_) | Pane::Compose(_))
+                                matches!(
+                                    p,
+                                    Pane::Thread(_)
+                                        | Pane::Activity(_)
+                                        | Pane::Message(_)
+                                        | Pane::Compose(_)
+                                )
                             })
                             .map(|(_, p)| (p.clone(), self.data.saved.workspace.is_preview(p)))
                             .collect();
@@ -889,6 +914,14 @@ impl TabViewer for Viewer<'_> {
     type Tab = Pane;
     fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
         match tab {
+            Pane::Activity(key) => {
+                let name = RichText::new(format!("{} · Activity", activity::title(self.data, key)));
+                if self.data.saved.workspace.is_preview(tab) {
+                    name.italics().into()
+                } else {
+                    name.into()
+                }
+            }
             Pane::Agents => "Agents".into(),
             Pane::Correspondence => "Correspondence".into(),
             Pane::Compose(_) => "New message".into(),
@@ -917,6 +950,7 @@ impl TabViewer for Viewer<'_> {
     }
     fn id(&mut self, tab: &mut Pane) -> egui::Id {
         match tab {
+            Pane::Activity(k) => egui::Id::new(("activity", &k.peer, &k.id)),
             Pane::Thread(k) => egui::Id::new((&k.peer, &k.id)),
             Pane::Message(k) => egui::Id::new(("mail", &k.peer, &k.id)),
             Pane::Compose(id) => egui::Id::new(("compose", id)),
@@ -930,7 +964,7 @@ impl TabViewer for Viewer<'_> {
         [false, false]
     }
     fn on_tab_button(&mut self, tab: &mut Pane, response: &egui::Response) {
-        if matches!(tab, Pane::Message(_) | Pane::Compose(_))
+        if matches!(tab, Pane::Activity(_) | Pane::Message(_) | Pane::Compose(_))
             && (response.double_clicked() || response.drag_started())
         {
             self.actions
@@ -949,7 +983,9 @@ impl TabViewer for Viewer<'_> {
         }
     }
     fn context_menu(&mut self, ui: &mut egui::Ui, tab: &mut Pane, _: egui_dock::NodePath) {
-        if matches!(tab, Pane::Thread(_) | Pane::Message(_)) && ui.button("Keep open").clicked() {
+        if matches!(tab, Pane::Thread(_) | Pane::Activity(_) | Pane::Message(_))
+            && ui.button("Keep open").clicked()
+        {
             self.actions
                 .push(Action::Mail(correspondence::MailAction::Pin(tab.clone())));
             ui.close();
@@ -968,7 +1004,8 @@ impl TabViewer for Viewer<'_> {
     }
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
         match tab {
-            Pane::Agents => agents::panel(ui, self.data),
+            Pane::Agents => agents::panel(ui, self.data, self.actions),
+            Pane::Activity(key) => activity::panel(ui, self.data, key),
             Pane::Correspondence => correspondence::inbox(ui, self.data, self.actions),
             Pane::Message(_) | Pane::Compose(_) => {
                 egui::ScrollArea::vertical()

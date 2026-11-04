@@ -7,6 +7,8 @@ pub struct Workspace {
     pub preview: Option<ThreadKey>,
     #[serde(default)]
     pub mail_preview: Option<ThreadKey>,
+    #[serde(default)]
+    pub activity_preview: Option<ThreadKey>,
 }
 impl Default for Workspace {
     fn default() -> Self {
@@ -27,6 +29,7 @@ impl Default for Workspace {
             dock,
             preview: None,
             mail_preview: None,
+            activity_preview: None,
         }
     }
 }
@@ -42,6 +45,7 @@ impl Workspace {
     }
     pub fn is_preview(&self, pane: &Pane) -> bool {
         match pane {
+            Pane::Activity(k) => self.activity_preview.as_ref() == Some(k),
             Pane::Thread(k) => self.preview.as_ref() == Some(k),
             Pane::Message(k) => self.mail_preview.as_ref() == Some(k),
             _ => false,
@@ -49,6 +53,9 @@ impl Workspace {
     }
     pub fn pin_pane(&mut self, pane: &Pane) {
         match pane {
+            Pane::Activity(k) if self.activity_preview.as_ref() == Some(k) => {
+                self.activity_preview = None
+            }
             Pane::Thread(k) => self.pin(k),
             Pane::Message(k) if self.mail_preview.as_ref() == Some(k) => self.mail_preview = None,
             _ => {}
@@ -59,11 +66,14 @@ impl Workspace {
             .clone()
             .map(Pane::Thread)
             .or_else(|| self.mail_preview.clone().map(Pane::Message))
+            .or_else(|| self.activity_preview.clone().map(Pane::Activity))
     }
     fn set_preview(&mut self, pane: Pane) {
         self.preview = None;
         self.mail_preview = None;
+        self.activity_preview = None;
         match pane {
+            Pane::Activity(k) => self.activity_preview = Some(k),
             Pane::Thread(k) => self.preview = Some(k),
             Pane::Message(k) => self.mail_preview = Some(k),
             _ => {}
@@ -93,7 +103,11 @@ impl Workspace {
             .find(|(_, p)| {
                 matches!(
                     p,
-                    Pane::Thread(_) | Pane::Message(_) | Pane::Compose(_) | Pane::Welcome
+                    Pane::Thread(_)
+                        | Pane::Activity(_)
+                        | Pane::Message(_)
+                        | Pane::Compose(_)
+                        | Pane::Welcome
                 )
             })
             .map(|(p, _)| p);
@@ -256,6 +270,7 @@ mod tests {
         w.pin_pane(&Pane::Message(key("mail-c")));
         w.open(key("next"), false);
         assert!(w.dock.find_tab(&Pane::Message(key("mail-c"))).is_some());
+        w.open_editor(Pane::Activity(key("resident-kept")), true);
         struct Draw;
         impl egui_dock::TabViewer for Draw {
             type Tab = Pane;
@@ -279,6 +294,44 @@ mod tests {
         );
         let restored: Workspace = serde_json::from_slice(&serde_json::to_vec(&w).unwrap()).unwrap();
         assert!(restored.is_preview(&Pane::Thread(key("next"))));
+        assert!(
+            restored
+                .dock
+                .find_tab(&Pane::Activity(key("resident-kept")))
+                .is_some()
+        );
+        let mut legacy = serde_json::to_value(&w).unwrap();
+        legacy.as_object_mut().unwrap().remove("activity_preview");
+        let migrated: Workspace = serde_json::from_value(legacy).unwrap();
+        assert!(migrated.activity_preview.is_none());
+    }
+    #[test]
+    fn activity_shares_preview_and_pins_across_docking() {
+        let mut w = Workspace::default();
+        let a = Pane::Activity(key("a"));
+        w.open_editor(a.clone(), false);
+        assert!(w.is_preview(&a));
+        w.open(key("thread"), false);
+        assert!(w.dock.find_tab(&a).is_none());
+        w.open_editor(a.clone(), false);
+        w.open_editor(a.clone(), true);
+        assert!(!w.is_preview(&a));
+        w.open_message(key("mail"), false);
+        let b = Pane::Activity(key("b"));
+        w.open_editor(b.clone(), false);
+        assert!(w.dock.find_tab(&a).is_some());
+        assert!(w.dock.find_tab(&Pane::Message(key("mail"))).is_none());
+        let path = w.dock.find_tab(&b).unwrap();
+        w.dock.detach_tab(
+            path,
+            eframe::egui::Rect::from_min_size(
+                eframe::egui::pos2(0., 0.),
+                eframe::egui::vec2(300., 300.),
+            ),
+        );
+        w.open_message(key("next-mail"), false);
+        assert!(w.dock.find_tab(&b).is_none());
+        assert!(w.dock.find_tab(&a).is_some());
     }
     #[test]
     fn agents_panel_restores_once_and_preserves_existing_editors() {
