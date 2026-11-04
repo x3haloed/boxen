@@ -248,7 +248,7 @@ for line in sys.stdin:
             assert request['params']['modelProvider']=='fixture-provider'
             assert 'developerInstructions' not in request['params'], 'import overwrote native instructions'
         assert request["params"]["sandbox"] == "danger-full-access"
-        assert request["params"]["approvalPolicy"] == "never"
+        assert request["params"]["approvalPolicy"] == "on-request"
         missing=pathlib.Path(request["params"]["cwd"])/"fixture-forget-session"
         if method=="thread/resume" and missing.exists():
             missing.unlink()

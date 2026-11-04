@@ -449,7 +449,9 @@ pub fn execute(
     };
     rpc.request("initialize", json!({"clientInfo":{"name":"boxen","title":"Boxen","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
     rpc.write(json!({"method":"initialized"}))?;
-    let mut params = json!({"cwd":spec.cwd,"sandbox":"danger-full-access","approvalPolicy":"never","approvalsReviewer":"user"});
+    let mut params = json!({"cwd":spec.cwd,"sandbox":"danger-full-access","approvalPolicy":"on-request","approvalsReviewer":"user"});
+    run.append("backend_execution_policy", json!({"sandbox":"danger-full-access","approval_policy":"on-request","approvals_reviewer":"user"}))?;
+    run.diagnostic(Level::Info, "backend.execution_policy", || json!({"sandbox":"danger-full-access","approval_policy":"on-request","approvals_reviewer":"user"}), || Value::Null);
     if let Some(bridge) = &bridge {
         params["config"] = json!({"mcp_servers.boxen_resident":bridge.config()});
     }
