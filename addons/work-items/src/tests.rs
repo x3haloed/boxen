@@ -1623,6 +1623,43 @@ fn existing_clarification_reference_reuses_original_text_without_duplicate_posts
     }
 }
 
+#[test]
+fn first_reference_to_external_question_never_posts_it_again() {
+    for id in [json!("9"), json!(9)] {
+        let (f, mut api, mut settings, mut driver) = workflow_fixture(false);
+        api.auto_answer = false;
+        settings.post_clarifications = true;
+        workflow_step(&f, &api, &settings, &mut driver);
+        let request = api
+            .mail
+            .lock()
+            .unwrap()
+            .values()
+            .find(|m| m["subject"].as_str().unwrap().contains("interpretation"))
+            .unwrap()
+            .clone();
+        let c = f.s.connect().unwrap();
+        let raw: String = c
+            .query_row("SELECT data FROM workflow_attempts", [], |r| r.get(0))
+            .unwrap();
+        let mut data: Value = serde_json::from_str(&raw).unwrap();
+        data["packet"]["evidence"]["entities"] = json!([{"id":9,"version":1,"text":"An original question already posted outside this service"}]);
+        c.execute("UPDATE workflow_attempts SET data=?1", [data.to_string()])
+            .unwrap();
+        api.answer(&request,json!({"protocol":"boxen.interpretation.v1","decision":"clarification_required","questions":[{"id":"which-field","question":"Summary of the existing question; do not repost","existing_comment_id":id,"route":"work_item"}],"holds":[]}),request["to"].clone());
+        workflow_step(&f, &api, &settings, &mut driver);
+        workflow_step(&f, &api, &settings, &mut driver);
+        let (state,receipt,count):(String,String,i64)=c.query_row("SELECT state,receipt,(SELECT count(*) FROM workflow_questions) FROM workflow_questions",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(state, "posted");
+        assert_eq!(count, 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&receipt).unwrap(),
+            json!({"comment_id":9,"comment_version":1,"service_authored":false})
+        );
+        assert!(!driver.calls.iter().any(|op| op == "post_question"));
+    }
+}
+
 struct ApprovalApi {
     snapshot: Value,
     controls: Mutex<Vec<Value>>,
