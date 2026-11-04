@@ -4,6 +4,29 @@ Public repository content uses generic roles and example configuration. Personal
 
 Read `docs/vision.md`, `docs/decisions.md`, and the documentation relevant to the current slice. Preserve agreed beta requirements even when implementing a simpler early case. Commit and push coherent, verified slices unless the user directs otherwise.
 
+## Public-release hygiene
+
+Before committing, review added and changed content for incidental disclosures:
+personal absolute paths, real hostnames/IP addresses/subnets, account names,
+routing IDs, deployment labels, credentials, and private operational details.
+Examples and fixtures use clearly synthetic values. Host-specific configuration
+and verification evidence belong under ignored local storage; tracked reports
+retain useful conclusions without identifying the test environment.
+
+Research based on private sources needs a separate publication check. Access to
+a repository does not by itself establish permission to publish its implementation
+details. Preserve attribution for public sources; private-source descriptions
+contain only information approved for publication.
+
+Release hygiene includes generated artifacts. Build configuration should remap
+local source and dependency paths, and final distributable binaries/bundles should
+be checked for personal paths and unintended embedded configuration. Preserve
+required APE symbols; stripping alone is not evidence that paths are absent.
+
+Correct minor incidental disclosures in the current tree without automatically
+rewriting history. History rewrites and credential rotation are separate decisions
+based on the sensitivity of what was exposed.
+
 ## Daemon diagnostic logging is a maintained capability
 
 Instrument every new or changed daemon execution path. Logging is part of completing a feature, not a later cleanup task. Cover lifecycle transitions, decisions and their outcomes, network and runtime boundaries, accepted/rejected operations, errors, recovery, and relevant state changes. Correlate records with machine, peer, thread, run, request, or connection identifiers where applicable.
