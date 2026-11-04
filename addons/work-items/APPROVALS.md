@@ -43,10 +43,13 @@ and produces an observer notice; no automatic decline or blanket approval follow
 
 The optional `native_edge_app_access` flag defaults to false. When enabled for an
 Edge browser assignment, it also accepts Codex's native Computer Use app-access
-request for `msedge.exe`. This permission is app-wide: it can include Edge windows
+request for `msedge.exe`, through either the bundled `cua_repl` plugin or Codex's
+built-in `node_repl` Computer Use surface. This permission is app-wide: it can include Edge windows
 outside the assigned profile. The same current assignment and reservation checks
-apply. The request must be an empty form from `cua_repl`, correlated by call ID
-with a retained `js` call from the bundled Computer Use plugin, with matching
+apply. The request must be an empty form correlated by call ID with a retained
+`js` call from that exact surface: the bundled Computer Use plugin for `cua_repl`,
+or the built-in Node REPL without a foreign plugin identity. Both require the
+Computer Use connector identity, matching
 native thread/turn metadata and exactly the Edge app parameter. Other apps,
 connectors, forms requesting input and unrelated permissions remain manual.
 The response is `{"action":"accept","content":{}}`, without persistence metadata.

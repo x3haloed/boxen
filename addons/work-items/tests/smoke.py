@@ -43,9 +43,16 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
                 pass
             notification("serverRequest/resolved", {"requestId":"native-app-1"})
             notification("item/completed", {"item":{"id":"native-call","type":"mcpToolCall"}})
+            approved.clear()
+            notification("item/started", {"item":{"id":"native-node-call","type":"mcpToolCall","server":"node_repl","tool":"js","pluginId":None}})
+            emit({"id":"native-node-app","method":"mcpServer/elicitation/request","params":{"serverName":"node_repl","mode":"form","threadId":thread,"turnId":"fixture-turn","requestedSchema":{"type":"object","properties":{}},"_meta":{"callId":"native-node-call","connector_id":"computer-use","codex_approval_kind":"mcp_tool_call","tool_params":{"app":"msedge.exe"},"x-codex-turn-metadata":{"thread_id":thread,"turn_id":"fixture-turn"}}}})
+            while not approved.wait(0.02) and not cancel.is_set():
+                pass
+            notification("serverRequest/resolved", {"requestId":"native-node-app"})
+            notification("item/completed", {"item":{"id":"native-node-call","type":"mcpToolCall"}})
 ''')
     fixture_source=fixture_source.replace('        if request.get("id") == "approval-1": approved.set()', '''        if request.get("id") == "approval-1": approved.set()
-        elif request.get("id") == "native-app-1":
+        elif request.get("id") in ("native-app-1", "native-node-app"):
             assert request["result"] == {"action":"accept","content":{}}, request
             approved.set()''')
     fixture.write_text(fixture_source,encoding='utf-8')
@@ -197,14 +204,15 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
         start_worker()
         wait(lambda:any(d['state']=='submitted' for d in json.loads(command('approvals').stdout)['decisions']))
         wait(idle)
-        decisions=json.loads(command('approvals').stdout)['decisions'];assert len(decisions)==2,decisions
+        decisions=json.loads(command('approvals').stdout)['decisions'];assert len(decisions)==3,decisions
         runs=api({'op':'list'});run=next(r for r in runs if r['record']['spec']['id']==decisions[0]['run'])
         events=[json.loads(x) for x in (boxen_home/'runs'/run['record']['spec']['id']/'events.jsonl').read_text().splitlines()]
         answered=[e for e in events if e['kind']=='request_answered' and e['data']['request_id']=='approval-1'];assert len(answered)==1,answered
         native_answers=[e for e in events if e['kind']=='request_answered' and e['data']['request_id']=='native-app-1'];assert len(native_answers)==1,native_answers
-        stop(worker);start_worker();time.sleep(2.5);assert len(json.loads(command('approvals').stdout)['decisions'])==2
+        node_answers=[e for e in events if e['kind']=='request_answered' and e['data']['request_id']=='native-node-app'];assert len(node_answers)==1,node_answers
+        stop(worker);start_worker();time.sleep(2.5);assert len(json.loads(command('approvals').stdout)['decisions'])==3
         assert len(api({'op':'list'}))==len(runs),'Approval recovery replayed inference'
-        print('PASS assigned-browser launch and native Edge one-time approvals through real Boxen retained requests/control, restart without approval or inference replay')
+        print('PASS assigned-browser launch and native Edge CUA/Node one-time approvals through real Boxen retained requests/control, restart without approval or inference replay')
         print('PASS real Boxen create/send/activation/reply, durable migration, exact retries, restart without replay, capacity queue/release, same-coder continuation with retained reservations, explicit owner transfer, immutable packets, supervised handoffs, one report-only recovery, durable notifications and private final isolation')
     finally:
         stop(worker);stop(daemon)

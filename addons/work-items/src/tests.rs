@@ -1794,6 +1794,46 @@ fn native_edge_access_is_explicit_lease_bound_and_once_without_persistence() {
     assert_eq!(api.controls.lock().unwrap().len(), 1);
 }
 #[test]
+fn native_edge_node_surface_is_once_and_requires_the_same_connector_and_call() {
+    for case in [
+        "valid",
+        "other-connector",
+        "mismatched-call",
+        "other-plugin",
+        "other-app",
+    ] {
+        let (f, api, journal, mut events) = native_edge_fixture();
+        events[1]["data"]["params"]["item"]["server"] = json!("node_repl");
+        events[1]["data"]["params"]["item"]["pluginId"] = Value::Null;
+        events[2]["data"]["params"]["serverName"] = json!("node_repl");
+        match case {
+            "other-connector" => {
+                events[2]["data"]["params"]["_meta"]["connector_id"] = json!("other")
+            }
+            "mismatched-call" => events[1]["data"]["params"]["item"]["server"] = json!("cua_repl"),
+            "other-plugin" => events[1]["data"]["params"]["item"]["pluginId"] = json!("other"),
+            "other-app" => {
+                events[2]["data"]["params"]["_meta"]["tool_params"]["app"] = json!("other.exe")
+            }
+            _ => {}
+        }
+        write_approval_events(&journal, &events);
+        approvals::tick(&f.s, &f.cfg, &api).unwrap();
+        approvals::tick(&Store::open(&f.s.path).unwrap(), &f.cfg, &api).unwrap();
+        assert_eq!(
+            api.controls.lock().unwrap().len(),
+            usize::from(case == "valid"),
+            "{case}"
+        );
+        if case == "valid" {
+            assert_eq!(
+                api.controls.lock().unwrap()[0]["action"]["result"],
+                json!({"action":"accept","content":{}})
+            );
+        }
+    }
+}
+#[test]
 fn native_app_policy_rejects_other_apps_connectors_forms_and_unassigned_work() {
     for case in [
         "disabled",

@@ -282,24 +282,28 @@ fn matches(
     if request["method"] == "mcpServer/elicitation/request" {
         let meta = &p["_meta"];
         let call = &request["boxen_call"];
+        let native_surface = call["type"] == "mcpToolCall"
+            && call["tool"] == "js"
+            && ((p["serverName"] == "cua_repl"
+                && call["server"] == "cua_repl"
+                && call["pluginId"] == "unified-computer-use@openai-bundled")
+                || (p["serverName"] == "node_repl"
+                    && call["server"] == "node_repl"
+                    && call["pluginId"].is_null()));
         return Ok(policy.native_edge_app_access
             && policy
                 .browser_executable
                 .file_name()
                 .and_then(|s| s.to_str())
                 .is_some_and(|s| s.eq_ignore_ascii_case("msedge.exe"))
-            && p["serverName"] == "cua_repl"
+            && native_surface
             && p["mode"] == "form"
             && p["requestedSchema"] == json!({"type":"object","properties":{}})
             && meta["connector_id"] == "computer-use"
             && meta["codex_approval_kind"] == "mcp_tool_call"
             && meta["tool_params"] == json!({"app":"msedge.exe"})
             && meta["x-codex-turn-metadata"]["thread_id"] == p["threadId"]
-            && meta["x-codex-turn-metadata"]["turn_id"] == p["turnId"]
-            && call["type"] == "mcpToolCall"
-            && call["server"] == "cua_repl"
-            && call["tool"] == "js"
-            && call["pluginId"] == "unified-computer-use@openai-bundled");
+            && meta["x-codex-turn-metadata"]["turn_id"] == p["turnId"]);
     }
     if request["method"] != "item/commandExecution/requestApproval" {
         return Ok(false);
