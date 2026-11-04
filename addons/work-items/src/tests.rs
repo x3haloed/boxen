@@ -435,6 +435,29 @@ fn large_source_retained_in_immutable_file_without_silent_mail_truncation() {
 }
 
 #[test]
+fn returned_work_references_full_prior_delivery_without_recursive_mail_growth() {
+    let f = Fixture::new();
+    let raw = json!({"job_id":hash("prior job"),"coder_id":hash("same coder"),"assignment_version":3,"pr_id":42,
+        "candidate":{"commit":"1111111111111111111111111111111111111111","base":"2222222222222222222222222222222222222222","summary":"e".repeat(100000)},
+        "operator_resume":{"prior_report":{"evidence":"h".repeat(100000)}}}).to_string();
+    let first = workflow::retained_prior_delivery(&f.root, &raw).unwrap();
+    assert!(first.to_string().len() < 2048);
+    assert_eq!(first["coder_id"], hash("same coder"));
+    assert_eq!(first["pr_id"], 42);
+    assert_eq!(first["evidence_sha256"], hash(&raw));
+    assert_eq!(
+        fs::read_to_string(first["evidence_path"].as_str().unwrap()).unwrap(),
+        raw
+    );
+    assert_eq!(
+        workflow::retained_prior_delivery(&f.root, &raw).unwrap(),
+        first
+    );
+    fs::write(first["evidence_path"].as_str().unwrap(), "changed").unwrap();
+    assert!(workflow::retained_prior_delivery(&f.root, &raw).is_err());
+}
+
+#[test]
 fn investigation_preserves_open_questions_and_existing_owner_without_fake_answers() {
     let f = Fixture::new();
     let source = ado::config(&f.s).unwrap().source();

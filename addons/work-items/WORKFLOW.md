@@ -159,3 +159,8 @@ turn a policy-update message into permission to resume. Manual pauses outside th
 workflow remain unchanged. Exact retries return the original receipt even after
 dispatch; changed input under the same key rejects. Source changes require fresh
 interpretation instead of this unchanged-source continuation.
+
+Returned work carries compact prior-delivery identity references plus a retained
+full-history file and SHA-256. Interpretation reads that file for earlier reports,
+reviews and publication limits. Repeated returns do not recursively embed the
+entire prior assignment history in mailbox requests or silently truncate it.

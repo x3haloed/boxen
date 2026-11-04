@@ -3,6 +3,27 @@
 use crate::{transport::Boxen, *};
 use std::path::PathBuf;
 
+pub(crate) fn retained_prior_delivery(root: &std::path::Path, raw: &str) -> Result<Value> {
+    let previous: Value = serde_json::from_str(raw)?;
+    let digest = hash(raw);
+    let path = root.join(format!("prior-delivery-{digest}.json"));
+    if path.exists() {
+        ensure!(
+            fs::read_to_string(&path)? == raw,
+            "Prior delivery evidence differs"
+        );
+    } else {
+        fs::write(&path, raw)?;
+    }
+    Ok(json!({
+        "job_id":previous["job_id"],"coder_id":previous["coder_id"],
+        "assignment_version":previous["assignment_version"],"pr_id":previous["pr_id"],
+        "candidate":{"commit":previous["candidate"]["commit"],"base":previous["candidate"]["base"]},
+        "evidence_path":path,"evidence_sha256":digest,
+        "meaning":"Read the retained full prior delivery for its report, reviews, publication receipt and limitations; this envelope contains identity references only."
+    }))
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -897,7 +918,7 @@ fn advance(
             }).transpose()?;
             let prior_delivery:Option<String>=s.connect()?.query_row("SELECT data FROM workflow_attempts WHERE source=?1 AND item=?2 AND stage='published' ORDER BY created DESC LIMIT 1",params![ado::config(s)?.source(),a.item],|r|r.get(0)).optional()?;
             let prior_delivery = prior_delivery
-                .map(|v| serde_json::from_str::<Value>(&v))
+                .map(|v| retained_prior_delivery(&root, &v))
                 .transpose()?;
             let body = json!({"protocol":"boxen.interpretation-request.v1","packet_path":packet_path,"packet_sha256":hash(&bytes),"work_item_revision":packet["revision"],"existing_work":current,"prior_delivery":prior_delivery,
                 "contract":{"protocol":"boxen.interpretation.v1","attempt_id":a.id,"work_item_id":a.item,"source_digest":a.digest,"decision":"ready|clarification_required|no_action|superseded","intended_outcome":"Concrete user-visible behavior","scenarios":[{"id":"scenario-id","role":"role","starting_state":"state/data","action":"user action","expected_result":"observable result"}],"preservation_targets":[],"authoritative_answers":[],"answer_contract":{"kind":"ado_comment|ado_revision","comment_id":"original ID","version":"original version","revision":"original revision","field":"changed requirement field for revision answers","authority_role":"product_owner|engineering_owner"},"questions":[],"question_contract":{"id":"stable across source refreshes","question":"Product question","existing_comment_id":"optional original question already posted; prevents re-posting","route":"work_item|operator|support","authority_needed":"decision owner"},"holds":[],"existing_work":{"unresolved_ownership":false},"evidence_refs":["Inspected source/comment identity"]},
