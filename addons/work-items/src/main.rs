@@ -163,7 +163,7 @@ fn execute() -> Result<()> {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args.iter().any(|a| a == "--help") {
         println!(
-            "boxen-work-items --home ABS init --config-file ABS --legacy-db ABS\nboxen-work-items --home ABS run\nboxen-work-items --home ABS status\nboxen-work-items --home ABS packet ITEM\nboxen-work-items --home ABS poll [--item ITEM]\nboxen-work-items --home ABS assign --request-file ABS\nboxen-work-items --home ABS release --request-file ABS\nboxen-work-items --home ABS messages [--after SEQ]\nboxen-work-items --home ABS supervise [--test-notification STABLE_KEY]\nExplicit local operator CLI. No automatic assignment, GUI or Azure writes. Ordinary mail is not parsed into operator commands."
+            "boxen-work-items --home ABS init --config-file ABS --legacy-db ABS\nboxen-work-items --home ABS run\nboxen-work-items --home ABS status\nboxen-work-items --home ABS workflow\nboxen-work-items --home ABS packet ITEM\nboxen-work-items --home ABS poll [--item ITEM]\nboxen-work-items --home ABS assign --request-file ABS\nboxen-work-items --home ABS release --request-file ABS\nboxen-work-items --home ABS messages [--after SEQ]\nboxen-work-items --home ABS supervise [--test-notification STABLE_KEY]\nLocal service CLI. Automatic dispatch and publication are opt-in through workflow.json. No GUI changes. Ordinary mail is not parsed into operator commands."
         );
         return Ok(());
     }
@@ -331,6 +331,19 @@ fn execute() -> Result<()> {
             result?;
             println!("{}", supervision::snapshot(&s)?);
         }
+        "workflow" => {
+            ensure!(args.is_empty(), "Unexpected workflow arguments");
+            let _lock = lock(&home, "workflow.lock")?;
+            if let Some(settings) = workflow::Settings::read(&s)? {
+                let api = Control::new(&cfg)?;
+                let mut driver = workflow::LocalDriver {
+                    settings: &settings,
+                    store: &s,
+                };
+                workflow::tick(&s, &cfg, &api, &settings, &mut driver)?;
+            }
+            println!("{}", workflow::snapshot(&s)?);
+        }
         "run" => {
             ensure!(args.is_empty(), "Unexpected run arguments");
             let _worker = lock(&home, "worker.lock")?;
@@ -362,15 +375,25 @@ fn execute() -> Result<()> {
             });
             event(
                 "service.started",
-                json!({"capacity":cfg.capacity,"automatic_assignment":false}),
+                json!({"capacity":cfg.capacity,"automatic_assignment":workflow::Settings::read(&s)?.is_some_and(|v|v.enabled)}),
             );
             loop {
                 let tick = || -> Result<()> {
+                    let workflow_settings = workflow::Settings::read(&s)?;
                     s.reserve(cfg.capacity)?;
                     let jobs=s.connect()?.prepare("SELECT id FROM work WHERE state='reserved' AND COALESCE(CAST((SELECT v FROM meta WHERE k='retry:'||work.id) AS INTEGER),0)<=?1 ORDER BY created LIMIT 16")?.query_map([now()],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
                     let supervision_pending:bool=s.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM supervision WHERE closed=0) OR EXISTS(SELECT 1 FROM supervision_outbox WHERE accepted=0)",[],|r|r.get(0))?;
                     if !jobs.is_empty() || cfg.supervision.is_some() || supervision_pending {
                         let api = Control::new(&cfg)?;
+                        if let Some(settings) = workflow_settings.as_ref() {
+                            let _workflow = lock(&home, "workflow.lock")?;
+                            let mut driver = workflow::LocalDriver {
+                                settings,
+                                store: &s,
+                            };
+                            workflow::tick(&s, &cfg, &api, settings, &mut driver)?;
+                        }
+
                         for job in jobs {
                             if let Err(e) = transport::dispatch(&s, &cfg, &api, &job) {
                                 let c = s.connect()?;

@@ -151,8 +151,10 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-import-') as temporary:
             if operation(0,{'op':'get','id':slow_spec['id']})['status']=='running':break
             time.sleep(.02)
         else:raise AssertionError('controlled imported follow-up never started')
+        activity=operation(0,{'op':'thread_activity','id':ident});assert activity['idle'] is False and activity['active_runs']>=1 and len(json.dumps(activity))<512
         stop(1);start(1)
         assert operation(0,{'op':'get','id':slow_spec['id']})['status']=='interrupted'
+        assert operation(0,{'op':'thread_activity','id':ident})['idle'] is True
         repaired={**slow_spec,'id':secrets.token_hex(32),'prompt':'New request after interruption'}
         operation(0,{'op':'start','spec':repaired})
         resumed=[json.loads(line) for line in cli(0,'watch',f'127.0.0.1:{peers[1]}',keys[1],repaired['id'],'--once').stdout.splitlines()]

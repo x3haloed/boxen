@@ -129,6 +129,7 @@ impl Boxen for Fake {
                 }
                 Ok(message)
             }
+            "thread_activity" => Ok(json!({"thread_id":request["id"],"idle":!self.active})),
             "list" => Ok(if self.active {
                 let coder = self.created.lock().unwrap().keys().next().unwrap().clone();
                 json!([{"record":{"spec":{"thread_id":coder}},"status":"running"}])
@@ -563,6 +564,9 @@ impl Boxen for Supervised {
             "Fixture transport unavailable"
         );
         match r["op"].as_str().unwrap() {
+            "thread_activity" => Ok(
+                json!({"thread_id":r["id"],"idle":matches!(self.status.lock().unwrap().as_str(),"completed"|"failed"|"interrupted"|"cancelled")}),
+            ),
             "client_inbox" => {
                 let after = r["after"].as_i64().unwrap_or(0);
                 let rows = self
@@ -629,6 +633,57 @@ fn supervised_fixture() -> (Fixture, Supervised, Value) {
     f.s.reserve(1).unwrap();
     dispatch(&f.s, &f.cfg, &api, a["job_id"].as_str().unwrap()).unwrap();
     (f, api, a)
+}
+#[test]
+fn ordinary_worker_progress_reaches_observer_without_completing_or_replaying() {
+    let (f, api, a) = supervised_fixture();
+    let mut progress = api.report(&a, "completed", true);
+    progress["body"] = json!("Normal browser access is unavailable; validation remains pending.");
+    api.reports.lock().unwrap().push(progress.clone());
+    let t = now();
+    supervision::tick(&f.s, &f.cfg, &api, t).unwrap();
+    let mail = api.inner.mail.lock().unwrap();
+    let notices = mail
+        .values()
+        .filter(|m| {
+            m["body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Attributed worker correspondence")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 1);
+    let body: Value = serde_json::from_str(notices[0]["body"].as_str().unwrap()).unwrap();
+    assert_eq!(body["detail"]["sender"], progress["sender"]);
+    drop(mail);
+    assert!(
+        f.s.connect()
+            .unwrap()
+            .query_row("SELECT report IS NULL FROM supervision", [], |r| r
+                .get::<_, bool>(0))
+            .unwrap()
+    );
+    assert_eq!(f.s.status().unwrap()["jobs"][0]["holds_slot"], true);
+    let mut forged = progress;
+    forged["seq"] = json!(2);
+    forged["id"] = json!(hash("forged progress"));
+    forged["sender"]["id"] = json!(hash("other resident"));
+    api.reports.lock().unwrap().push(forged);
+    let reopened = Store::open(&f.s.path).unwrap();
+    supervision::tick(&reopened, &f.cfg, &api, t + 100).unwrap();
+    assert_eq!(
+        api.inner
+            .mail
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|m| m["body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Attributed worker correspondence"))
+            .count(),
+        1
+    );
 }
 #[test]
 fn authenticated_handoff_waits_for_idle_and_releases_without_closing_ticket() {
@@ -867,4 +922,493 @@ fn accepted_mail_without_activation_emits_one_start_warning_without_resubmission
     );
     assert_eq!(api.inner.created.lock().unwrap().len(), 1);
     assert_eq!(f.s.status().unwrap()["jobs"][0]["holds_slot"], true);
+}
+
+// Synthetic boundary driver: project effects and model observations are fixtures, not runtime proof.
+struct WorkflowDriver {
+    input: Value,
+    calls: Vec<String>,
+    pr: bool,
+    lose_create: bool,
+    question_posted: bool,
+    lose_question: bool,
+    commit: String,
+}
+impl workflow::Driver for WorkflowDriver {
+    fn call(&mut self, operation: &str, request: &Value) -> Result<Value> {
+        self.calls.push(operation.into());
+        Ok(match operation {
+            "find_question" => {
+                json!({"ok":true,"found":self.question_posted,"comment_id":8,"comment_version":1,"service_authored":true})
+            }
+            "post_question" => {
+                self.question_posted = true;
+                if self.lose_question {
+                    self.lose_question = false;
+                    bail!("Unknown comment-create outcome")
+                };
+                json!({"ok":true,"comment_id":8,"comment_version":1,"service_authored":true})
+            }
+            "plan" => json!({"ok":true,"assignment":self.input["assignment"]}),
+            "prepare" => {
+                fs::create_dir_all(request["assignment"]["worktree"].as_str().unwrap())?;
+                json!({"ok":true,"prepared":true})
+            }
+            "verify_cleanup" => json!({"ok":true,"quiescent":true,"database_removed":true}),
+            "inspect_candidate" => json!({"ok":true,"ready":true}),
+            "push" => {
+                self.commit = request["candidate"]["commit"].as_str().unwrap().into();
+                json!({"ok":true})
+            }
+            "find_pr" => json!({"ok":true,"prs":if self.pr{vec![json!({"id":23})]}else{vec![]}}),
+            "create_pr" => {
+                self.pr = true;
+                if self.lose_create {
+                    self.lose_create = false;
+                    bail!("Simulated unknown create outcome")
+                };
+                json!({"ok":true,"id":23})
+            }
+            "verify_pr" => {
+                json!({"ok":true,"id":23,"url":"https://example.invalid/pr/23","is_draft":false,"active":true,"commit":self.commit,"work_item_id":1,"autocomplete":false})
+            }
+            _ => bail!("Unexpected project operation"),
+        })
+    }
+}
+struct WorkflowApi {
+    cfg: Config,
+    s: Store,
+    mail: Mutex<BTreeMap<String, Value>>,
+    incoming: Mutex<Vec<Value>>,
+    actors: Mutex<BTreeMap<String, Value>>,
+    correction: bool,
+    auto_answer: bool,
+}
+impl WorkflowApi {
+    fn answer(&self, message: &Value, mut body: Value, sender: Value) {
+        let mut incoming = self.incoming.lock().unwrap();
+        let seq = incoming.len() as i64 + 1;
+        if body["protocol"] == "boxen.interpretation.v1" && body["decision"] == "ready" {
+            if body["intended_outcome"].is_null() {
+                body["intended_outcome"] = json!("Synthetic intent");
+            }
+            if let Some(scenarios) = body["scenarios"].as_array_mut() {
+                for scenario in scenarios {
+                    for field in ["role", "starting_state", "action", "expected_result"] {
+                        if scenario[field].is_null() {
+                            scenario[field] = json!("Synthetic fixture");
+                        }
+                    }
+                }
+            }
+        }
+        body["request_id"] = message["id"].clone();
+        let request: Value = serde_json::from_str(message["body"].as_str().unwrap()).unwrap();
+        for field in ["attempt_id", "source_digest", "work_item_id"] {
+            body[field] = request[field].clone();
+        }
+        incoming.push(json!({"id":hash(&format!("fixture:{seq}")),"seq":seq,"sender":sender,"to":{"type":"client","machine":self.cfg.owner,"id":self.cfg.client_id},"in_reply_to":message["id"],"body":body.to_string()}));
+    }
+}
+impl Boxen for WorkflowApi {
+    fn call(&self, r: Value) -> Result<Value> {
+        match r["op"].as_str().unwrap() {
+            "thread_activity" => Ok(json!({"thread_id":r["id"],"idle":true})),
+            "list" => Ok(json!([])),
+            "resident_definition" => {
+                let spec = &r["args"]["spec"];
+                let id = spec["id"].as_str().unwrap();
+                let mut actors = self.actors.lock().unwrap();
+                if let Some(old) = actors.get(id) {
+                    ensure!(old == spec, "Instantiation retry changed");
+                } else {
+                    actors.insert(id.into(), spec.clone());
+                }
+                Ok(
+                    json!({"id":id,"owner":self.cfg.owner,"definition":{"id":spec["definition_id"],"instantiated_revision":spec["definition_revision"]}}),
+                )
+            }
+            "resident_get" => Ok(
+                json!({"id":r["id"],"owner":self.cfg.owner,"definition":{"id":self.cfg.definition_id}}),
+            ),
+            "client_inbox" => {
+                let after = r["after"].as_i64().unwrap_or(0);
+                let incoming = self.incoming.lock().unwrap();
+                let rows: Vec<_> = incoming
+                    .iter()
+                    .filter(|v| v["seq"].as_i64().unwrap() > after)
+                    .cloned()
+                    .collect();
+                Ok(
+                    json!({"messages":rows,"next_after":rows.last().map_or(after,|r|r["seq"].as_i64().unwrap())}),
+                )
+            }
+            "resident_inbox" => {
+                let rows: Vec<_> = self
+                    .mail
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter(|v| v["to"]["id"] == r["id"])
+                    .cloned()
+                    .map(|mut v| {
+                        v["delivery"] = json!("presented");
+                        v
+                    })
+                    .collect();
+                Ok(json!({"messages":rows,"next_after":0}))
+            }
+            "mailbox_send" => {
+                let mut m = r["message"].clone();
+                m["sender"] =
+                    json!({"type":"client","machine":self.cfg.owner,"id":self.cfg.client_id});
+                let mid = m["id"].as_str().unwrap();
+                let mut mail = self.mail.lock().unwrap();
+                if let Some(old) = mail.get(mid) {
+                    ensure!(old == &m, "Stable mail ID changed");
+                    return Ok(old.clone());
+                }
+                mail.insert(mid.into(), m.clone());
+                drop(mail);
+                if let Ok(request) = serde_json::from_str::<Value>(m["body"].as_str().unwrap()) {
+                    if self.auto_answer && request["protocol"] == "boxen.interpretation-request.v1"
+                    {
+                        self.answer(&m,json!({"protocol":"boxen.interpretation.v1","decision":"ready","intended_outcome":"Synthetic behavior","scenarios":[{"id":"s1","action":"Action","expected_result":"Result"}],"preservation_targets":[],"questions":[],"holds":[],"existing_work":{"unresolved_ownership":false},"evidence_refs":["Inspected fixture"]}),m["to"].clone());
+                    }
+                    if self.auto_answer && request["protocol"] == "boxen.review-request.v1" {
+                        let changes = self.correction
+                            && request["role"] == "technical"
+                            && request["review_round"] == 1;
+                        self.answer(&m,json!({"protocol":"boxen.review.v1","role":request["role"],"reviewed_commit":request["reviewed_commit"],"base_commit":request["base_commit"],"decision":if changes{"changes_required"}else{"pass"},"findings":if changes{vec![json!({"id":"wrong-state","blocking":true,"requested_change":"Exercise the correct state"})]}else{vec![]}}),m["to"].clone());
+                    }
+                } else if m["subject"].as_str().unwrap_or("").contains("assignment v") {
+                    let c = self.s.connect()?;
+                    let (job, version): (String, i64) = c.query_row(
+                        "SELECT job,version FROM assignments WHERE json_extract(message,'$.id')=?1",
+                        [mid],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    let report = json!({"protocol":"boxen.work-report.v1","job_id":job,"assignment_version":version,"outcome":"completed","summary":"Synthetic boundary result, not actual application evidence","commit":if version==1{"1111111111111111111111111111111111111111"}else{"3333333333333333333333333333333333333333"},"base":"2222222222222222222222222222222222222222","evidence":["synthetic fixture"],"remaining":[],"validation":{"local_runtime_exercised":true,"acceptance":[{"id":"s1","status":"observed_pass","evidence":"Synthetic protocol fixture"}]},"cleanup":{"no_owned_runtime_resources":true}});
+                    // The existing supervision suite separately verifies authenticated report acceptance.
+                    c.execute("UPDATE supervision SET report=?3,phase='report_received' WHERE job=?1 AND version=?2",params![job,version,report.to_string()])?;
+                }
+                Ok(m)
+            }
+            _ => bail!("Unexpected Boxen fixture operation"),
+        }
+    }
+}
+fn workflow_fixture(
+    correction: bool,
+) -> (Fixture, WorkflowApi, workflow::Settings, WorkflowDriver) {
+    let mut f = Fixture::new();
+    f.cfg.supervision = Some(supervision::Settings {
+        notify_to: json!({"type":"client","machine":f.cfg.owner,"id":hash("observer")}),
+        start_timeout_seconds: 30,
+        inactivity_seconds: 30,
+        report_grace_seconds: 5,
+    });
+    fs::create_dir_all(&f.cfg.pack_root).unwrap();
+    fs::write(
+        f.cfg.pack_root.join("pack.manifest.json"),
+        json!({"id":"synthetic","version":"1"}).to_string(),
+    )
+    .unwrap();
+    let settings = workflow::Settings {
+        enabled: true,
+        allow_new_copies: true,
+        publication: true,
+        post_clarifications: false,
+        authority: "Explicit synthetic test authority".into(),
+        context_resident: hash("context"),
+        review_definition: hash("reviewer"),
+        review_revision: 1,
+        notify_to: json!({"type":"client","machine":f.cfg.owner,"id":hash("observer")}),
+        driver: f.root.join("driver"),
+        driver_args: vec![],
+        driver_script: f.root.join("script"),
+        driver_hash: hash("script"),
+        project: json!({"azure_organization":"https://dev.azure.com/example","azure_project":"Example"}),
+        items: vec![1],
+    };
+    fs::remove_dir(f.root.join("worktree-1")).unwrap();
+    let mut input = f.input(1);
+    input["assignment"]["runtime"] = json!({"required":true,"reservation_id":"synthetic","allocation_source":"Fixture-owned allocation","frontend_port":4500,"backend_port":4501,"database_server":"local","database_name":"synthetic","browser_context":f.root.join("browser")});
+    let api = WorkflowApi {
+        cfg: f.cfg.clone(),
+        s: f.s.clone(),
+        mail: Mutex::new(BTreeMap::new()),
+        incoming: Mutex::new(vec![]),
+        actors: Mutex::new(BTreeMap::new()),
+        correction,
+        auto_answer: true,
+    };
+    let driver = WorkflowDriver {
+        input,
+        calls: vec![],
+        pr: false,
+        lose_create: false,
+        question_posted: false,
+        lose_question: false,
+        commit: String::new(),
+    };
+    (f, api, settings, driver)
+}
+fn workflow_step(
+    f: &Fixture,
+    api: &WorkflowApi,
+    settings: &workflow::Settings,
+    driver: &mut WorkflowDriver,
+) {
+    workflow::tick(&f.s, &f.cfg, api, settings, driver).unwrap();
+    if let Some(job) = f.s.reserve(1).unwrap() {
+        transport::dispatch(&f.s, &f.cfg, api, &job).unwrap();
+    }
+    let jobs =
+        f.s.connect()
+            .unwrap()
+            .prepare("SELECT id FROM work WHERE state='reserved'")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+    for job in jobs {
+        transport::dispatch(&f.s, &f.cfg, api, &job).unwrap();
+    }
+}
+#[test]
+fn automatic_loop_returns_findings_to_same_coder_and_publishes_exact_full_pr() {
+    let (f, api, settings, mut driver) = workflow_fixture(true);
+    for _ in 0..35 {
+        workflow_step(&f, &api, &settings, &mut driver);
+    }
+    let state = workflow::snapshot(&f.s).unwrap();
+    assert_eq!(state["attempts"][0]["stage"], "published", "{state}");
+    let (version, held): (i64, i64) =
+        f.s.connect()
+            .unwrap()
+            .query_row("SELECT version,holds_slot FROM work", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+    assert_eq!((version, held), (2, 0));
+    let actors = api.actors.lock().unwrap();
+    assert_eq!(
+        actors
+            .values()
+            .filter(|v| v["definition_id"] == f.cfg.definition_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        actors.len(),
+        2,
+        "One coder and one distinct technical reviewer"
+    );
+    assert_eq!(driver.calls.iter().filter(|v| *v == "create_pr").count(), 1);
+    assert_eq!(driver.commit, "3333333333333333333333333333333333333333");
+    let reopened = Store::open(f.s.path.clone()).unwrap();
+    workflow::tick(&reopened, &f.cfg, &api, &settings, &mut driver).unwrap();
+    assert_eq!(driver.calls.iter().filter(|v| *v == "create_pr").count(), 1);
+}
+#[test]
+fn uncertain_pr_creation_is_reconciled_without_a_second_create() {
+    let (f, api, settings, mut driver) = workflow_fixture(false);
+    driver.lose_create = true;
+    for _ in 0..25 {
+        workflow_step(&f, &api, &settings, &mut driver);
+        f.s.connect()
+            .unwrap()
+            .execute("UPDATE workflow_attempts SET next_due=0", [])
+            .unwrap();
+    }
+    assert_eq!(
+        workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"],
+        "published"
+    );
+    assert_eq!(driver.calls.iter().filter(|v| *v == "create_pr").count(), 1);
+}
+#[test]
+fn changed_source_supersedes_an_interpretation_without_creating_a_coder() {
+    let (f, mut api, settings, mut driver) = workflow_fixture(false);
+    api.auto_answer = false;
+    workflow_step(&f, &api, &settings, &mut driver);
+    f.s.connect()
+        .unwrap()
+        .execute(
+            "UPDATE ado_items SET raw=json_set(raw,'$.rev',2),revision=2 WHERE id=1",
+            [],
+        )
+        .unwrap();
+    workflow_step(&f, &api, &settings, &mut driver);
+    assert!(api.actors.lock().unwrap().is_empty());
+    assert_eq!(
+        workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"],
+        "superseded"
+    );
+}
+#[test]
+fn forged_and_superseded_review_replies_cannot_advance_publication() {
+    let (f, mut api, settings, mut driver) = workflow_fixture(false);
+    api.auto_answer = false;
+    workflow_step(&f, &api, &settings, &mut driver);
+    let request = api
+        .mail
+        .lock()
+        .unwrap()
+        .values()
+        .find(|m| m["subject"].as_str().unwrap().contains("interpretation"))
+        .unwrap()
+        .clone();
+    let answer = json!({"protocol":"boxen.interpretation.v1","decision":"ready","scenarios":[{"id":"s1"}],"preservation_targets":[],"holds":[],"questions":[],"existing_work":{"unresolved_ownership":false},"evidence_refs":["fixture"]});
+    api.answer(
+        &request,
+        answer.clone(),
+        json!({"type":"resident","id":hash("forged sender")}),
+    );
+    workflow_step(&f, &api, &settings, &mut driver);
+    assert_eq!(
+        workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"],
+        "interpreting"
+    );
+    let accepted: bool =
+        f.s.connect()
+            .unwrap()
+            .query_row("SELECT accepted FROM workflow_receipts LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+    assert!(!accepted);
+    api.answer(&request, answer, request["to"].clone());
+    workflow_step(&f, &api, &settings, &mut driver);
+    assert_eq!(
+        workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"],
+        "ready"
+    );
+}
+#[test]
+fn no_copy_grant_cannot_instantiate_a_worker() {
+    let (f, api, mut settings, mut driver) = workflow_fixture(false);
+    settings.allow_new_copies = false;
+    for _ in 0..6 {
+        workflow_step(&f, &api, &settings, &mut driver);
+    }
+    assert_eq!(
+        workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"],
+        "held"
+    );
+    assert!(api.actors.lock().unwrap().is_empty());
+    assert!(driver.calls.is_empty());
+}
+#[test]
+fn stale_reserved_allocation_releases_capacity_before_new_dispatch() {
+    let (f, api, settings, mut driver) = workflow_fixture(false);
+    for _ in 0..3 {
+        workflow_step(&f, &api, &settings, &mut driver);
+    }
+    assert_eq!(
+        workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"],
+        "awaiting_allocation"
+    );
+    let held: i64 =
+        f.s.connect()
+            .unwrap()
+            .query_row("SELECT holds_slot FROM work", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(held, 1);
+    f.s.connect()
+        .unwrap()
+        .execute(
+            "UPDATE ado_items SET raw=json_set(raw,'$.rev',2),revision=2 WHERE id=1",
+            [],
+        )
+        .unwrap();
+    for _ in 0..2 {
+        workflow_step(&f, &api, &settings, &mut driver);
+    }
+    let held: i64 =
+        f.s.connect()
+            .unwrap()
+            .query_row("SELECT holds_slot FROM work", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(held, 0);
+    assert!(api.actors.lock().unwrap().is_empty());
+}
+#[test]
+fn stale_observations_wait_and_resume_without_another_interpretation() {
+    let (f, mut api, settings, mut driver) = workflow_fixture(false);
+    api.auto_answer = false;
+    workflow_step(&f, &api, &settings, &mut driver);
+    let request = api
+        .mail
+        .lock()
+        .unwrap()
+        .values()
+        .find(|m| m["subject"].as_str().unwrap().contains("interpretation"))
+        .unwrap()
+        .clone();
+    f.s.connect()
+        .unwrap()
+        .execute(
+            "UPDATE ado_items SET observed=?1 WHERE id=1",
+            [now() - 31 * 60_000],
+        )
+        .unwrap();
+    workflow_step(&f, &api, &settings, &mut driver);
+    assert_eq!(
+        workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"],
+        "interpreting"
+    );
+    f.s.connect()
+        .unwrap()
+        .execute("UPDATE ado_items SET observed=?1 WHERE id=1", [now()])
+        .unwrap();
+    api.answer(&request,json!({"protocol":"boxen.interpretation.v1","decision":"ready","scenarios":[{"id":"s1"}],"questions":[],"holds":[],"existing_work":{"unresolved_ownership":false},"evidence_refs":["fixture"]}),request["to"].clone());
+    workflow_step(&f, &api, &settings, &mut driver);
+    assert_eq!(
+        workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"],
+        "ready"
+    );
+    assert!(api.actors.lock().unwrap().is_empty());
+}
+#[test]
+fn uncertain_clarification_comment_creation_reconciles_without_duplicate() {
+    let (f, mut api, mut settings, mut driver) = workflow_fixture(false);
+    api.auto_answer = false;
+    settings.post_clarifications = true;
+    driver.lose_question = true;
+    workflow_step(&f, &api, &settings, &mut driver);
+    let request = api
+        .mail
+        .lock()
+        .unwrap()
+        .values()
+        .find(|m| m["subject"].as_str().unwrap().contains("interpretation"))
+        .unwrap()
+        .clone();
+    api.answer(&request,json!({"protocol":"boxen.interpretation.v1","decision":"clarification_required","questions":[{"id":"which-field","question":"Which field is intended?","route":"work_item"}],"holds":[]}),request["to"].clone());
+    for _ in 0..5 {
+        workflow_step(&f, &api, &settings, &mut driver);
+        f.s.connect()
+            .unwrap()
+            .execute("UPDATE workflow_questions SET next_due=0", [])
+            .unwrap();
+    }
+    assert_eq!(
+        driver
+            .calls
+            .iter()
+            .filter(|v| *v == "post_question")
+            .count(),
+        1
+    );
+    let state: String =
+        f.s.connect()
+            .unwrap()
+            .query_row("SELECT state FROM workflow_questions", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(state, "posted");
+    assert!(api.actors.lock().unwrap().is_empty());
 }

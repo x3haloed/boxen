@@ -80,3 +80,16 @@ The same APE was deployed to both physical Macs. A real Codex resident on the Ma
 ## Promote an existing conversation
 
 [Promotion](resident-promotion.md) attaches a resident to an existing ordinary Codex conversation, including an imported thread, without starting inference. The native thread and saved instructions remain intact; resident tools use a run-scoped MCP bridge. Promotion has an explicit retry-safe CLI/API and adds no GUI controls.
+
+## Compact execution activity
+
+Authenticated API operation `{"op":"thread_activity","id":"BOXEN_THREAD_ID"}`
+returns owner-scoped current metadata: `thread_id`, `known`, `run_count`,
+`active_runs`, and `idle`. It works for resident and identity-less Boxen threads;
+the ID is the canonical Boxen thread ID, not a provider-native session ID.
+Unknown or differently owned IDs expose no records. The response contains no
+prompts, memory, messages, tool results or history, and its size stays bounded as
+completed runs accumulate. Runtime statuses use the same terminal-state authority
+as execution. This is an instantaneous observation, not a lease against later
+mail or an assertion about unmanaged processes. Work-item resource release also
+checks accepted assignment mail and project cleanup readbacks.

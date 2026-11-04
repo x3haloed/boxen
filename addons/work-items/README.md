@@ -1,17 +1,19 @@
-# Explicit work-item service
+# Work-item development service
 
-Independent Rust addon for a durable, read-only Azure DevOps mirror and explicit
-operator assignment of work to Boxen coder residents. The Boxen daemon and GUI
-are unchanged. Boxen owns residents, execution and accepted correspondence; this
+Independent Rust addon for a durable, read-only Azure DevOps mirror and manual or
+automatic assignment of work to Boxen coder residents. The GUI is unchanged.
+The compatible Boxen core supplies a compact `thread_activity` metadata query. Boxen owns residents, execution and accepted correspondence; this
 service owns work-item observations, immutable assignments, coder bindings and
 its own capacity/resource claims. There is no coordinator model in this service.
 
-This is the first manual loop slice. **Polling never creates an assignment.**
-Only the local operator `assign` command accepts implementation work. New copies
-require `new_copy: true`; updates/returns for existing work retain its coder.
-Publication is disabled: all delivery flags must be false. Structured clarification,
-independent review gates, publication intent/readback and automatic context-agent/ADO
-dispatch remain separate work. Mail bodies are not parsed into operator commands.
+Manual assignment remains the default. An optional operator-authored `workflow.json`
+connects the existing mirror/assignments/supervision to automatic interpretation,
+allocation, normal coder implementation, independent/context reviews, same-coder
+corrections, and full non-draft PR publication. See [automatic workflow](WORKFLOW.md).
+Absent that configuration, polling never creates an assignment. Incoming mail is
+never parsed into local operator commands. Direct coder delivery flags stay false;
+the configured workflow owns a separate retained publication grant and readback.
+Merge, deployment, policy bypass and autocomplete are outside the workflow.
 
 ## Configuration and installation
 
@@ -76,8 +78,9 @@ and SQLite contain work-item/assignment content and inherit local-user privacy.
 The read-only Azure adapter uses the existing user's Azure CLI authentication.
 On Windows it uses the installed Azure CLI Python executable; the optional
 `BOXEN_WORK_ITEMS_AZURE_PYTHON` chooses an alternative. On Unix it invokes `az`.
-No credential copying or Azure writes are implemented. The one POST operation is
-a read-only WIQL query. Polling and dispatch have separate worker loops, so a slow
+No credential copying occurs. The mirror adapter remains read-only; its POST is
+a WIQL query. The optional workflow project driver separately owns PR publication
+and explicitly configured clarification-comment writes. Polling and dispatch have separate worker loops, so a slow
 Azure scan does not own assignment delivery. Worker and scan locks prevent duplicate
 local supervisors/scans. Process deadlines/output limits contain stalled CLI calls.
 
@@ -85,6 +88,7 @@ local supervisors/scans. Process deadlines/output limits contain stalled CLI cal
 
 ```text
 boxen-work-items --home ABS status
+boxen-work-items --home ABS workflow
 boxen-work-items --home ABS poll
 boxen-work-items --home ABS poll --item 123
 boxen-work-items --home ABS packet 123
@@ -144,7 +148,7 @@ An explicit `context.decision: "investigate"` supports useful work independent o
 unanswered questions. It requires a nonempty `investigation_rationale` and retains
 `open_questions` when legacy clarification is pending. Its task names
 `mode: "investigation"`, `validation: "read_only"` or `"isolated_synthetic"`, and
-`production_edits: false`, `external_writes: false`. Publication remains disabled,
+`production_edits: false`, `external_writes: false`. Direct worker publication remains disabled,
 existing coder ownership remains binding, and no legacy question is marked answered.
 The accepted scope directs the trusted Full Access worker; it is not an OS sandbox.
 Finishing such an assignment is an investigation handoff, not proof of the reported
@@ -275,14 +279,19 @@ with fresh source and successful terminal execution can finish the assignment;
 a completed report followed by failed execution is explicitly flagged and paused.
 Blocked/failed/clarification or stale
 source pauses it after cleanup. Neither outcome closes or edits the Azure work item.
+Authenticated ordinary worker mail linked to the current assignment is forwarded
+to the configured supervision observer with its original sender and message ID.
+It does not become a final report or change completion/release state; cursor and
+forwarding outbox commit together and retries retain stable IDs.
 No notification acknowledgment gates unrelated eligible work. Source checkouts and
 evidence remain available; this service does not delete them.
 
 Revision/comment/PR-discussion changes invalidate affected assignments even when the
 ticket revision is unchanged. Invalidation retains coder ownership and any reserved
-resources; it never spawns/reassigns automatically. A stale job can be paused, not
+resources; supervision alone never spawns/reassigns automatically. A stale job can be paused, not
 certified finished. Already running local work is not remotely cancelled or fenced
-by this slice. Publication is disabled, and refreshed assignment/context is explicit.
+by this slice. Direct worker publication remains disabled. Automatic workflow refreshes retain
+versioned assignments/context; manual assignments still require an explicit refresh.
 Freshness is bounded local observation (30 minutes), not an atomic Azure transaction.
 Evidence changing after a read remains possible and belongs in later workflow gates.
 
@@ -293,7 +302,7 @@ deduplication, assignment versions, effects and reservations. Partial source pag
 do not advance that item's checkpoint; other items can still succeed. Previously
 watched items and PRs remain observed after reassignment, closure or link removal.
 Claims survive service restart. Poll failures back off up to 15 minutes; dispatch
-failures back off and retain uncertainty. There is no automatic reassignment,
+failures back off and retain uncertainty. The supervision component does not itself perform automatic reassignment,
 publication, work-item completion or request-body execution.
 
 Bounds include 10,000 watched/candidate items, 16 MiB Azure responses, 60-second CLI
@@ -324,10 +333,10 @@ one report-only recovery from a silent turn, observer notifications and exact-ID
 delivery diagnostics. Unit tests cover crash/inactivity, invalid/stale/conflicting
 reports, atomic intake/checkpoints, late results, restart and outage/recovery health.
 These are distinct from real model/application evidence. The installed deployment
-also performs a live read-only Azure poll; no production coding is dispatched by
-installation. Windows native is verified; Unix paths are implemented but not yet
-verified. Core Boxen/APE are unchanged by this independent addon.
-The authorized Linux SSH probe from this Windows host stopped at host-key
-verification; no trust check was bypassed and no Linux verification is claimed.
+also performs a live read-only Azure poll. Installation alone does not enable
+automatic coding; workflow configuration and its recorded authority are separate. Windows native is verified; Unix paths are implemented but not yet
+verified. Automatic workflows require the core compact `thread_activity` API;
+the project driver is independently installed. No APE or Linux workflow execution
+is claimed.
 
 Azure reference: [comments pagination and deleted comments](https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/comments/get-comments?view=azure-devops-rest-7.1).

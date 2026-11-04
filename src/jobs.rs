@@ -89,6 +89,24 @@ mod tests {
         assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2]);
         assert!(run.batch(3, false).is_err());
         assert!(jobs.get(&state::random_hex().unwrap(), &id).is_err());
+        let activity = jobs.thread_activity(&owner, &id).unwrap();
+        assert_eq!(activity["idle"], true);
+        assert_eq!(activity["known"], true);
+        assert_eq!(
+            jobs.thread_activity(&state::random_hex().unwrap(), &id)
+                .unwrap()["known"],
+            false
+        );
+        {
+            let mut inner = run.inner.lock().unwrap();
+            inner.snapshot.status = "running".into();
+            inner.snapshot.record.spec.prompt = "private large history".repeat(100_000);
+        }
+        let activity = jobs.thread_activity(&owner, &id).unwrap();
+        assert_eq!(activity["idle"], false);
+        assert_eq!(activity["active_runs"], 1);
+        assert!(activity.to_string().len() < 512);
+        run.inner.lock().unwrap().snapshot.status = "interrupted".into();
         drop(run);
         drop(jobs);
         let reopened = Jobs::open(path.clone(), "missing-codex".into(), owner.clone()).unwrap();
@@ -1580,6 +1598,38 @@ impl Jobs {
             return Err("run belongs to a different peer".into());
         }
         Ok(run)
+    }
+
+    /// Instantaneous metadata, not a lease against future messages/activations.
+    pub fn thread_activity(&self, owner: &str, id: &str) -> Result<Value> {
+        valid_id(id)?;
+        let (count, active) = {
+            let runs = self.runs.lock().unwrap();
+            let mut count = 0_u64;
+            let mut active = 0_u64;
+            for run in runs.values() {
+                let inner = run.inner.lock().unwrap();
+                let snapshot = &inner.snapshot;
+                if snapshot.record.owner == owner && snapshot.record.spec.thread_id == id {
+                    count += 1;
+                    if !terminal(&snapshot.status) {
+                        active += 1;
+                    }
+                }
+            }
+            (count, active)
+        };
+        logging::record(
+            Level::Debug,
+            Target::Workload,
+            "thread.activity_read",
+            Context::peer(owner),
+            || json!({"thread_id":id,"known_runs":count,"active_runs":active}),
+            || Value::Null,
+        );
+        Ok(
+            json!({"thread_id":id,"known":count>0,"run_count":count,"active_runs":active,"idle":active==0}),
+        )
     }
 
     pub(crate) fn resident_activity(&self, owner: &str, ids: &[String]) -> (usize, usize) {

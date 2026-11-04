@@ -4,6 +4,7 @@ pub mod supervision;
 #[cfg(test)]
 mod tests;
 pub mod transport;
+pub mod workflow;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -125,6 +126,7 @@ impl Store {
         CREATE TABLE IF NOT EXISTS workflow_events(seq INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT,kind TEXT,data TEXT,at INTEGER);")?;
         ado::migrate(&c)?;
         supervision::migrate(&c)?;
+        workflow::migrate(&c)?;
         Ok(s)
     }
     pub fn connect(&self) -> Result<Connection> {
@@ -521,7 +523,12 @@ impl Store {
             key(&coder)?;
             (job, coder, 1)
         };
-        let claims = resource_claims(assignment)?;
+        let planned = if let Some(attempt) = input["context"]["workflow_id"].as_str() {
+            tx.query_row("SELECT EXISTS(SELECT 1 FROM workflow_attempts WHERE id=?1 AND source=?2 AND item=?3 AND digest=?4 AND stage='ready')",params![attempt,source,item,input["source_digest"].as_str()],|r|r.get::<_,bool>(0))?
+        } else {
+            false
+        };
+        let claims = resource_claims(assignment, planned)?;
         if let Some(previous) = retained_from {
             let raw: String = tx.query_row(
                 "SELECT claims FROM assignments WHERE job=?1 AND version=?2",
@@ -575,7 +582,7 @@ impl Store {
             .join(version.to_string())
             .join("packet.json");
         let mut body = format!(
-            "[Work-item service — explicit operator assignment record; source content retains its original authors]\nJob {job}, version {version}. This service records the explicit operator request; it is not an agent-authored human message. The JSON below identifies the frozen assignment and full source/evidence file on this executing host. That file's SHA-256 verifies its exact retained bytes. Local investigation/editing/checks are scoped by the assignment. Publication is disabled for this slice. Source observations can become stale after acceptance; workflow freshness is separate from implementation success. Runtime claims coordinate this service's assignments, not arbitrary processes on the host. Explicit mailbox replies go to the authenticated reply_to address. Private narration is not a handoff.\n{}",
+            "[Work-item service — accepted assignment record; source content retains its original authors]\nJob {job}, version {version}. This service records an explicit operator request or configured human-authorized workflow decision, as attributed in context; it is not a new human-authored message. The JSON below identifies the frozen assignment and full source/evidence file on this executing host. That file's SHA-256 verifies its exact retained bytes. Local investigation/editing/checks are scoped by the assignment. This implementation assignment grants no direct publication. A configured automatic workflow can request separate exact-commit reviews and publish a ready candidate through its retained publication stage. Source observations can become stale after acceptance; workflow freshness is separate from implementation success. Runtime claims coordinate this service's assignments, not arbitrary processes on the host. Explicit mailbox replies go to the authenticated reply_to address. Private narration is not a handoff.\n{}",
             json!({"assignment":assignment,"context":input["context"],"packet_path":packet_path,"packet_sha256":hash(&bundle.to_string()),"source_digest":input["source_digest"]})
         );
         if cfg.supervision.is_some() {
@@ -681,7 +688,7 @@ impl Store {
         let c = self.connect()?;
         let jobs=c.prepare("SELECT id,item,coder,state,version,holds_slot,error FROM work ORDER BY created DESC LIMIT 200")?.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"item":r.get::<_,i64>(1)?,"coder":r.get::<_,String>(2)?,"state":r.get::<_,String>(3)?,"version":r.get::<_,i64>(4)?,"holds_slot":r.get::<_,bool>(5)?,"error":r.get::<_,Option<String>>(6)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(
-            json!({"mirror":ado::snapshot(self,0)?,"jobs":jobs,"supervision":supervision::snapshot(self)?,"automatic_assignment":false,"publication_enabled":false}),
+            json!({"mirror":ado::snapshot(self,0)?,"jobs":jobs,"supervision":supervision::snapshot(self)?,"automatic_assignment":workflow::Settings::read(self)?.is_some_and(|v|v.enabled),"publication_enabled":workflow::Settings::read(self)?.is_some_and(|v|v.enabled&&v.publication),"workflow":workflow::snapshot(self)?}),
         )
     }
 }
@@ -748,9 +755,41 @@ pub fn source_changed(c: &Connection, source: &str, item: i64) -> Result<()> {
     }
     Ok(())
 }
-fn resource_claims(a: &Value) -> Result<Vec<String>> {
-    let canonical = fs::canonicalize(a["worktree"].as_str().unwrap())
-        .context("Assigned worktree does not exist")?;
+pub(crate) fn resource_claims(a: &Value, planned: bool) -> Result<Vec<String>> {
+    let worktree = Path::new(a["worktree"].as_str().unwrap());
+    let canonical = if worktree.exists() {
+        ensure!(worktree.is_dir(), "Assigned worktree is not a directory");
+        fs::canonicalize(worktree)?
+    } else {
+        ensure!(planned, "Assigned worktree does not exist");
+        ensure!(
+            !worktree.components().any(|c| matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )),
+            "Planned worktree has ambiguous path components"
+        );
+        let mut parent = worktree.to_path_buf();
+        let mut missing = Vec::new();
+        while !parent.exists() {
+            missing.push(
+                parent
+                    .file_name()
+                    .context("Planned worktree has no existing ancestor")?
+                    .to_os_string(),
+            );
+            ensure!(parent.pop(), "Planned worktree has no existing ancestor");
+        }
+        ensure!(
+            parent.is_dir(),
+            "Planned worktree ancestor is not a directory"
+        );
+        let mut canonical = fs::canonicalize(parent)?;
+        for component in missing.into_iter().rev() {
+            canonical.push(component);
+        }
+        canonical
+    };
     let mut path = canonical.to_string_lossy().replace('\\', "/");
     if cfg!(windows) {
         path = path.to_lowercase();

@@ -452,6 +452,9 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 jobs.notify();
                 Ok(resident.value())
             }
+            "thread_activity" => {
+                jobs.thread_activity(owner, request["id"].as_str().ok_or("thread id required")?)
+            }
             "list" => Ok(serde_json::to_value(jobs.list(owner))?),
             "transcript_import" => Ok(serde_json::to_value(
                 jobs.import_transcript(owner, serde_json::from_value(request["spec"].clone())?)?,

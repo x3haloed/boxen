@@ -120,10 +120,37 @@ fn intake(s: &Store, cfg: &Config, api: &impl Boxen) -> Result<()> {
             let Some(body) = m["body"].as_str() else {
                 continue;
             };
-            let Ok(report) = serde_json::from_str::<Value>(body) else {
-                continue;
-            };
+            let report = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
             if report["protocol"] != "boxen.work-report.v1" {
+                // Ordinary attributed progress stays correspondence, never a decision/report.
+                // Forwarding it prevents access questions disappearing into a service inbox.
+                if let (Some(mid), Some(reply), Some(coder)) = (
+                    m["id"].as_str(),
+                    m["in_reply_to"].as_str(),
+                    m["sender"]["id"].as_str(),
+                ) {
+                    let watch: Option<(String, i64, String)> = tx.query_row(
+                        "SELECT s.job,s.version,s.settings FROM supervision s JOIN work w ON w.id=s.job AND w.version=s.version AND w.coder=s.coder WHERE s.coder=?1 AND (s.message=?2 OR s.followup=?2)",
+                        params![coder, reply], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    ).optional()?;
+                    if let Some((job, version, settings)) = watch
+                        && m["sender"] == json!({"type":"resident","id":coder})
+                        && m["owner"] == cfg.owner
+                        && m["to"]
+                            == json!({"type":"client","machine":cfg.owner,"id":cfg.client_id})
+                    {
+                        let settings: Settings = serde_json::from_str(&settings)?;
+                        notify(
+                            &tx,
+                            cfg,
+                            &job,
+                            version,
+                            &settings,
+                            &format!("progress:{mid}"),
+                            json!({"message_id":mid,"sender":m["sender"],"in_reply_to":reply,"subject":m["subject"],"body":body,"meaning":"Attributed worker correspondence; no completion, approval or operator action is inferred"}),
+                        )?;
+                    }
+                }
                 continue;
             }
             let mid = m["id"].as_str().context("Report message ID missing")?;

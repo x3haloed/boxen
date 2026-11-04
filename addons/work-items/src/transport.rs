@@ -112,7 +112,7 @@ pub fn dispatch(s: &Store, cfg: &Config, api: &impl Boxen, job: &str) -> Result<
         [job],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
-    if state != "reserved" {
+    if state != "reserved" || !crate::workflow::dispatch_ready(s, job, version)? {
         return Ok(());
     }
     let (digest, packet, instantiate, message): (String, String, String, String) = c.query_row(
@@ -120,6 +120,17 @@ pub fn dispatch(s: &Store, cfg: &Config, api: &impl Boxen, job: &str) -> Result<
         params![job, version],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
+    let frozen: Value = serde_json::from_str(&packet)?;
+    let expected: String = c.query_row(
+        "SELECT claims FROM assignments WHERE job=?1 AND version=?2",
+        params![job, version],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        crate::resource_claims(&frozen["assignment"], false)?
+            == serde_json::from_str::<Vec<String>>(&expected)?,
+        "Prepared worktree/resource identity differs from accepted allocation"
+    );
     let latest = packet_on(&c, &source, item)?;
     if latest["source_digest"] != digest
         || !crate::assignment_eligible(
@@ -248,18 +259,11 @@ pub fn continue_assignment(
             && input["continuation"]["expected_coder"] == coder,
         "Continuation owner/version changed"
     );
-    let runs = api.call(json!({"op":"list"}))?;
-    for run in runs.as_array().context("Boxen run catalog unavailable")? {
-        if run["record"]["spec"]["thread_id"] == coder {
-            ensure!(
-                matches!(
-                    run["status"].as_str(),
-                    Some("completed" | "failed" | "interrupted" | "cancelled")
-                ),
-                "Continuation waits for idle coder execution; resources remain held"
-            );
-        }
-    }
+    let activity = api.call(json!({"op":"thread_activity","id":coder}))?;
+    ensure!(
+        activity["thread_id"] == coder && activity["idle"] == true,
+        "Continuation waits for idle coder execution; resources remain held"
+    );
     let message: String = c.query_row(
         "SELECT message FROM assignments WHERE job=?1 AND version=?2",
         params![job, version],
@@ -331,19 +335,12 @@ pub(crate) fn release_with_basis(
         basis.1.is_none_or(|expected| expected == version),
         "Assignment changed before automatic release"
     );
-    let runs = api.call(json!({"op":"list"}))?;
-    for r in runs.as_array().context("Boxen run catalog unavailable")? {
-        if r["record"]["spec"]["thread_id"] == coder {
-            ensure!(
-                matches!(
-                    r["status"].as_str(),
-                    Some("completed" | "failed" | "interrupted" | "cancelled")
-                ),
-                "Coder still has active execution; resources remain held"
-            );
-        }
-    }
-    // An idle run catalog alone does not prove accepted mail cannot start later.
+    let activity = api.call(json!({"op":"thread_activity","id":coder}))?;
+    ensure!(
+        activity["thread_id"] == coder && activity["idle"] == true,
+        "Coder still has active execution; resources remain held"
+    );
+    // An idle activity snapshot alone does not prove accepted mail cannot start later.
     // A queued assignment is retained until it is presented/reconciled.
     let message: String = c.query_row(
         "SELECT message FROM assignments WHERE job=?1 AND version=?2",
