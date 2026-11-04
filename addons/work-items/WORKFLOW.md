@@ -99,7 +99,11 @@ The trusted project adapter uses absolute `driver` and `driver_script` paths,
 `driver_args`, and the script's UTF-8 SHA-256 `driver_hash`. Project configuration
 includes the repository identity/origin/target, matching Azure organization/project,
 workspace/evidence roots, runtime allocation recipe, persistent browser profile and
-configured decision-author identity IDs. Credentials stay in their normal CLI/OS
+configured decision-author identity IDs. Optional `project.browser_workflow` text
+is frozen into each new assignment's `task.browser_workflow`; this supports a
+project-approved native browser fallback when the connector host is unavailable.
+It does not repair the connector or grant additional browser/account access.
+Credentials stay in their normal CLI/OS
 stores, outside requests, profiles and logs. Deployment identities, real names and
 local environment values belong in private configuration, not this public repo.
 

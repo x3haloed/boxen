@@ -1180,7 +1180,9 @@ fn workflow_step(
 }
 #[test]
 fn automatic_loop_returns_findings_to_same_coder_and_publishes_exact_full_pr() {
-    let (f, api, settings, mut driver) = workflow_fixture(true);
+    let (f, api, mut settings, mut driver) = workflow_fixture(true);
+    settings.project["browser_workflow"] =
+        json!("Assigned browser profile with native computer access");
     for _ in 0..35 {
         workflow_step(&f, &api, &settings, &mut driver);
     }
@@ -1194,6 +1196,13 @@ fn automatic_loop_returns_findings_to_same_coder_and_publishes_exact_full_pr() {
             })
             .unwrap();
     assert_eq!((version, held), (2, 0));
+    let retained: Vec<String> = f.s.connect().unwrap().prepare(
+        "SELECT json_extract(input,'$.assignment.task.browser_workflow') FROM assignments ORDER BY version"
+    ).unwrap().query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(
+        retained,
+        vec!["Assigned browser profile with native computer access"; 2]
+    );
     let actors = api.actors.lock().unwrap();
     assert_eq!(
         actors
