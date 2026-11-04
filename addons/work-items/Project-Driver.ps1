@@ -53,7 +53,14 @@ function Inspect-Candidate {
 }
 function Repo-Identity {
     $repo=Azure @('repos','show','--repository',$project.repository_id,'--project',$project.azure_project)
-    if($repo.id -cne $project.repository_id -or $repo.remoteUrl -cne $project.remote_url){throw 'Azure repository identity differs'}
+    # Azure may include an organization username in its HTTPS clone URL while Git
+    # uses the same URL without userinfo. Compare the complete remaining URI and
+    # exact repository ID; passwords and changes to host/path/query remain invalid.
+    $actual=[UriBuilder]::new([string]$repo.remoteUrl)
+    $expected=[Uri]::new([string]$project.remote_url)
+    if($actual.Scheme -ne 'https' -or $expected.Scheme -ne 'https' -or $actual.Password){throw 'Azure repository URL is invalid'}
+    $actual.UserName=''
+    if($repo.id -cne $project.repository_id -or $actual.Uri.AbsoluteUri -cne $expected.AbsoluteUri){throw 'Azure repository identity differs'}
 }
 function Sql([string]$query) {
     $sqlProgram=if($project.sqlcmd_executable){$project.sqlcmd_executable}else{'sqlcmd'}
