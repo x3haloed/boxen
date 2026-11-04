@@ -1177,6 +1177,13 @@ fn advance(
             if let Some(browser) = settings.project["browser_workflow"].as_str() {
                 assigned["task"]["browser_workflow"] = json!(browser);
             }
+            if let Some(policy) = approvals::Policy::load(s)?.filter(|p| p.enabled) {
+                assigned["runtime"]["browser_launch_command"] =
+                    json!(approvals::launch_script(&policy, &assigned)?);
+                assigned["task"]["browser_approval"] = json!(
+                    "The exact runtime.browser_launch_command, executed in the assigned worktree using the configured shell, is eligible for a one-time Boxen approval while this current assignment holds its browser reservation. Codex uses on-request with Full Access. Unmatched approval requests remain pending for manual review; they do not imply a rejected launch or completed validation. A changed/compound launch is outside this rule."
+                );
+            }
             let mut input = json!({"item":a.item,"source_digest":a.digest,"new_copy":existing.is_none(),"idempotency_key":allocation_key(a),"context":{"decision":if existing.is_some(){"return_to_coder"}else{"new_implementation"},"workflow_id":a.id,"operator_resume":a.data["operator_resume"],"authority":settings.authority,"authoritative_answers":a.data["authoritative_answers"],"evidence":[a.data["interpretation_request"]],"interpretation":a.data["interpretation"]},"legacy_reconciliation":a.data["interpretation"].to_string(),"assignment":assigned});
             if let Some((_, coder, _, _)) = existing {
                 input["coder_id"] = json!(coder);

@@ -14,6 +14,9 @@ Absent that configuration, polling never creates an assignment. Incoming mail is
 never parsed into local operator commands. Direct coder delivery flags stay false;
 the configured workflow owns a separate retained publication grant and readback.
 Merge, deployment, policy bypass and autocomplete are outside the workflow.
+The optional [assigned-browser approval policy](APPROVALS.md) can answer exact
+lease-bound Codex browser-launch requests through the existing Boxen control API.
+Unmatched requests retain normal manual review.
 
 ## Configuration and installation
 

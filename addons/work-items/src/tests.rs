@@ -1509,3 +1509,216 @@ fn uncertain_clarification_comment_creation_reconciles_without_duplicate() {
     assert_eq!(state, "posted");
     assert!(api.actors.lock().unwrap().is_empty());
 }
+
+struct ApprovalApi {
+    snapshot: Value,
+    controls: Mutex<Vec<Value>>,
+    lose: bool,
+}
+impl Boxen for ApprovalApi {
+    fn call(&self, r: Value) -> Result<Value> {
+        match r["op"].as_str().unwrap_or("") {
+            "get" => Ok(self.snapshot.clone()),
+            "control" => {
+                self.controls.lock().unwrap().push(r);
+                if self.lose {
+                    bail!("Lost control response")
+                }
+                Ok(json!({"accepted":true}))
+            }
+            _ => bail!("Unexpected approval fixture operation"),
+        }
+    }
+}
+fn approval_fixture() -> (Fixture, ApprovalApi, PathBuf, Vec<Value>, Value) {
+    let mut f = Fixture::new();
+    fs::create_dir_all(&f.cfg.pack_root).unwrap();
+    f.cfg.supervision = Some(supervision::Settings {
+        notify_to: json!({"type":"client","machine":f.cfg.owner,"id":hash("observer")}),
+        start_timeout_seconds: 30,
+        inactivity_seconds: 60,
+        report_grace_seconds: 10,
+    });
+    let browser = f.root.join("msedge.exe");
+    let shell = f.root.join("powershell.exe");
+    let profile = f.root.join("browser");
+    fs::write(&browser, "native fixture, never executed").unwrap();
+    fs::write(&shell, "never executed").unwrap();
+    fs::create_dir_all(&profile).unwrap();
+    let policy = approvals::Policy {
+        enabled: true,
+        rule_id: "assigned-browser".into(),
+        revision: 1,
+        authority: "Explicit operator policy fixture".into(),
+        browser_executable: browser,
+        shells: vec![shell.clone()],
+    };
+    fs::write(
+        f.root.join("approval-policy.json"),
+        serde_json::to_vec(&policy).unwrap(),
+    )
+    .unwrap();
+    let mut input = f.input(1);
+    input["assignment"]["runtime"] = json!({"required":true,"reservation_id":"fixture","allocation_source":"Fixture allocation","frontend_port":4500,"backend_port":4501,"database_server":"local","database_name":"synthetic","browser_context":profile,"synthetic_tenant_id":100});
+    let script = approvals::launch_script(&policy, &input["assignment"]).unwrap();
+    let command = shlex::try_join([shell.to_str().unwrap(), "-Command", script.as_str()]).unwrap();
+    let fake = Fake::new(&f.cfg);
+    let result = f.s.assign(&f.cfg, &input).unwrap();
+    f.s.reserve(1).unwrap();
+    dispatch(&f.s, &f.cfg, &fake, result["job_id"].as_str().unwrap()).unwrap();
+    let run = hash("approval run");
+    f.s.connect()
+        .unwrap()
+        .execute("UPDATE supervision SET run=?1", [&run])
+        .unwrap();
+    let request = json!({"id":"approval-1","method":"item/commandExecution/requestApproval","params":{"threadId":"native-fixture","turnId":"turn-fixture","itemId":"item-fixture","command":command,"cwd":input["assignment"]["worktree"]}});
+    let events = vec![
+        json!({"kind":"backend","data":{"method":"turn/started","params":{"turn":{"id":"turn-fixture"}}}}),
+        json!({"kind":"backend","data":{"method":"item/started","params":{"item":{"id":"item-fixture","type":"commandExecution","command":command}}}}),
+        json!({"kind":"backend","data":request}),
+    ];
+    let folder = f.cfg.boxen_home.join("runs").join(&run);
+    fs::create_dir_all(&folder).unwrap();
+    let journal = folder.join("events.jsonl");
+    write_approval_events(&journal, &events);
+    let snapshot = json!({"status":"waiting","backend_thread":"native-fixture","record":{"owner":f.cfg.owner,"spec":{"id":run,"thread_id":result["coder_id"]}}});
+    (
+        f,
+        ApprovalApi {
+            snapshot,
+            controls: Mutex::new(vec![]),
+            lose: false,
+        },
+        journal,
+        events,
+        input,
+    )
+}
+fn write_approval_events(path: &Path, events: &[Value]) {
+    fs::write(
+        path,
+        events.iter().map(|v| format!("{v}\n")).collect::<String>(),
+    )
+    .unwrap();
+}
+#[test]
+fn assigned_browser_approval_is_once_bound_to_current_lease_and_restart_safe() {
+    let (f, api, _, _, _) = approval_fixture();
+    approvals::tick(&f.s, &f.cfg, &api).unwrap();
+    assert_eq!(api.controls.lock().unwrap().len(), 1);
+    let control = api.controls.lock().unwrap()[0].clone();
+    assert_eq!(control["action"]["result"], json!({"decision":"accept"}));
+    approvals::tick(&Store::open(&f.s.path).unwrap(), &f.cfg, &api).unwrap();
+    assert_eq!(api.controls.lock().unwrap().len(), 1);
+    assert_eq!(
+        approvals::snapshot(&f.s).unwrap()["decisions"][0]["state"],
+        "submitted"
+    );
+}
+#[test]
+fn unknown_approval_control_outcome_is_not_resubmitted() {
+    let (f, mut api, _, _, _) = approval_fixture();
+    api.lose = true;
+    approvals::tick(&f.s, &f.cfg, &api).unwrap();
+    approvals::tick(&f.s, &f.cfg, &api).unwrap();
+    assert_eq!(api.controls.lock().unwrap().len(), 1);
+    assert_eq!(
+        approvals::snapshot(&f.s).unwrap()["decisions"][0]["state"],
+        "uncertain"
+    );
+}
+#[test]
+fn browser_policy_does_not_approve_changed_commands_scope_or_permissions() {
+    for case in [
+        "compound",
+        "profile",
+        "url",
+        "executable",
+        "shell",
+        "turn",
+        "thread",
+        "cwd",
+        "permissions",
+        "method",
+        "manual",
+    ] {
+        let (f, api, journal, mut events, _) = approval_fixture();
+        match case {
+            "turn"=>events[2]["data"]["params"]["turnId"]=json!("other-turn"),
+            "thread"=>events[2]["data"]["params"]["threadId"]=json!("other-thread"),
+            "cwd"=>events[2]["data"]["params"]["cwd"]=json!(f.root),
+            "permissions"=>events[2]["data"]["params"]["additionalPermissions"]=json!({"network":{"enabled":true}}),
+            "method"=>events[2]["data"]["method"]=json!("item/permissions/requestApproval"),
+            "manual"=>events.push(json!({"kind":"control","data":{"type":"respond","request_id":"approval-1","result":{"decision":"decline"}}})),
+            _=>{
+                let command=events[2]["data"]["params"]["command"].as_str().unwrap();let mut words=shlex::split(command).unwrap();
+                let last=words.len()-1;
+                match case {
+                    "compound"=>words[last].push_str("; Write-Output additional-effect"),
+                    "profile"=>words[last]=words[last].replace("browser","different-profile"),
+                    "url"=>words[last]=words[last].replace("localhost:4500","example.invalid:4500"),
+                    "executable"=>words[last]=words[last].replace("msedge.exe","another.exe"),
+                    "shell"=>words[0]=f.root.join("different.exe").to_string_lossy().into_owned(),
+                    _=>unreachable!()
+                }
+                let changed=shlex::try_join(words.iter().map(String::as_str)).unwrap();events[2]["data"]["params"]["command"]=json!(changed);events[1]["data"]["params"]["item"]["command"]=json!(changed);
+            }
+        }
+        write_approval_events(&journal, &events);
+        approvals::tick(&f.s, &f.cfg, &api).unwrap();
+        assert!(api.controls.lock().unwrap().is_empty(), "{case}");
+    }
+}
+#[test]
+fn lost_or_paused_browser_reservations_cannot_auto_approve() {
+    for state in [
+        "paused",
+        "needs_refresh",
+        "changed-version",
+        "missing-reservation",
+        "disabled",
+    ] {
+        let (f, api, _, _, _) = approval_fixture();
+        let c = f.s.connect().unwrap();
+        match state {
+            "changed-version" => {
+                c.execute("UPDATE work SET version=2", []).unwrap();
+            }
+            "missing-reservation" => {
+                c.execute(
+                    "DELETE FROM reservations WHERE resource LIKE 'browser:%'",
+                    [],
+                )
+                .unwrap();
+            }
+            "disabled" => {
+                let p = f.root.join("approval-policy.json");
+                let mut v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+                v["enabled"] = json!(false);
+                fs::write(p, v.to_string()).unwrap();
+            }
+            _ => {
+                c.execute("UPDATE work SET state=?1", [state]).unwrap();
+            }
+        }
+        approvals::tick(&f.s, &f.cfg, &api).unwrap();
+        assert!(api.controls.lock().unwrap().is_empty(), "{state}");
+    }
+}
+#[test]
+fn partial_approval_journal_record_waits_for_completion() {
+    use std::io::Write;
+    let (f, api, journal, events, _) = approval_fixture();
+    let text = events.iter().map(|v| format!("{v}\n")).collect::<String>();
+    fs::write(&journal, &text[..text.len() - 1]).unwrap();
+    approvals::tick(&f.s, &f.cfg, &api).unwrap();
+    assert!(api.controls.lock().unwrap().is_empty());
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&journal)
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    approvals::tick(&f.s, &f.cfg, &api).unwrap();
+    assert_eq!(api.controls.lock().unwrap().len(), 1);
+}

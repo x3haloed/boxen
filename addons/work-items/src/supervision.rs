@@ -76,7 +76,7 @@ fn enqueue(
     c.execute("INSERT OR IGNORE INTO supervision_outbox(id,job,version,purpose,request) VALUES(?1,?2,?3,?4,?5)",params![mid,job,version,purpose,request.to_string()])?;
     Ok(())
 }
-fn notify(
+pub(crate) fn notify(
     c: &Connection,
     cfg: &Config,
     job: &str,
@@ -573,6 +573,36 @@ pub fn tick(s: &Store, cfg: &Config, api: &impl Boxen, at: i64) -> Result<()> {
                 "observation_unavailable",
                 json!({"reason":e.to_string(),"meaning":"Outcome unknown; no implementation retry"}),
             )?;
+        }
+    }
+    let policy_error = crate::approvals::tick(s, cfg, api)
+        .err()
+        .map(|e| e.to_string());
+    let old_error: Option<String> = c
+        .query_row(
+            "SELECT v FROM meta WHERE k='approval:health_error'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if policy_error != old_error {
+        if let Some(error) = &policy_error {
+            event("approval.policy_error", json!({"detail":error}));
+            if let Some(settings) = &cfg.supervision {
+                notify(
+                    &c,
+                    cfg,
+                    &hash("approval-policy"),
+                    0,
+                    settings,
+                    &format!("approval_policy_error:{}", &hash(error)[..12]),
+                    json!({"reason":error,"meaning":"Automatic approvals are unavailable for the affected evaluation; retained requests remain available for manual review"}),
+                )?;
+            }
+            c.execute("INSERT INTO meta VALUES('approval:health_error',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[error])?;
+        } else {
+            event("approval.policy_recovered", json!({}));
+            c.execute("DELETE FROM meta WHERE k='approval:health_error'", [])?;
         }
     }
     flush(s, cfg, api, at)

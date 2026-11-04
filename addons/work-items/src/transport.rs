@@ -2,7 +2,7 @@ use crate::*;
 use fs2::FileExt;
 use std::io::Write;
 
-fn job_lock(s: &Store, job: &str) -> Result<fs::File> {
+pub(crate) fn job_lock(s: &Store, job: &str) -> Result<fs::File> {
     key(job)?;
     let folder = s.path.parent().unwrap().join("locks");
     fs::create_dir_all(&folder)?;

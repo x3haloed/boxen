@@ -13,7 +13,7 @@ def port():
     with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
 def digest(s):return hashlib.sha256(s.encode()).hexdigest()
 with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
-    root=pathlib.Path(tmp);home=root/'workflow';legacy_home=root/'legacy';boxen_home=root/'boxen';pack=root/'pack';pack.mkdir();(pack/'scripts').mkdir()
+    root=pathlib.Path(tmp).resolve();home=root/'workflow';legacy_home=root/'legacy';boxen_home=root/'boxen';pack=root/'pack';pack.mkdir();(pack/'scripts').mkdir()
     worker=None;daemon=None;peer_port=port();ui=port()
     fixture=root/'fake-codex.py'
     fixture_source=(repo/'tests/fake-codex.py').read_text().replace('m["body"].startswith("REPLY")','(m["body"].startswith("[Work-item service") or m["body"].startswith("The observed assignment")) and "SIMULATE_MISSING_HANDOFF" not in m["body"]')
@@ -23,6 +23,15 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
                 report["cleanup"]["no_owned_runtime_resources"]=True
                 send["body"]=json.dumps(report)
             response, sent=invoke("boxen_send_message",send,11)''')
+    fixture_source='import base64,re\n'+fixture_source
+    browser_command_marker='    notification("item/started", {"item": {"id": "command",'
+    assert fixture_source.count(browser_command_marker)==1
+    fixture_source=fixture_source.replace(browser_command_marker,'''    browser_marker=re.search(r'BOXEN_BROWSER_APPROVAL_FIXTURE:([A-Za-z0-9+/=]+)',prompt)
+    browser_fixture=json.loads(base64.b64decode(browser_marker.group(1))) if browser_marker else {"command":"fixture command","cwd":""}
+    command_for_approval=browser_fixture["command"]
+'''+browser_command_marker)
+    fixture_source=fixture_source.replace('"command": "fixture command"','"command": command_for_approval')
+    fixture_source=fixture_source.replace('"itemId": "command"}})', '"itemId": "command", "cwd":browser_fixture["cwd"]}})')
     fixture.write_text(fixture_source,encoding='utf-8')
     wrapper=root/'codex.cmd';wrapper.write_text('@echo off\n"'+sys.executable+'" "'+str(fixture)+'" %*\n');codex=wrapper if os.name=='nt' else fixture
     if os.name!='nt':fixture.chmod(0o755)
@@ -51,7 +60,15 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
             value=predicate()
             if value:return value
             time.sleep(.2)
-        raise AssertionError('Timed out waiting for workflow condition')
+        evidence=repo/'work'/'approval-smoke-failure';evidence.mkdir(parents=True,exist_ok=True)
+        (evidence/'fake-codex.py').write_bytes(fixture.read_bytes())
+        runs=api({'op':'list'});(evidence/'runs.json').write_text(json.dumps(runs),encoding='utf-8')
+        with sqlite3.connect(home/'work-items.sqlite3') as source_db, sqlite3.connect(evidence/'service.sqlite3') as target_db:source_db.backup(target_db)
+        for run in runs:
+            ident=run['record']['spec']['id'];journal=boxen_home/'runs'/ident/'events.jsonl'
+            if journal.exists():(evidence/(ident+'.jsonl')).write_bytes(journal.read_bytes())
+        print('Failure statuses:',[(r['status'],r.get('detail')) for r in runs])
+        raise AssertionError('Timed out waiting for workflow condition; synthetic evidence in '+str(evidence))
     def state(job):
         with database(home/'work-items.sqlite3') as c:return c.execute('select state from work where id=?',(job,)).fetchone()[0]
     def idle():return all(r['status'] in ('completed','failed','interrupted','cancelled') for r in api({'op':'list'}))
@@ -147,6 +164,30 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
         command('supervise','--test-notification','controlled-route-proof')
         notices=api({'op':'client_inbox','client_id':observer,'after':0})['messages']
         assert sum(json.loads(m['body'])['condition']=='delivery_test' for m in notices)==1
+        # Real retained request/control round trip with a controlled backend. No browser starts.
+        import base64,shlex
+        browser=root/'msedge.exe';browser.write_text('fixture only')
+        shell=root/'powershell.exe';shell.write_text('fixture only')
+        profile=root/'browser-profile';profile.mkdir()
+        policy={'enabled':True,'rule_id':'assigned-browser','revision':1,'authority':'Explicit synthetic fixture authority','browser_executable':str(browser),'shells':[str(shell)]}
+        (home/'approval-policy.json').write_text(json.dumps(policy),encoding='utf-8')
+        browser_input=assignment(1,'browser-approval-roundtrip',False)
+        script=f"Start-Process -FilePath '{browser}' -ArgumentList '--user-data-dir=\"{profile}\"','--no-first-run','http://localhost:4500/?clientId=100' -WindowStyle Normal"
+        wire=shlex.join([str(shell),'-Command',script])
+        marker=base64.b64encode(json.dumps({'command':wire,'cwd':browser_input['assignment']['worktree']}).encode()).decode()
+        browser_input['assignment']['task']['request']='BOXEN_BROWSER_APPROVAL_FIXTURE:'+marker
+        browser_input['assignment']['runtime']={'required':True,'reservation_id':'fixture-browser','allocation_source':'Controlled fixture allocation','frontend_port':4500,'backend_port':4501,'database_server':'fixture','database_name':'synthetic','browser_context':str(profile),'synthetic_tenant_id':100}
+        command('assign','--request-file',request_file('browser-approval',browser_input))
+        start_worker()
+        wait(lambda:any(d['state']=='submitted' for d in json.loads(command('approvals').stdout)['decisions']))
+        wait(idle)
+        decisions=json.loads(command('approvals').stdout)['decisions'];assert len(decisions)==1,decisions
+        runs=api({'op':'list'});run=next(r for r in runs if r['record']['spec']['id']==decisions[0]['run'])
+        events=[json.loads(x) for x in (boxen_home/'runs'/run['record']['spec']['id']/'events.jsonl').read_text().splitlines()]
+        answered=[e for e in events if e['kind']=='request_answered' and e['data']['request_id']=='approval-1'];assert len(answered)==1,answered
+        stop(worker);start_worker();time.sleep(2.5);assert len(json.loads(command('approvals').stdout)['decisions'])==1
+        assert len(api({'op':'list'}))==len(runs),'Approval recovery replayed inference'
+        print('PASS assigned-browser one-time approval through real Boxen retained requests/control, restart without approval or inference replay')
         print('PASS real Boxen create/send/activation/reply, durable migration, exact retries, restart without replay, capacity queue/release, same-coder continuation with retained reservations, explicit owner transfer, immutable packets, supervised handoffs, one report-only recovery, durable notifications and private final isolation')
     finally:
         stop(worker);stop(daemon)

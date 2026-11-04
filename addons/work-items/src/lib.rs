@@ -1,4 +1,5 @@
 pub mod ado;
+pub mod approvals;
 pub mod process;
 pub mod supervision;
 #[cfg(test)]
@@ -127,6 +128,7 @@ impl Store {
         ado::migrate(&c)?;
         supervision::migrate(&c)?;
         workflow::migrate(&c)?;
+        approvals::migrate(&c)?;
         Ok(s)
     }
     pub fn connect(&self) -> Result<Connection> {
@@ -688,7 +690,7 @@ impl Store {
         let c = self.connect()?;
         let jobs=c.prepare("SELECT id,item,coder,state,version,holds_slot,error FROM work ORDER BY created DESC LIMIT 200")?.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"item":r.get::<_,i64>(1)?,"coder":r.get::<_,String>(2)?,"state":r.get::<_,String>(3)?,"version":r.get::<_,i64>(4)?,"holds_slot":r.get::<_,bool>(5)?,"error":r.get::<_,Option<String>>(6)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(
-            json!({"mirror":ado::snapshot(self,0)?,"jobs":jobs,"supervision":supervision::snapshot(self)?,"automatic_assignment":workflow::Settings::read(self)?.is_some_and(|v|v.enabled),"publication_enabled":workflow::Settings::read(self)?.is_some_and(|v|v.enabled&&v.publication),"workflow":workflow::snapshot(self)?}),
+            json!({"mirror":ado::snapshot(self,0)?,"jobs":jobs,"supervision":supervision::snapshot(self)?,"automatic_assignment":workflow::Settings::read(self)?.is_some_and(|v|v.enabled),"publication_enabled":workflow::Settings::read(self)?.is_some_and(|v|v.enabled&&v.publication),"workflow":workflow::snapshot(self)?,"approvals":approvals::snapshot(self)?}),
         )
     }
 }
