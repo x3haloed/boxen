@@ -1219,6 +1219,23 @@ fn operator_resume_keeps_coder_versions_assignment_and_deduplicates_after_dispat
     wrong["expected_version"] = json!(2);
     assert!(workflow::resume(&f.s, &api, &wrong).is_err());
     let receipt = workflow::resume(&f.s, &api, &request).unwrap();
+    for _ in 0..10 {
+        workflow_step(&f, &api, &settings, &mut driver);
+        if workflow::snapshot(&f.s).unwrap()["attempts"][0]["stage"] == "coding" {
+            break;
+        }
+    }
+    c.execute("UPDATE supervision SET report=json_set(report,'$.outcome','blocked','$.summary','A different blocked result') WHERE version=2",[]).unwrap();
+    for _ in 0..3 {
+        workflow_step(&f, &api, &settings, &mut driver);
+    }
+    let blocked = workflow::snapshot(&f.s).unwrap();
+    assert_eq!(blocked["attempts"][0]["stage"], "held");
+    assert!(blocked["attempts"][0]["error"].is_null(), "{blocked}");
+    let mut third = request.clone();
+    third["idempotency_key"] = json!("resume-second-blocker");
+    third["expected_version"] = json!(2);
+    workflow::resume(&f.s, &api, &third).unwrap();
     for _ in 0..25 {
         workflow_step(&f, &api, &settings, &mut driver);
     }
@@ -1235,7 +1252,7 @@ fn operator_resume_keeps_coder_versions_assignment_and_deduplicates_after_dispat
             Ok((r.get(0)?, r.get(1)?))
         })
         .unwrap();
-    assert_eq!(state, (coder, 2));
+    assert_eq!(state, (coder, 3));
     assert_eq!(
         api.actors
             .lock()

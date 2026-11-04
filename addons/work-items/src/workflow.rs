@@ -135,12 +135,17 @@ fn enqueue(
     to: Value,
     body: Value,
 ) -> Result<String> {
-    let mid = hash(&format!(
+    let mut identity = format!(
         "workflow:{}:{role}:{}:{}",
         a.id,
         body["reviewed_commit"].as_str().unwrap_or(""),
         body["review_round"]
-    ));
+    );
+    if role.starts_with("notice:") {
+        // Different version/outcome notices coexist; exact notice retries reuse their ID.
+        identity.push_str(&format!(":{}", hash(&body.to_string())));
+    }
+    let mid = hash(&identity);
     let text = if body.is_object() {
         let mut request = body;
         request["request_id"] = json!(mid);
