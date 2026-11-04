@@ -458,6 +458,28 @@ fn returned_work_references_full_prior_delivery_without_recursive_mail_growth() 
 }
 
 #[test]
+fn failed_project_operation_exposes_retained_structured_cause_without_claiming_success() {
+    let f = Fixture::new();
+    let path = f.root.join("driver-result.json");
+    fs::write(
+        &path,
+        json!({"ok":false,"error":"Repository identity differs"}).to_string(),
+    )
+    .unwrap();
+    let error = workflow::driver_reply("push", &path, false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Repository identity differs") && error.contains("driver-result.json"));
+    assert!(workflow::driver_reply("push", &path, true).is_err());
+    fs::write(&path, json!({"ok":true,"commit":"synthetic"}).to_string()).unwrap();
+    assert!(workflow::driver_reply("push", &path, false).is_err());
+    assert_eq!(
+        workflow::driver_reply("push", &path, true).unwrap()["commit"],
+        "synthetic"
+    );
+}
+
+#[test]
 fn investigation_preserves_open_questions_and_existing_owner_without_fake_answers() {
     let f = Fixture::new();
     let source = ado::config(&f.s).unwrap().source();

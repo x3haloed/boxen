@@ -62,6 +62,21 @@ function Repo-Identity {
     $actual.UserName=''
     if($repo.id -cne $project.repository_id -or $actual.Uri.AbsoluteUri -cne $expected.AbsoluteUri){throw 'Azure repository identity differs'}
 }
+function Publication-Branch($assignment) {
+    # A returned assignment may have a new local branch while its previous PR is
+    # still active. Update that exact reviewed work instead of opening a duplicate.
+    $previous=[string]$assignment.previous_branch
+    if(!$previous -or $previous -ceq $assignment.branch){return [string]$assignment.branch}
+    if($previous -notmatch '^[a-zA-Z0-9/_-]+$'){throw 'Previous publication branch is invalid'}
+    $activePullRequests=@(Azure @('repos','pr','list','--repository',$project.repository_id,'--project',$project.azure_project,'--source-branch',$previous,'--target-branch',$assignment.target_ref,'--status','active'))
+    if($activePullRequests.Count -eq 0){return [string]$assignment.branch}
+    if($activePullRequests.Count -ne 1){throw 'Previous branch has ambiguous active PRs'}
+    $pr=Azure @('repos','pr','show','--id',([string]$activePullRequests[0].pullRequestId))
+    $items=@(Azure @('repos','pr','work-item','list','--id',([string]$pr.pullRequestId)))
+    if($pr.status -ne 'active' -or $pr.repository.id -cne $project.repository_id -or $pr.sourceRefName -cne ('refs/heads/'+$previous) -or $pr.targetRefName -cne ('refs/heads/'+$assignment.target_ref) -or !($items | Where-Object {[string]$_.id -eq [string]$assignment.work_item.id})){throw 'Previous PR publication binding differs'}
+    if($pr.isDraft -or $pr.autoCompleteSetBy){throw 'Previous PR is draft or has autocomplete enabled'}
+    return $previous
+}
 function Sql([string]$query) {
     $sqlProgram=if($project.sqlcmd_executable){$project.sqlcmd_executable}else{'sqlcmd'}
     $text=& $sqlProgram -S $project.database_server -E -d master -b -h -1 -W -Q ('SET NOCOUNT ON; '+$query) 2>$null
@@ -133,21 +148,25 @@ try {
             $inspection=Inspect-Candidate
             if(!$inspection.ready){throw 'Target moved after candidate validation/review'}
             Repo-Identity
+            $publicationBranch=Publication-Branch $a
             # Plain push has server-side fast-forward protection; no force option is present.
-            Invoke-Git $a.worktree @('push','origin',($request.candidate.commit+':refs/heads/'+$a.branch)) | Out-Null
-            $remote=Invoke-Git $a.worktree @('ls-remote','origin',('refs/heads/'+$a.branch))
+            Invoke-Git $a.worktree @('push','origin',($request.candidate.commit+':refs/heads/'+$publicationBranch)) | Out-Null
+            $remote=Invoke-Git $a.worktree @('ls-remote','origin',('refs/heads/'+$publicationBranch))
             if(($remote -split '\s+')[0] -cne $request.candidate.commit){throw 'Remote candidate readback differs'}
             @{ok=$true;commit=$request.candidate.commit}
         }
         'find_pr' {
             $a=Assigned;Repo-Identity
-            $prs=@(Azure @('repos','pr','list','--repository',$project.repository_id,'--project',$project.azure_project,'--source-branch',$a.branch,'--target-branch',$a.target_ref,'--status','all'))
+            $publicationBranch=Publication-Branch $a
+            $prs=@(Azure @('repos','pr','list','--repository',$project.repository_id,'--project',$project.azure_project,'--source-branch',$publicationBranch,'--target-branch',$a.target_ref,'--status','all'))
             @{ok=$true;prs=@($prs | ForEach-Object {@{id=$_.pullRequestId;status=$_.status;is_draft=$_.isDraft}})}
         }
         'create_pr' {
             $a=Assigned;$inspection=Inspect-Candidate
             if(!$inspection.ready){throw 'Target moved before PR creation'}
             Repo-Identity
+            $publicationBranch=Publication-Branch $a
+            if($publicationBranch -cne $a.branch){throw 'Existing active PR must be reconciled instead of creating a duplicate'}
             $scenarios=($request.interpretation.scenarios | ForEach-Object {'- '+$_.action+': '+$_.expected_result}) -join "`n"
             $checks=($request.candidate.validation.acceptance | ForEach-Object {'- '+$_.id+': '+$_.status}) -join "`n"
             $description=$request.interpretation.intended_outcome+"`n`nVerified scenarios:`n"+$scenarios+"`n`nValidation:`n"+$checks+"`n`n"+$request.candidate.summary+"`n`nExact-commit context and independent technical reviews passed. Real local application/database/browser validation is reported in the candidate evidence. Unverified gaps: "+($request.candidate.validation.unverified_gaps | ConvertTo-Json -Compress -Depth 8)+"`n`nAB#"+$a.work_item.id
@@ -183,9 +202,10 @@ try {
         }
         'verify_pr' {
             $a=Assigned;Repo-Identity
+            $publicationBranch=Publication-Branch $a
             $pr=Azure @('repos','pr','show','--id',([string]$request.id))
             $items=@(Azure @('repos','pr','work-item','list','--id',([string]$request.id)))
-            if($pr.repository.id -cne $project.repository_id -or $pr.sourceRefName -cne ('refs/heads/'+$a.branch) -or $pr.targetRefName -cne ('refs/heads/'+$a.target_ref)){throw 'PR identity/source/target readback differs'}
+            if($pr.repository.id -cne $project.repository_id -or $pr.sourceRefName -cne ('refs/heads/'+$publicationBranch) -or $pr.targetRefName -cne ('refs/heads/'+$a.target_ref)){throw 'PR identity/source/target readback differs'}
             if(!($items | Where-Object {[string]$_.id -eq [string]$a.work_item.id})){throw 'PR work-item link is absent'}
             @{ok=$true;id=$pr.pullRequestId;url=($project.azure_organization.TrimEnd('/')+'/'+$project.azure_project+'/_git/'+$project.repository_id+'/pullrequest/'+$pr.pullRequestId);is_draft=$pr.isDraft;active=($pr.status -eq 'active');completed=($pr.status -eq 'completed');commit=$pr.lastMergeSourceCommit.commitId;work_item_id=$a.work_item.id;autocomplete=[bool]$pr.autoCompleteSetBy}
         }

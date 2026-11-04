@@ -441,10 +441,38 @@ pub struct LocalDriver<'a> {
     pub settings: &'a Settings,
     pub store: &'a Store,
 }
+pub(crate) fn driver_reply(
+    operation: &str,
+    path: &std::path::Path,
+    success: bool,
+) -> Result<Value> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .with_context(|| format!("Project operation {operation} has no retained response at {} (process success: {success})", path.display()))?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 1024 * 1024,
+        "Project driver response exceeds limit"
+    );
+    let value: Value = serde_json::from_slice(&bytes)?;
+    if !success || value["ok"] != true {
+        // Use the driver's structured diagnostic, never arbitrary command stderr.
+        let detail = value["error"]
+            .as_str()
+            .unwrap_or("Driver did not verify success");
+        let bounded: String = detail.chars().take(2048).collect();
+        anyhow::bail!(
+            "Project operation {operation} failed: {bounded}; retained response: {}",
+            path.display()
+        );
+    }
+    Ok(value)
+}
 impl Driver for LocalDriver<'_> {
     fn call(&mut self, operation: &str, request: &Value) -> Result<Value> {
         use std::{
-            io::Read,
             process::{Command, Stdio},
             thread,
             time::{Duration, Instant},
@@ -486,24 +514,7 @@ impl Driver for LocalDriver<'_> {
             thread::sleep(Duration::from_millis(50));
         };
         drop(child);
-        ensure!(
-            status.success(),
-            "Project operation {operation} failed; retained request identifies its exact scope"
-        );
-        let mut bytes = Vec::new();
-        fs::File::open(&result)?
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        ensure!(
-            bytes.len() <= 1024 * 1024,
-            "Project driver response exceeds limit"
-        );
-        let value: Value = serde_json::from_slice(&bytes)?;
-        ensure!(
-            value["ok"] == true,
-            "Project operation {operation} did not verify success"
-        );
-        Ok(value)
+        driver_reply(operation, &result, status.success())
     }
 }
 

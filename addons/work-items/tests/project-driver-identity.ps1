@@ -26,3 +26,37 @@ foreach($case in @(
 }
 if($rejected -ne 7){throw 'Missing rejection coverage'}
 Write-Output 'PASS repository username normalization and repository/host/path/query/scheme/password guards'
+
+$publicationFunction=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Publication-Branch'},$true)
+. ([scriptblock]::Create($publicationFunction.Extent.Text))
+$assignment=@{previous_branch='work/previous';branch='work/current';target_ref='development';work_item=@{id=7}}
+function Azure([string[]]$arguments) {
+    if($arguments[2] -eq 'list'){return $script:activePullRequests}
+    if($arguments[2] -eq 'show'){return $script:pullRequest}
+    if($arguments[2] -eq 'work-item'){return $script:linkedItems}
+    throw 'Unexpected fixture operation'
+}
+$script:activePullRequests=@()
+if((Publication-Branch $assignment) -cne 'work/current'){throw 'Closed/missing previous PR must use current branch'}
+$script:activePullRequests=@(@{pullRequestId=42})
+$script:pullRequest=@{pullRequestId=42;status='active';repository=@{id=$project.repository_id};sourceRefName='refs/heads/work/previous';targetRefName='refs/heads/development';isDraft=$false;autoCompleteSetBy=$null}
+$script:linkedItems=@(@{id=7})
+if((Publication-Branch $assignment) -cne 'work/previous'){throw 'Exact active prior PR was not reused'}
+foreach($change in @(
+    @{status='completed'},@{repository=@{id='other'}},@{sourceRefName='refs/heads/other'},
+    @{targetRefName='refs/heads/other'},@{isDraft=$true},@{autoCompleteSetBy=@{id='synthetic'}}
+)) {
+    $saved=$script:pullRequest.Clone()
+    foreach($key in $change.Keys){$script:pullRequest[$key]=$change[$key]}
+    $denied=$false
+    try {Publication-Branch $assignment | Out-Null} catch {$denied=$true}
+    $script:pullRequest=$saved
+    if(!$denied){throw 'Changed prior PR binding was accepted'}
+}
+$script:linkedItems=@(@{id=8});$denied=$false
+try {Publication-Branch $assignment | Out-Null} catch {$denied=$true}
+if(!$denied){throw 'Wrong work item was accepted'}
+$script:activePullRequests=@(@{pullRequestId=42},@{pullRequestId=43});$denied=$false
+try {Publication-Branch $assignment | Out-Null} catch {$denied=$true}
+if(!$denied){throw 'Ambiguous active PRs were accepted'}
+Write-Output 'PASS active prior PR reuse and owner/repository/source/target/work-item/draft/autocomplete guards'

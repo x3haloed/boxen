@@ -164,3 +164,13 @@ Returned work carries compact prior-delivery identity references plus a retained
 full-history file and SHA-256. Interpretation reads that file for earlier reports,
 reviews and publication limits. Repeated returns do not recursively embed the
 entire prior assignment history in mailbox requests or silently truncate it.
+
+When a returned assignment has a new local branch, publication checks whether its
+previous branch still has one active full PR for the same repository, target and
+work item. If so, the reviewed commit advances that existing PR branch through a
+normal fast-forward push. Local checkout identity remains the assigned branch.
+Ambiguous or mismatched prior PRs, drafts and autocomplete stop publication;
+closed or missing prior PRs keep the ordinary new-branch flow. PR creation cannot
+replace reconciliation of an existing active PR. Structured project-driver
+failures expose their bounded retained cause and response-file reference rather
+than only a generic failed-operation message.
