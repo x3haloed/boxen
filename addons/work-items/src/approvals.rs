@@ -14,6 +14,8 @@ pub struct Policy {
     pub authority: String,
     pub browser_executable: PathBuf,
     pub shells: Vec<PathBuf>,
+    #[serde(default)]
+    pub native_edge_app_access: bool,
 }
 impl Policy {
     pub fn load(s: &Store) -> Result<Option<Self>> {
@@ -123,6 +125,8 @@ fn command_matches(policy: &Policy, a: &Value, command: &str) -> Result<bool> {
 
 #[derive(Default, Serialize, Deserialize)]
 struct Projection {
+    #[serde(default)]
+    format: u8,
     turn: Option<String>,
     items: BTreeMap<String, Value>,
     pending: BTreeMap<String, Value>,
@@ -157,20 +161,33 @@ impl Projection {
                     self.items.insert(id.into(), json!({"command":command}));
                 }
             }
+            Some("item/started") if p["item"]["type"] == "mcpToolCall" => {
+                if let Some(id) = p["item"]["id"].as_str().filter(|v| v.len() <= 256) {
+                    let item = &p["item"];
+                    self.items.insert(id.into(),json!({"type":item["type"],"server":item["server"],"tool":item["tool"],"pluginId":item["pluginId"]}));
+                }
+            }
             Some("item/completed") => {
                 if let Some(id) = p["item"]["id"].as_str() {
                     self.items.remove(id);
                     self.pending.retain(|_, r| r["params"]["itemId"] != id);
                 }
             }
-            Some("item/commandExecution/requestApproval") => {
+            Some("item/commandExecution/requestApproval" | "mcpServer/elicitation/request") => {
                 if (d["id"].is_string() || d["id"].is_number()) && d["id"].to_string().len() <= 256
                 {
-                    let request = if d.to_string().len() <= 65536 {
+                    let mut request = if d.to_string().len() <= 65536 {
                         d.clone()
                     } else {
                         json!({"id":d["id"],"method":d["method"],"params":{},"oversized":true})
                     };
+                    if d["method"] == "mcpServer/elicitation/request" {
+                        request["boxen_call"] = p["_meta"]["callId"]
+                            .as_str()
+                            .and_then(|id| self.items.get(id))
+                            .cloned()
+                            .unwrap_or(Value::Null);
+                    }
                     self.pending.insert(d["id"].to_string(), request);
                 }
             }
@@ -195,6 +212,12 @@ fn projection(s: &Store, cfg: &Config, run: &str) -> Result<Option<Projection>> 
         Some((p, v)) => (u64::try_from(p)?, serde_json::from_str(&v)?),
         None => (0, Projection::default()),
     };
+    // Rebuild old projections from the same authority; retained decisions still prevent replay.
+    if state.format != 2 {
+        position = 0;
+        state = Projection::default();
+        state.format = 2;
+    }
     let mut file = fs::File::open(cfg.boxen_home.join("runs").join(run).join("events.jsonl"))?;
     ensure!(
         position <= file.metadata()?.len(),
@@ -245,8 +268,7 @@ fn matches(
     request: &Value,
 ) -> Result<bool> {
     let p = &request["params"];
-    if request["method"] != "item/commandExecution/requestApproval"
-        || snapshot["status"] != "waiting"
+    if snapshot["status"] != "waiting"
         || p["threadId"] != snapshot["backend_thread"]
         || p["turnId"].as_str() != projected.turn.as_deref()
         || !p["threadId"].is_string()
@@ -255,6 +277,31 @@ fn matches(
         || !p["networkApprovalContext"].is_null()
         || a["runtime"]["required"] != true
     {
+        return Ok(false);
+    }
+    if request["method"] == "mcpServer/elicitation/request" {
+        let meta = &p["_meta"];
+        let call = &request["boxen_call"];
+        return Ok(policy.native_edge_app_access
+            && policy
+                .browser_executable
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case("msedge.exe"))
+            && p["serverName"] == "cua_repl"
+            && p["mode"] == "form"
+            && p["requestedSchema"] == json!({"type":"object","properties":{}})
+            && meta["connector_id"] == "computer-use"
+            && meta["codex_approval_kind"] == "mcp_tool_call"
+            && meta["tool_params"] == json!({"app":"msedge.exe"})
+            && meta["x-codex-turn-metadata"]["thread_id"] == p["threadId"]
+            && meta["x-codex-turn-metadata"]["turn_id"] == p["turnId"]
+            && call["type"] == "mcpToolCall"
+            && call["server"] == "cua_repl"
+            && call["tool"] == "js"
+            && call["pluginId"] == "unified-computer-use@openai-bundled");
+    }
+    if request["method"] != "item/commandExecution/requestApproval" {
         return Ok(false);
     }
     if p["availableDecisions"]
@@ -331,7 +378,11 @@ pub fn tick(s: &Store, cfg: &Config, api: &impl Boxen) -> Result<()> {
                 && matches(&policy, cfg, a, &snapshot, &projected, request)?;
             let state = if allowed { "intent" } else { "manual" };
             let reason = if allowed {
-                "Exact assigned browser launch with current owner/version/resource reservations"
+                if request["method"] == "mcpServer/elicitation/request" {
+                    "Native Microsoft Edge app access for current assigned coder and browser reservation; app-wide access, no persistent permission requested"
+                } else {
+                    "Exact assigned browser launch with current owner/version/resource reservations"
+                }
             } else {
                 "Request does not match the assigned-browser rule; existing manual review remains available"
             };
@@ -377,7 +428,12 @@ pub fn tick(s: &Store, cfg: &Config, api: &impl Boxen) -> Result<()> {
                 continue;
             }
             // Durable intent precedes control. Unknown delivery never causes another auto-response.
-            let result=api.call(json!({"op":"control","id":run,"action":{"type":"respond","request_id":request["id"],"result":{"decision":"accept"}}}));
+            let answer = if request["method"] == "mcpServer/elicitation/request" {
+                json!({"action":"accept","content":{}})
+            } else {
+                json!({"decision":"accept"})
+            };
+            let result=api.call(json!({"op":"control","id":run,"action":{"type":"respond","request_id":request["id"],"result":answer}}));
             let (state,reason)=match result {Ok(v) if v["accepted"]==true=>("submitted","One-time approval submitted; retained backend answer/execution events establish subsequent outcome".to_string()),Ok(_)=>("uncertain","Unexpected control response; manual reconciliation required".into()),Err(e)=>("uncertain",e.to_string())};
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute(

@@ -1,7 +1,7 @@
 # Assigned-browser approval policy
 
 The optional private `approval-policy.json` beside the work-item service config
-enables one operator-defined rule. The service evaluates retained Codex command
+enables one operator-defined rule. The service evaluates retained Codex
 approval requests and answers matching requests through Boxen's existing authenticated
 `control` API. The GUI and portable daemon do not gain another request authority.
 Codex uses `on-request` with `danger-full-access`; its reviewer remains the client.
@@ -10,8 +10,9 @@ Codex uses `on-request` with `danger-full-access`; its reviewer remains the clie
 {
   "enabled": true,
   "rule_id": "assigned-browser-launch",
-  "revision": 1,
-  "authority": "Operator-approved assigned browser launch only",
+  "revision": 2,
+  "authority": "Operator-approved assigned browser launch and native Edge access",
+  "native_edge_app_access": true,
   "browser_executable": "C:/Example/Browser/msedge.exe",
   "shells": ["C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"]
 }
@@ -40,6 +41,16 @@ commands, changed quoting/scripts, other executables/profiles/origins, extra arg
 and unrelated approvals do not match. A nonmatch stays available for manual review
 and produces an observer notice; no automatic decline or blanket approval follows.
 
+The optional `native_edge_app_access` flag defaults to false. When enabled for an
+Edge browser assignment, it also accepts Codex's native Computer Use app-access
+request for `msedge.exe`. This permission is app-wide: it can include Edge windows
+outside the assigned profile. The same current assignment and reservation checks
+apply. The request must be an empty form from `cua_repl`, correlated by call ID
+with a retained `js` call from the bundled Computer Use plugin, with matching
+native thread/turn metadata and exactly the Edge app parameter. Other apps,
+connectors, forms requesting input and unrelated permissions remain manual.
+The response is `{"action":"accept","content":{}}`, without persistence metadata.
+
 The service reads the local daemon's authoritative JSONL journal incrementally,
 bounded to 512 records/8 MiB per pass and 4 MiB per record. Partial final records
 wait for completion; truncation and unavailable evidence require manual review.
@@ -51,7 +62,10 @@ intent before submitting `{"decision":"accept"}`. It never sends session-wide
 approval or accepts an execution-policy amendment. A per-job operation lock keeps
 normal release/continuation from changing the lease during the decision boundary.
 The daemon's original pending-request identity remains the final one-time response
-authority. Already answered/resolved/completed items disappear from the projection.
+authority. Answered/resolved requests disappear from the projection. An unresolved
+native app request can outlive a helper timeout; its retained original call
+correlation remains available until answered, resolved or the turn ends. Projection
+upgrades replay retained evidence while preserving prior decision identities.
 
 `boxen-work-items --home ABS approvals` lists retained decisions. `submitted` means
 the control response was accepted into Boxen; the daemon's retained answer and

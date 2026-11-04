@@ -1548,6 +1548,7 @@ fn approval_fixture() -> (Fixture, ApprovalApi, PathBuf, Vec<Value>, Value) {
     let policy = approvals::Policy {
         enabled: true,
         rule_id: "assigned-browser".into(),
+        native_edge_app_access: false,
         revision: 1,
         authority: "Explicit operator policy fixture".into(),
         browser_executable: browser,
@@ -1718,6 +1719,115 @@ fn partial_approval_journal_record_waits_for_completion() {
         .open(&journal)
         .unwrap()
         .write_all(b"\n")
+        .unwrap();
+    approvals::tick(&f.s, &f.cfg, &api).unwrap();
+    assert_eq!(api.controls.lock().unwrap().len(), 1);
+}
+
+fn native_edge_fixture() -> (Fixture, ApprovalApi, PathBuf, Vec<Value>) {
+    let (f, api, journal, mut events, _) = approval_fixture();
+    let policy_path = f.root.join("approval-policy.json");
+    let mut policy: Value = serde_json::from_slice(&fs::read(&policy_path).unwrap()).unwrap();
+    policy["native_edge_app_access"] = json!(true);
+    policy["revision"] = json!(2);
+    fs::write(policy_path, policy.to_string()).unwrap();
+    events[1] = json!({"kind":"backend","data":{"method":"item/started","params":{"item":{"id":"native-call","type":"mcpToolCall","server":"cua_repl","tool":"js","pluginId":"unified-computer-use@openai-bundled"}}}});
+    events[2] = json!({"kind":"backend","data":{"id":"native-app","method":"mcpServer/elicitation/request","params":{"threadId":"native-fixture","turnId":"turn-fixture","serverName":"cua_repl","mode":"form","requestedSchema":{"type":"object","properties":{}},"_meta":{"callId":"native-call","connector_id":"computer-use","codex_approval_kind":"mcp_tool_call","tool_params":{"app":"msedge.exe"},"x-codex-turn-metadata":{"thread_id":"native-fixture","turn_id":"turn-fixture"}}}}});
+    write_approval_events(&journal, &events);
+    (f, api, journal, events)
+}
+#[test]
+fn native_edge_access_is_explicit_lease_bound_and_once_without_persistence() {
+    let (f, api, _, _) = native_edge_fixture();
+    approvals::tick(&f.s, &f.cfg, &api).unwrap();
+    assert_eq!(api.controls.lock().unwrap().len(), 1);
+    assert_eq!(
+        api.controls.lock().unwrap()[0]["action"]["result"],
+        json!({"action":"accept","content":{}})
+    );
+    approvals::tick(&Store::open(&f.s.path).unwrap(), &f.cfg, &api).unwrap();
+    assert_eq!(api.controls.lock().unwrap().len(), 1);
+}
+#[test]
+fn native_app_policy_rejects_other_apps_connectors_forms_and_unassigned_work() {
+    for case in [
+        "disabled",
+        "other-app",
+        "extra-app-params",
+        "connector",
+        "server",
+        "plugin",
+        "schema",
+        "call",
+        "thread",
+        "turn",
+        "lease",
+        "answered",
+    ] {
+        let (f, api, journal, mut e) = native_edge_fixture();
+        match case {
+            "disabled" => {
+                let p = f.root.join("approval-policy.json");
+                let mut v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+                v["native_edge_app_access"] = json!(false);
+                fs::write(p, v.to_string()).unwrap();
+            }
+            "other-app" => {
+                e[2]["data"]["params"]["_meta"]["tool_params"]["app"] = json!("other.exe")
+            }
+            "extra-app-params" => {
+                e[2]["data"]["params"]["_meta"]["tool_params"]["other"] = json!(true)
+            }
+            "connector" => {
+                e[2]["data"]["params"]["_meta"]["connector_id"] = json!("other-connector")
+            }
+            "server" => e[2]["data"]["params"]["serverName"] = json!("other-server"),
+            "plugin" => e[1]["data"]["params"]["item"]["pluginId"] = json!("other-plugin"),
+            "schema" => {
+                e[2]["data"]["params"]["requestedSchema"]["properties"]["credential"] =
+                    json!({"type":"string"})
+            }
+            "call" => e[2]["data"]["params"]["_meta"]["callId"] = json!("unknown-call"),
+            "thread" => {
+                e[2]["data"]["params"]["_meta"]["x-codex-turn-metadata"]["thread_id"] =
+                    json!("other-thread")
+            }
+            "turn" => {
+                e[2]["data"]["params"]["_meta"]["x-codex-turn-metadata"]["turn_id"] =
+                    json!("other-turn")
+            }
+            "lease" => {
+                f.s.connect()
+                    .unwrap()
+                    .execute(
+                        "DELETE FROM reservations WHERE resource LIKE 'browser:%'",
+                        [],
+                    )
+                    .unwrap();
+            }
+            "answered" => {
+                e.push(json!({"kind":"request_answered","data":{"request_id":"native-app"}}))
+            }
+            _ => unreachable!(),
+        }
+        write_approval_events(&journal, &e);
+        approvals::tick(&f.s, &f.cfg, &api).unwrap();
+        assert!(api.controls.lock().unwrap().is_empty(), "{case}");
+    }
+}
+#[test]
+fn approval_projection_upgrade_finds_pending_native_requests_without_repeating_answers() {
+    let (f, api, _, _) = native_edge_fixture();
+    let run = api.snapshot["record"]["spec"]["id"].as_str().unwrap();
+    f.s.connect().unwrap().execute("INSERT INTO approval_streams VALUES(?1,100,'{\"turn\":null,\"items\":{},\"pending\":{}}')",[run]).unwrap();
+    approvals::tick(&f.s, &f.cfg, &api).unwrap();
+    assert_eq!(api.controls.lock().unwrap().len(), 1);
+    f.s.connect()
+        .unwrap()
+        .execute(
+            "UPDATE approval_streams SET projection='{\"turn\":null,\"items\":{},\"pending\":{}}'",
+            [],
+        )
         .unwrap();
     approvals::tick(&f.s, &f.cfg, &api).unwrap();
     assert_eq!(api.controls.lock().unwrap().len(), 1);

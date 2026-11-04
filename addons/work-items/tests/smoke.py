@@ -32,6 +32,22 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
 '''+browser_command_marker)
     fixture_source=fixture_source.replace('"command": "fixture command"','"command": command_for_approval')
     fixture_source=fixture_source.replace('"itemId": "command"}})', '"itemId": "command", "cwd":browser_fixture["cwd"]}})')
+    native_marker='        notification("serverRequest/resolved", {"requestId": "approval-1"})'
+    assert fixture_source.count(native_marker)==1
+    fixture_source=fixture_source.replace(native_marker,native_marker+'''
+        if browser_marker:
+            approved.clear()
+            notification("item/started", {"item":{"id":"native-call","type":"mcpToolCall","server":"cua_repl","tool":"js","pluginId":"unified-computer-use@openai-bundled"}})
+            emit({"id":"native-app-1","method":"mcpServer/elicitation/request","params":{"serverName":"cua_repl","mode":"form","threadId":thread,"turnId":"fixture-turn","requestedSchema":{"type":"object","properties":{}},"_meta":{"callId":"native-call","connector_id":"computer-use","codex_approval_kind":"mcp_tool_call","tool_params":{"app":"msedge.exe"},"x-codex-turn-metadata":{"thread_id":thread,"turn_id":"fixture-turn"}}}})
+            while not approved.wait(0.02) and not cancel.is_set():
+                pass
+            notification("serverRequest/resolved", {"requestId":"native-app-1"})
+            notification("item/completed", {"item":{"id":"native-call","type":"mcpToolCall"}})
+''')
+    fixture_source=fixture_source.replace('        if request.get("id") == "approval-1": approved.set()', '''        if request.get("id") == "approval-1": approved.set()
+        elif request.get("id") == "native-app-1":
+            assert request["result"] == {"action":"accept","content":{}}, request
+            approved.set()''')
     fixture.write_text(fixture_source,encoding='utf-8')
     wrapper=root/'codex.cmd';wrapper.write_text('@echo off\n"'+sys.executable+'" "'+str(fixture)+'" %*\n');codex=wrapper if os.name=='nt' else fixture
     if os.name!='nt':fixture.chmod(0o755)
@@ -169,7 +185,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
         browser=root/'msedge.exe';browser.write_text('fixture only')
         shell=root/'powershell.exe';shell.write_text('fixture only')
         profile=root/'browser-profile';profile.mkdir()
-        policy={'enabled':True,'rule_id':'assigned-browser','revision':1,'authority':'Explicit synthetic fixture authority','browser_executable':str(browser),'shells':[str(shell)]}
+        policy={'enabled':True,'rule_id':'assigned-browser','revision':2,'native_edge_app_access':True,'authority':'Explicit synthetic fixture authority','browser_executable':str(browser),'shells':[str(shell)]}
         (home/'approval-policy.json').write_text(json.dumps(policy),encoding='utf-8')
         browser_input=assignment(1,'browser-approval-roundtrip',False)
         script=f"Start-Process -FilePath '{browser}' -ArgumentList '--user-data-dir=\"{profile}\"','--no-first-run','http://localhost:4500/?clientId=100' -WindowStyle Normal"
@@ -181,13 +197,14 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
         start_worker()
         wait(lambda:any(d['state']=='submitted' for d in json.loads(command('approvals').stdout)['decisions']))
         wait(idle)
-        decisions=json.loads(command('approvals').stdout)['decisions'];assert len(decisions)==1,decisions
+        decisions=json.loads(command('approvals').stdout)['decisions'];assert len(decisions)==2,decisions
         runs=api({'op':'list'});run=next(r for r in runs if r['record']['spec']['id']==decisions[0]['run'])
         events=[json.loads(x) for x in (boxen_home/'runs'/run['record']['spec']['id']/'events.jsonl').read_text().splitlines()]
         answered=[e for e in events if e['kind']=='request_answered' and e['data']['request_id']=='approval-1'];assert len(answered)==1,answered
-        stop(worker);start_worker();time.sleep(2.5);assert len(json.loads(command('approvals').stdout)['decisions'])==1
+        native_answers=[e for e in events if e['kind']=='request_answered' and e['data']['request_id']=='native-app-1'];assert len(native_answers)==1,native_answers
+        stop(worker);start_worker();time.sleep(2.5);assert len(json.loads(command('approvals').stdout)['decisions'])==2
         assert len(api({'op':'list'}))==len(runs),'Approval recovery replayed inference'
-        print('PASS assigned-browser one-time approval through real Boxen retained requests/control, restart without approval or inference replay')
+        print('PASS assigned-browser launch and native Edge one-time approvals through real Boxen retained requests/control, restart without approval or inference replay')
         print('PASS real Boxen create/send/activation/reply, durable migration, exact retries, restart without replay, capacity queue/release, same-coder continuation with retained reservations, explicit owner transfer, immutable packets, supervised handoffs, one report-only recovery, durable notifications and private final isolation')
     finally:
         stop(worker);stop(daemon)
