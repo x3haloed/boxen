@@ -52,6 +52,7 @@ def check_promotion(g):
     reject(lambda:op(0,{'op':'thread_result','id':active['record']['spec']['id']}))
     events=[json.loads(line) for line in g['cli'](0,'watch',f"127.0.0.1:{g['peers'][1]}",g['keys'][1],active['record']['spec']['id'],'--once').stdout.splitlines()]
     assert any(e['kind']=='resident_bridge_ready' for e in events)
+    assert any(e['kind']=='resident_message_approval_policy' and e['data']=={'server':'boxen_resident','tool':'boxen_send_message','approval_mode':'approve','scope':'activation'} for e in events)
     assert not any(e['kind']=='backend_session_rebuilt' for e in events)
     assert any(e['kind']=='resident_bridge_result' for e in events)
     resumed=[r for r in log() if r.get('method')=='thread/resume']
