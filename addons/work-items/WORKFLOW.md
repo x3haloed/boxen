@@ -180,3 +180,11 @@ closed or missing prior PRs keep the ordinary new-branch flow. PR creation canno
 replace reconciliation of an existing active PR. Structured project-driver
 failures expose their bounded retained cause and response-file reference rather
 than only a generic failed-operation message.
+
+Each assignment explicitly asks for one final report after its work is finished.
+Accepted final reports remain immutable. Uncertain delivery retries reuse the same
+message identity and JSON; formatting-only replacements and relabeling
+`needs_clarification` as `blocked` do not overwrite an accepted report. Both
+non-completed outcomes follow the same idle/cleanup/pause path. Ordinary attributed
+addenda can retain further dependency facts without masquerading as another final
+report or changing the accepted outcome.
