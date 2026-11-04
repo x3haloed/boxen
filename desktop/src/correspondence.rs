@@ -54,6 +54,8 @@ pub enum MailUpdate {
         client_id: String,
         residents: Result<Vec<Value>, String>,
         inbox: Result<Value, String>,
+        definitions: Result<Value, String>,
+        health: Result<Value, String>,
     },
     Sent {
         draft: String,
@@ -82,6 +84,8 @@ impl Client {
             let mut after = 0;
             let mut resident_refresh = std::time::Instant::now() - Duration::from_secs(10);
             let mut resident_cache: Result<Vec<Value>, String> = Ok(vec![]);
+            let mut definitions = Ok(json!({"definitions":[]}));
+            let mut health = Ok(json!({"incidents":[]}));
             while !stop.load(Ordering::Relaxed) {
                 if resident_refresh.elapsed() >= Duration::from_secs(10) {
                     resident_cache = client
@@ -90,11 +94,28 @@ impl Client {
                             v.as_array()
                                 .map(|rows| {
                                     rows.iter()
-                                        .map(|r| json!({"id":r["id"],"name":r["name"]}))
+                                        .map(|r| json!({"id":r["id"],"name":r["name"],"backend":r["backend"],"model":r["model"],"definition":r["definition"]}))
                                         .collect()
                                 })
                                 .ok_or("Invalid resident list".into())
                         });
+                    if resident_cache.is_ok() {
+                        let has_instances = resident_cache.as_ref().is_ok_and(|rows| {
+                            rows.iter().any(|r| r["definition"]["id"].is_string())
+                        });
+                        definitions = if has_instances {
+                            client.operation(
+                                &destination,
+                                json!({"op":"resident_definition","args":{"action":"list"}}),
+                            )
+                        } else {
+                            Ok(json!({"definitions":[]}))
+                        };
+                        health = client.operation(&destination, json!({"op":"inference_health"}));
+                    } else {
+                        definitions = Err("Machine unavailable".into());
+                        health = Err("Machine unavailable".into());
+                    }
                     resident_refresh = std::time::Instant::now();
                 }
                 let residents = resident_cache.clone();
@@ -114,6 +135,8 @@ impl Client {
                     client_id: client_id.clone(),
                     residents,
                     inbox,
+                    definitions: definitions.clone(),
+                    health: health.clone(),
                 })) {
                     return;
                 }
@@ -156,11 +179,16 @@ impl Desktop {
                 client_id,
                 residents,
                 inbox,
+                definitions,
+                health,
             } => {
                 if client_id != self.data.local_key {
                     return;
                 }
                 let peer = destination.key;
+                self.data
+                    .agents
+                    .metadata(&peer, &residents, definitions, health);
                 self.data.mail.errors.remove(&peer);
                 match residents {
                     Ok(v) => {

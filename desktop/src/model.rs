@@ -9,6 +9,7 @@ pub struct ThreadKey {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pane {
+    Agents,
     Threads,
     Correspondence,
     Message(ThreadKey),

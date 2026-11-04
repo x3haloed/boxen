@@ -56,7 +56,17 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
         resident=secrets.token_hex(32)
         operation({'op':'resident_create','spec':{'id':resident,'name':'Not an anonymous thread','cwd':temporary,'auto_activate':False}})
         operation({'op':'resident_activate','id':resident,'activation_id':secrets.token_hex(32)})
-        env=os.environ|{'BOXEN_GUI_TEST_HOME':str(homes[0]),'BOXEN_GUI_TEST_URL':f'http://127.0.0.1:{controls[0]}','BOXEN_GUI_TEST_DEST':json.dumps(destination)}
+        definition=secrets.token_hex(32)
+        operation({'op':'resident_definition','args':{'action':'create','spec':{'id':definition,'name':'Fixture workers','cwd':temporary,'model':'fixture','auto_activate':False}}})
+        instances=[]
+        for name,overrides in [('Idle worker',{}),('Blocked worker',{'backend':'openrouter'}),('Active worker',{})]:
+            ident=secrets.token_hex(32);instances.append(ident)
+            operation({'op':'resident_definition','args':{'action':'instantiate','spec':{'id':ident,'definition_id':definition,'definition_revision':1,'overrides':dict(overrides,name=name)}}})
+        blocked=operation({'op':'resident_activate','id':instances[1],'activation_id':secrets.token_hex(32)})
+        deadline=time.monotonic()+20
+        while operation({'op':'get','id':blocked['record']['spec']['id']})['status'] not in ['interrupted','failed']:
+            assert time.monotonic()<deadline;time.sleep(.05)
+        env=os.environ|{'BOXEN_GUI_TEST_HOME':str(homes[0]),'BOXEN_GUI_TEST_URL':f'http://127.0.0.1:{controls[0]}','BOXEN_GUI_TEST_DEST':json.dumps(destination),'BOXEN_GUI_TEST_CLASS':definition,'BOXEN_GUI_TEST_ACTIVE_AGENT':instances[2]}
         subprocess.run(['cargo','test','--locked','--manifest-path',str(ROOT/'desktop/Cargo.toml'),'real_daemon_boundary','--','--ignored','--nocapture'],env=env,check=True)
         if args.interactive:
             # Seed the human inbox through real resident tools, never fabricated journal rows.

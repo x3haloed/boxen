@@ -1,3 +1,4 @@
+mod agents;
 mod client;
 mod correspondence;
 mod field;
@@ -31,6 +32,7 @@ struct Saved {
     pending: Vec<Pending>,
     mail: correspondence::SavedMail,
     correspondence_added: bool,
+    agents_added: bool,
 }
 struct Observing {
     epoch: u64,
@@ -43,6 +45,7 @@ struct Observing {
 struct Data {
     local_key: String,
     mail: correspondence::Mailbox,
+    agents: agents::State,
     saved: Saved,
     catalogs: HashMap<String, Vec<Conversation>>,
     errors: HashMap<String, String>,
@@ -123,11 +126,16 @@ impl Desktop {
             saved.workspace.show_correspondence();
             saved.correspondence_added = true;
         }
+        if !saved.agents_added {
+            saved.workspace.show_agents();
+            saved.agents_added = true;
+        }
         let bus = Bus::new(cc.egui_ctx.clone());
         let mut app = Self {
             data: Data {
                 local_key: String::new(),
                 mail: Default::default(),
+                agents: Default::default(),
                 saved,
                 catalogs: HashMap::new(),
                 errors: HashMap::new(),
@@ -262,36 +270,39 @@ impl Desktop {
                     Ok(status) => self.discovered(status),
                     Err(error) => self.data.notice = format!("Daemon unavailable: {error}"),
                 },
-                Update::Catalog(dest, result) => match result {
-                    Ok(runs) => {
-                        self.data.errors.remove(&dest.key);
-                        // An accepted pending request is reconciled by exact ID; no new request is generated.
-                        let accepted: HashSet<&str> = runs
-                            .iter()
-                            .filter_map(|r| r["record"]["spec"]["id"].as_str())
-                            .collect();
-                        let reconciled: Vec<_> = self
-                            .data
-                            .saved
-                            .pending
-                            .iter()
-                            .filter(|p| {
-                                p.destination.key == dest.key
-                                    && accepted.contains(p.spec["id"].as_str().unwrap_or(""))
-                            })
-                            .cloned()
-                            .collect();
-                        for p in reconciled {
-                            self.accept_pending(&p);
+                Update::Catalog(dest, result) => {
+                    self.data.agents.activity(&dest.key, &result);
+                    match result {
+                        Ok(runs) => {
+                            self.data.errors.remove(&dest.key);
+                            // An accepted pending request is reconciled by exact ID; no new request is generated.
+                            let accepted: HashSet<&str> = runs
+                                .iter()
+                                .filter_map(|r| r["record"]["spec"]["id"].as_str())
+                                .collect();
+                            let reconciled: Vec<_> = self
+                                .data
+                                .saved
+                                .pending
+                                .iter()
+                                .filter(|p| {
+                                    p.destination.key == dest.key
+                                        && accepted.contains(p.spec["id"].as_str().unwrap_or(""))
+                                })
+                                .cloned()
+                                .collect();
+                            for p in reconciled {
+                                self.accept_pending(&p);
+                            }
+                            self.data
+                                .catalogs
+                                .insert(dest.key.clone(), catalog(&dest.key, &runs));
                         }
-                        self.data
-                            .catalogs
-                            .insert(dest.key.clone(), catalog(&dest.key, &runs));
+                        Err(error) => {
+                            self.data.errors.insert(dest.key, error);
+                        }
                     }
-                    Err(error) => {
-                        self.data.errors.insert(dest.key, error);
-                    }
-                },
+                }
                 Update::Batch(id, epoch, batch) => {
                     if self.data.watches.get(&id).is_none_or(|w| w.epoch != epoch) {
                         continue;
@@ -694,6 +705,7 @@ impl Desktop {
             ("Machine connections…".into(), None),
             ("Show correspondence".into(), None),
             ("New message…".into(), None),
+            ("Show agents".into(), None),
         ];
         for dest in &self.data.saved.destinations {
             for thread in self.data.catalogs.get(&dest.key).into_iter().flatten() {
@@ -775,6 +787,7 @@ impl Desktop {
                 match index {
                     4 => self.data.saved.workspace.show_correspondence(),
                     5 => self.mail_action(correspondence::MailAction::New),
+                    6 => self.data.saved.workspace.show_agents(),
                     0 => self.new_thread = true,
                     1 => self.data.saved.workspace.show_list(),
                     2 => {
@@ -876,6 +889,7 @@ impl TabViewer for Viewer<'_> {
     type Tab = Pane;
     fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
         match tab {
+            Pane::Agents => "Agents".into(),
             Pane::Correspondence => "Correspondence".into(),
             Pane::Compose(_) => "New message".into(),
             Pane::Message(k) => {
@@ -906,6 +920,7 @@ impl TabViewer for Viewer<'_> {
             Pane::Thread(k) => egui::Id::new((&k.peer, &k.id)),
             Pane::Message(k) => egui::Id::new(("mail", &k.peer, &k.id)),
             Pane::Compose(id) => egui::Id::new(("compose", id)),
+            Pane::Agents => egui::Id::new("agents"),
             Pane::Correspondence => egui::Id::new("correspondence"),
             Pane::Threads => egui::Id::new("threads"),
             Pane::Welcome => egui::Id::new("welcome"),
@@ -953,6 +968,7 @@ impl TabViewer for Viewer<'_> {
     }
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
         match tab {
+            Pane::Agents => agents::panel(ui, self.data),
             Pane::Correspondence => correspondence::inbox(ui, self.data, self.actions),
             Pane::Message(_) | Pane::Compose(_) => {
                 egui::ScrollArea::vertical()

@@ -16,6 +16,13 @@ impl Default for Workspace {
             0.24,
             vec![Pane::Correspondence, Pane::Threads],
         );
+        let path = dock.find_tab(&Pane::Threads).unwrap();
+        dock.split(
+            path.node_path(),
+            egui_dock::Split::Above,
+            0.28,
+            egui_dock::Node::leaf(Pane::Agents),
+        );
         Self {
             dock,
             preview: None,
@@ -149,6 +156,33 @@ impl Workspace {
             );
         }
     }
+    pub fn show_agents(&mut self) {
+        if let Some(path) = self.dock.find_tab(&Pane::Agents) {
+            self.focus(path);
+            return;
+        }
+        if let Some(path) = self
+            .dock
+            .find_tab(&Pane::Threads)
+            .or_else(|| self.dock.find_tab(&Pane::Correspondence))
+        {
+            self.dock.split(
+                path.node_path(),
+                egui_dock::Split::Above,
+                0.28,
+                egui_dock::Node::leaf(Pane::Agents),
+            );
+        } else if self.dock.main_surface().is_empty() {
+            self.dock = DockState::new(vec![Pane::Agents]);
+        } else {
+            self.dock.split(
+                egui_dock::NodePath::new(SurfaceIndex::main(), NodeIndex::root()),
+                egui_dock::Split::Left,
+                0.24,
+                egui_dock::Node::leaf(Pane::Agents),
+            );
+        }
+    }
     pub fn show_list(&mut self) {
         if let Some(path) = self.dock.find_tab(&Pane::Threads) {
             self.focus(path)
@@ -245,6 +279,52 @@ mod tests {
         );
         let restored: Workspace = serde_json::from_slice(&serde_json::to_vec(&w).unwrap()).unwrap();
         assert!(restored.is_preview(&Pane::Thread(key("next"))));
+    }
+    #[test]
+    fn agents_panel_restores_once_and_preserves_existing_editors() {
+        let mut w = Workspace::default();
+        let path = w.dock.find_tab(&Pane::Agents).unwrap();
+        w.dock.remove_tab(path);
+        w.open_message(key("kept-mail"), true);
+        w.open_compose("kept-draft".into());
+        w.show_agents();
+        w.show_agents();
+        assert_eq!(
+            w.dock
+                .iter_all_tabs()
+                .filter(|(_, p)| **p == Pane::Agents)
+                .count(),
+            1
+        );
+        assert!(w.dock.find_tab(&Pane::Message(key("kept-mail"))).is_some());
+        assert!(
+            w.dock
+                .find_tab(&Pane::Compose("kept-draft".into()))
+                .is_some()
+        );
+        struct Draw;
+        impl egui_dock::TabViewer for Draw {
+            type Tab = Pane;
+            fn title(&mut self, _: &mut Pane) -> eframe::egui::WidgetText {
+                "Panel".into()
+            }
+            fn ui(&mut self, _: &mut eframe::egui::Ui, _: &mut Pane) {}
+        }
+        let ctx = eframe::egui::Context::default();
+        let _ = ctx.run_ui(
+            eframe::egui::RawInput {
+                screen_rect: Some(eframe::egui::Rect::from_min_size(
+                    eframe::egui::pos2(0., 0.),
+                    eframe::egui::vec2(1000., 700.),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                egui_dock::DockArea::new(&mut w.dock).show_inside(ui, &mut Draw);
+            },
+        );
+        let restored: Workspace = serde_json::from_slice(&serde_json::to_vec(&w).unwrap()).unwrap();
+        assert!(restored.dock.find_tab(&Pane::Agents).is_some());
     }
     #[test]
     fn same_thread_does_not_duplicate_and_peer_keys_are_distinct() {

@@ -186,3 +186,39 @@ selection, reply and new-message acceptance, retained reply provenance, closing
 and reopening an unsent draft, moving message details into a separate dock group,
 and restoring the saved layout on application restart. These native UI checks
 remain separate from controlled backend tests and do not send production mail.
+
+## Agents panel
+
+Agents is a compact, independently dockable panel above the default
+Threads/Correspondence group. Existing saved layouts gain it once; closing it
+stays respected across restarts, and **Show agents** in the command palette
+restores it. Existing editors, drafts and previews retain their layout/state.
+
+Standalone residents appear as individual rows. Instantiated residents appear
+under an expandable definition/class row with instance counts. Class grouping
+uses the machine and definition ID, not a name comparison; independent classes
+with identical names remain separate. The latest definition name labels a class,
+without applying definition changes to its existing instances. Missing definition
+metadata falls back to the definition ID. Each resident identifies its machine
+in the status line; hover text supplies exact identity, model and source run.
+
+Green indicates ready/no observed activation or an idle resident whose latest
+activation completed or was cancelled. Blue indicates starting/running/cancelling.
+Red indicates the latest activation failed or was interrupted. Gray indicates
+unavailable/unconfirmed status, including a disconnected machine; cached healthy
+state is never shown as current after a failed catalog or resident refresh. A
+class with a failed member remains red while its summary also reports active
+members. Cancellation is distinct from failure. Imported history snapshots are
+not treated as activations. These are observed execution states, not an inference
+availability probe or proof of model attention.
+
+The panel reuses background catalog polling (about two seconds) and resident
+refresh (about ten seconds). Definition metadata and available inference-health
+records enrich grouping/failure descriptions. Older daemons without health
+projection retain generic interrupted/failed labels. It issues only authenticated
+read operations; viewing/expanding a resident never activates it or delivers
+private narration. Activity transcripts and agent controls remain separate work.
+
+Desktop tests cover grouping/isolation, imported-history exclusion, state
+transitions, disconnected caches, saved docking migration, and real paired-daemon
+resident/definition discovery with running and credential-blocked fixtures.
