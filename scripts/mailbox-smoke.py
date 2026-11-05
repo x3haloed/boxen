@@ -96,7 +96,11 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
             time.sleep(.03)
         raise AssertionError("resident did not activate")
 
-    def inbox(client):return request({"op":"client_inbox","client_id":client})["messages"]
+    def inbox(client):
+        deadline=time.monotonic()+25
+        while request({"op":"mailbox_status"})["network_pending"]:
+            assert time.monotonic()<deadline,"Cross-machine replies did not reach destination";time.sleep(.1)
+        return request({"op":"client_inbox","client_id":client},destination={"peer":keys[0],"address":""})["messages"]
     def activate(resident_id,directions=""):
         return request({"op":"resident_activate","id":resident_id,"activation_id":secrets.token_hex(32),"directions":directions})
     clients=[secrets.token_hex(32),secrets.token_hex(32)]
@@ -113,7 +117,7 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert runs(ident)==[]
         rejected({**operation,"message":{**operation["message"],"body":"changed"}},"different input")
         rejected({**operation,"message":{**operation["message"],"id":secrets.token_hex(32),"sender":{"type":"resident","id":ident}}})
-        rejected({"op":"resident_inbox","id":ident},"different peer",i=1,destination={"peer":keys[1],"address":""})
+        assert len(request({"op":"resident_inbox","id":ident},i=1,destination={"peer":keys[1],"address":""})["messages"])==3
         first=activate(ident)
         assert first["record"]["mailbox"]["message_ids"]==[m["id"] for m in messages]
         events,final=collect(first["record"]["spec"]["id"])

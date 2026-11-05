@@ -12,10 +12,18 @@ struct Identity {
     public: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
     pub key: String,
     pub label: String,
+    #[serde(default)]
+    pub address: String,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub removed: bool,
+    #[serde(default)]
+    pub endpoint_revision: u64,
 }
 
 pub struct State {
@@ -146,58 +154,29 @@ impl State {
         key(&self.identity.private)
     }
     pub fn trust(&self, public: &str, label: &str) -> Result<()> {
-        key(public)?;
-        if public == self.public_key() {
-            return Err("cannot pair this machine with itself".into());
-        }
-        if label.is_empty() || label.len() > 100 {
-            return Err("label must contain 1–100 bytes".into());
-        }
-        let peer = Peer {
-            key: public.into(),
-            label: label.into(),
-        };
-        let path = self.directory.join("peers").join(format!("{public}.json"));
-        let temporary = self
-            .directory
-            .join("peers")
-            .join(format!(".pending-{}", random_hex()?));
-        write_new(&temporary, &serde_json::to_vec_pretty(&peer)?)?;
-        // Existing entries are immutable; revoke before changing their labels.
-        let result = fs::hard_link(&temporary, &path);
-        fs::remove_file(temporary)?;
-        match result {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-            Err(error) => Err(error.into()),
-        }
+        crate::network::admit(self, public, label)
     }
     pub fn untrust(&self, public: &str) -> Result<()> {
-        key(public)?;
-        fs::remove_file(self.directory.join("peers").join(format!("{public}.json")))?;
-        Ok(())
+        crate::network::remove(self, public)
     }
     pub fn require_trust(&self, public: &str) -> Result<()> {
         key(public)?;
-        let peer: Peer = serde_json::from_slice(
-            &fs::read(self.directory.join("peers").join(format!("{public}.json"))).map_err(
-                |_| "peer is not trusted; pairing requires exchanged identity keys and reciprocal trust records",
-            )?,
-        )?;
-        if peer.key != public {
-            return Err("peer record key mismatch".into());
+        let own = self
+            .directory
+            .join("peers")
+            .join(format!("{}.json", self.public_key()));
+        if own.exists() && crate::network::member(self, self.public_key())?.removed {
+            return Err("this machine has been removed from the network".into());
+        }
+        if crate::network::member(self, public)?.removed {
+            return Err("peer is not an active network member".into());
         }
         Ok(())
     }
     pub fn peers(&self) -> Result<Vec<Peer>> {
-        let mut peers = Vec::new();
-        for entry in fs::read_dir(self.directory.join("peers"))? {
-            let path = entry?.path();
-            if path.extension().is_some_and(|s| s == "json") {
-                peers.push(serde_json::from_slice::<Peer>(&fs::read(path)?)?);
-            }
-        }
-        peers.sort_by(|a, b| a.key.cmp(&b.key));
-        Ok(peers)
+        Ok(crate::network::members(self)?
+            .into_iter()
+            .filter(|p| p.key != self.public_key() && !p.removed)
+            .collect())
     }
 }

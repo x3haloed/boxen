@@ -217,6 +217,14 @@ impl Definitions {
         validate(&r.spec, owner, &self.machine)?;
         Ok(r)
     }
+    pub fn owners(&self) -> Vec<String> {
+        self.latest
+            .lock()
+            .unwrap()
+            .values()
+            .map(|r| r.owner.clone())
+            .collect()
+    }
     pub fn list(&self, owner: &str) -> Value {
         let latest = self.latest.lock().unwrap();
         let mut items:Vec<_>=latest.values().filter(|r|r.owner==owner).map(|r|json!({"id":r.spec.id,"name":r.spec.name,"revision":r.revision,"created_at":r.created_at,"machine_id":r.machine_id})).collect();

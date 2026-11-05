@@ -73,7 +73,7 @@ Resident responses include `id`, `thread_id`, `owner`, `machine_id`, `name`, `id
 
 ## Verification
 
-`scripts/resident-smoke.py` uses two real daemons and the explicitly test-only Codex fixture. It covers idle creation, idempotency, owner isolation, concurrent compare-and-set edits, quotas, context injection, real dynamic-tool request/reply routing, memory across daemon and runtime restarts, canonical execution guards, uncertain-outcome continuation, missing-backend-session reconstruction, and isolation of malformed resident state. These tests establish daemon behavior, not model understanding. On October 31, 2026, the complete native and identical-file APE smoke suites passed on macOS ARM64, including host-OS detection, runtime timing/idle CPU, daemon logging, anonymous workloads, and recovery regressions. Browser checks exercised idle resident creation, resident-owned memory writes, stale human-edit rejection, explicit reload, and reopening the canonical conversation after requesting-daemon restart.
+`scripts/resident-smoke.py` uses two real daemons and the explicitly test-only Codex fixture. It covers idle creation, idempotency, shared operator access, concurrent compare-and-set edits, quotas, context injection, real dynamic-tool request/reply routing, memory across daemon and runtime restarts, canonical execution guards, uncertain-outcome continuation, missing-backend-session reconstruction, and isolation of malformed resident state. These tests establish daemon behavior, not model understanding. On October 31, 2026, the complete native and identical-file APE smoke suites passed on macOS ARM64, including host-OS detection, runtime timing/idle CPU, daemon logging, anonymous workloads, and recovery regressions. Browser checks exercised idle resident creation, resident-owned memory writes, stale human-edit rejection, explicit reload, and reopening the canonical conversation after requesting-daemon restart.
 
 The same APE was deployed to both physical Macs. A real Codex resident on the Mac mini saved a unique memory through `boxen_continuity`; after restarting its daemon/runtime, it read the exact memory and reported macOS from its current host context. The two runs retained the same canonical Boxen thread and backend conversation, with 141 retained events across the two runs and each run’s sequence preserved. New resident diagnostic events were also captured with content off. Missing-session reconstruction and malformed-state isolation were verified with the deterministic backend, not by deleting real Codex session state. Other operating systems and cross-machine resident mobility remain unverified/unimplemented respectively.
 
@@ -84,7 +84,7 @@ The same APE was deployed to both physical Macs. A real Codex resident on the Ma
 ## Compact execution activity
 
 Authenticated API operation `{"op":"thread_activity","id":"BOXEN_THREAD_ID"}`
-returns owner-scoped current metadata: `thread_id`, `known`, `run_count`,
+returns current metadata in the resolved historical thread namespace: `thread_id`, `known`, `run_count`,
 `active_runs`, and `idle`. It works for resident and identity-less Boxen threads;
 the ID is the canonical Boxen thread ID, not a provider-native session ID.
 Unknown or differently owned IDs expose no records. The response contains no

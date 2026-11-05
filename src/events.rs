@@ -509,6 +509,15 @@ impl Events {
         self.save(&mut g, next)?;
         Ok(value)
     }
+    pub fn owners(&self) -> Vec<String> {
+        let g = self.inner.lock().unwrap();
+        g.data
+            .sources
+            .values()
+            .map(|s| s.owner.clone())
+            .chain(g.data.subscriptions.values().map(|s| s.owner.clone()))
+            .collect()
+    }
     pub fn list(&self, owner: &str) -> Value {
         let g = self.inner.lock().unwrap();
         json!({"sources":g.data.sources.values().filter(|s|s.owner==owner).map(|s|json!({"id":s.spec.id,"name":s.spec.name,"audience":s.spec.audience,"generation":s.generation,"enabled":s.enabled,"mode":s.spec.mode,"seq":s.seq,"retained":s.items.len(),"dropped":s.dropped,"health":s.health,"tools":s.spec.tools})).collect::<Vec<_>>(),"subscriptions":g.data.subscriptions.values().filter(|s|s.owner==owner).collect::<Vec<_>>(),"unavailable":g.unavailable})

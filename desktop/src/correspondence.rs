@@ -49,6 +49,11 @@ pub struct Mailbox {
     pub selected: Option<ThreadKey>,
 }
 pub enum MailUpdate {
+    Receipt {
+        draft: String,
+        id: String,
+        result: Result<Value, String>,
+    },
     Page {
         destination: Destination,
         client_id: String,
@@ -154,6 +159,25 @@ impl Client {
             }
         });
     }
+    pub(crate) fn mail_receipts(
+        &self,
+        destination: Destination,
+        checks: Vec<(String, String)>,
+        publisher: Publisher,
+    ) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            for (draft, id) in checks {
+                let result = client.operation(
+                    &destination,
+                    json!({"op":"messaging","args":{"action":"status","id":id}}),
+                );
+                if !publisher.send(Update::Mail(MailUpdate::Receipt { draft, id, result })) {
+                    break;
+                }
+            }
+        });
+    }
     fn mail_submit(&self, pending: PendingMail, draft: String, publisher: Publisher, lookup: bool) {
         let client = self.clone();
         std::thread::spawn(move || {
@@ -233,6 +257,17 @@ impl Desktop {
                     }
                 }
             }
+            MailUpdate::Receipt { draft, id, result } => {
+                if let Ok(value) = result
+                    && value["id"] == id
+                    && let Some(d) = self.data.saved.mail.drafts.iter_mut().find(|d| {
+                        d.id == draft && d.last_receipt.as_ref().is_some_and(|v| v["id"] == id)
+                    })
+                {
+                    // A status observation never clears a newer draft or submits mail.
+                    d.last_receipt = Some(value);
+                }
+            }
             MailUpdate::Sent { draft, id, result } => {
                 self.data.mail.sending.remove(&draft);
                 if let Some(d) = self
@@ -302,16 +337,15 @@ impl Desktop {
                 let Some(target) = draft.recipient else {
                     return;
                 };
-                let Some(dest) = self
+                if !self
                     .data
                     .saved
                     .destinations
                     .iter()
-                    .find(|d| d.key == target.peer)
-                    .cloned()
-                else {
+                    .any(|d| d.key == target.peer)
+                {
                     return;
-                };
+                }
                 if draft.subject.trim().is_empty()
                     || draft.body.trim().is_empty()
                     || draft.subject.len() > 256
@@ -320,7 +354,11 @@ impl Desktop {
                     return;
                 }
                 let pending = PendingMail {
-                    destination: dest,
+                    destination: Destination {
+                        key: self.data.local_key.clone(),
+                        label: "This machine".into(),
+                        address: String::new(),
+                    },
                     request: json!({"op":"mailbox_send","client_id":self.data.local_key,"message":{"id":crate::new_id(),"to":{"type":"resident","id":target.id},"subject":draft.subject,"body":draft.body,"in_reply_to":draft.parent.map(|p|p.id)}}),
                 };
                 let d = self
@@ -470,7 +508,10 @@ pub fn inbox(ui: &mut egui::Ui, data: &mut Data, actions: &mut Vec<Action>) {
                 let sender = agent_name(
                     data,
                     &ThreadKey {
-                        peer: key.peer.clone(),
+                        peer: m["network"]["source_machine"]
+                            .as_str()
+                            .unwrap_or(&key.peer)
+                            .into(),
                         id: m["sender"]["id"].as_str().unwrap_or("").into(),
                     },
                 );
@@ -518,7 +559,10 @@ pub fn details(ui: &mut egui::Ui, pane: &Pane, data: &mut Data, actions: &mut Ve
                         .then(|| message["sender"]["id"].as_str().unwrap_or(""))
                 });
             let recipient = target.map(|id| ThreadKey {
-                peer: key.peer.clone(),
+                peer: message["network"]["source_machine"]
+                    .as_str()
+                    .unwrap_or(&key.peer)
+                    .into(),
                 id: id.into(),
             });
             ui.label(format!(
@@ -526,7 +570,10 @@ pub fn details(ui: &mut egui::Ui, pane: &Pane, data: &mut Data, actions: &mut Ve
                 agent_name(
                     data,
                     &ThreadKey {
-                        peer: key.peer.clone(),
+                        peer: message["network"]["source_machine"]
+                            .as_str()
+                            .unwrap_or(&key.peer)
+                            .into(),
                         id: message["sender"]["id"].as_str().unwrap_or("").into()
                     }
                 )
@@ -679,7 +726,16 @@ pub fn details(ui: &mut egui::Ui, pane: &Pane, data: &mut Data, actions: &mut Ve
     }
     if let Some(id) = &draft.accepted {
         ui.weak(format!(
-            "Accepted into mailbox · {} · replies are optional",
+            "{} · {} · replies are optional",
+            if draft
+                .last_receipt
+                .as_ref()
+                .is_some_and(|v| v["delivery"]["status"] == "queued")
+            {
+                "Saved on this machine; awaiting destination"
+            } else {
+                "Accepted into mailbox"
+            },
             &id[..id.len().min(12)]
         ));
     }
@@ -816,9 +872,23 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(50));
         }
+        let local = Destination {
+            key: client_id.clone(),
+            label: "This machine".into(),
+            address: String::new(),
+        };
+        assert!(
+            client
+                .operation(&dest, json!({"op":"resident_list"}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["id"] == resident)
+        );
         let stop = Arc::new(AtomicBool::new(false));
         client.mail_poll(
-            dest.clone(),
+            local.clone(),
             client_id.clone(),
             bus.publisher(),
             stop.clone(),
@@ -835,7 +905,7 @@ mod tests {
                 ..
             }) = bus.rx.recv_timeout(Duration::from_secs(12)).unwrap()
             {
-                assert!(residents.iter().any(|r| r["id"] == resident));
+                let _ = residents;
                 if let Some(m) = v["messages"]
                     .as_array()
                     .unwrap()
@@ -875,7 +945,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         let page = client
-            .operation(&dest, json!({"op":"client_inbox","client_id":client_id}))
+            .operation(&local, json!({"op":"client_inbox","client_id":client_id}))
             .unwrap();
         assert_eq!(
             page["messages"]

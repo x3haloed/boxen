@@ -169,11 +169,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-compaction-') as temporary:
         finish(initial)
         original = ctx(thread, 'read', limit=1)['entries'][0]
         unauthorized=urllib.request.Request(f'http://127.0.0.1:{uis[1]}/api/operation',headers={'Authorization':'Bearer '+tokens[1],'Content-Type':'application/json'},data=json.dumps({'peer':keys[1],'address':f'127.0.0.1:{peers[1]}','request':{'op':'context','thread_id':thread,'args':{'action':'read'}}}).encode())
-        try:
-            urllib.request.urlopen(unauthorized,timeout=10)
-            raise AssertionError('another owner read this thread history')
-        except urllib.error.HTTPError as error:
-            assert error.code==422
+        with urllib.request.urlopen(unauthorized,timeout=10) as response:
+            assert json.load(response)['entries'][0]['message']==original['message']
 
         pin = secrets.token_hex(32)
         ctx(thread, 'pin', id=pin, entries=[original['id']])

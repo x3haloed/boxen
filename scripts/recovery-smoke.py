@@ -230,12 +230,9 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert collect(run["id"])[1]["status"] == "completed"
         print("PASS executing-daemon crash retains history, shell reconnects to uncertain outcome, no automatic execution retry")
 
-        try:
-            request({"op":"get","id":run["id"]}, i=1,destination={"peer":keys[1],"address":""})
-            raise AssertionError("snapshot leaked across owners")
-        except urllib.error.HTTPError as error:
-            assert error.code == 422
-        print("PASS snapshot lookup retains owner isolation")
+        shared=request({"op":"get","id":run["id"]},i=1,destination={"peer":keys[1],"address":""})
+        assert shared["record"]["owner"]==keys[0]
+        print("PASS shared operator snapshot lookup retains original ownership")
     finally:
         gate.partition();gate.listener.close()
         for process in watchers + processes:

@@ -89,6 +89,8 @@ struct Desktop {
     prompt: String,
     last_save: Instant,
     next_watch: u64,
+    next_discovery: Instant,
+    delivery_cursor: usize,
     ready: bool,
     extra: Option<Destination>,
 }
@@ -169,6 +171,8 @@ impl Desktop {
             prompt: String::new(),
             last_save: Instant::now(),
             next_watch: 0,
+            next_discovery: Instant::now() + Duration::from_secs(10),
+            delivery_cursor: 0,
             ready: false,
             extra,
         };
@@ -213,7 +217,12 @@ impl Desktop {
             discovered.push(Destination {
                 key: key.into(),
                 label: p["label"].as_str().unwrap_or("Paired machine").into(),
-                address: existing.map(|d| d.address.clone()).unwrap_or_default(),
+                address: p["address"]
+                    .as_str()
+                    .filter(|a| !a.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| existing.map(|d| d.address.clone()))
+                    .unwrap_or_default(),
             });
         }
         if let Some(extra) = self.extra.take()
@@ -221,14 +230,42 @@ impl Desktop {
         {
             d.address = extra.address
         }
+        let changed: Vec<_> = self
+            .data
+            .saved
+            .destinations
+            .iter()
+            .filter(|old| {
+                discovered
+                    .iter()
+                    .find(|d| d.key == old.key)
+                    .is_none_or(|new| new.address != old.address)
+            })
+            .map(|d| d.key.clone())
+            .collect();
+        for key in changed {
+            if let Some(stop) = self.polls.remove(&key) {
+                stop.store(true, Ordering::Relaxed);
+            }
+            self.data.watches.retain(|tag, w| {
+                if tag.starts_with(&format!("{key}:")) {
+                    w.stop.store(true, Ordering::Relaxed);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         self.data.saved.destinations = discovered;
         self.data.saved.selected = self
             .data
             .saved
             .selected
             .min(self.data.saved.destinations.len().saturating_sub(1));
+        if !self.ready {
+            self.data.notice.clear();
+        }
         self.ready = true;
-        self.data.notice.clear();
     }
     fn persist(&mut self) -> bool {
         let result = serde_json::to_vec_pretty(&self.data.saved)
@@ -243,6 +280,48 @@ impl Desktop {
         }
     }
     fn poll(&mut self) {
+        if Instant::now() >= self.next_discovery {
+            self.next_discovery = Instant::now() + Duration::from_secs(10);
+            if let Some(client) = &self.client {
+                client.discover(self.bus.publisher());
+                let queued: Vec<_> = self
+                    .data
+                    .saved
+                    .mail
+                    .drafts
+                    .iter()
+                    .filter_map(|d| {
+                        d.last_receipt
+                            .as_ref()
+                            .filter(|v| {
+                                v["delivery"]["status"] == "queued"
+                                    && v["network"]["source_machine"] == self.data.local_key
+                            })
+                            .and_then(|v| v["id"].as_str())
+                            .map(|id| (d.id.clone(), id.to_owned()))
+                    })
+                    .collect();
+                if !queued.is_empty() {
+                    let checks = queued
+                        .iter()
+                        .cycle()
+                        .skip(self.delivery_cursor % queued.len())
+                        .take(8.min(queued.len()))
+                        .cloned()
+                        .collect();
+                    self.delivery_cursor = self.delivery_cursor.wrapping_add(8);
+                    client.mail_receipts(
+                        Destination {
+                            key: self.data.local_key.clone(),
+                            label: "This machine".into(),
+                            address: String::new(),
+                        },
+                        checks,
+                        self.bus.publisher(),
+                    );
+                }
+            }
+        }
         if !self.ready {
             return;
         }

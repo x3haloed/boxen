@@ -63,3 +63,5 @@ diagnostic logging.
 to test repeated 402s, coalescing, restart, owner isolation, next-input notices,
 completed tool preservation, stale/exact-ID continuation and normal anonymous
 responses. Live billing failures are separate evidence; tests do not spend credit.
+
+Machine-operator queries now aggregate host-local incident namespaces across original owners; resident context and runtime operations retain canonical identity scope. See [network](network.md).

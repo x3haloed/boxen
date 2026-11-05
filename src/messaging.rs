@@ -135,6 +135,15 @@ pub struct Connectors {
     unavailable: bool,
 }
 impl Connectors {
+    pub fn owners(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .values()
+            .map(|r| r.owner.clone())
+            .collect()
+    }
+
     pub fn open(directory: PathBuf) -> Result<Self> {
         match Self::load(directory.clone()) {
             Ok(value) => Ok(value),
@@ -543,7 +552,7 @@ fn project_address(a: &Address) -> Value {
     }
 }
 fn project(jobs: &Jobs, m: &Message) -> Value {
-    json!({"id":m.id,"from":project_address(&m.sender),"to":project_address(&m.to),"subject":if m.subject.is_empty(){Value::Null}else{json!(m.subject)},"body":m.body,"service":m.service,"reply_to":project_address(&m.reply_to),"in_reply_to":m.in_reply_to,"origin":m.origin,"accepted_at":m.accepted_at,"seq":m.seq,"delivery":jobs.mailboxes.receipt(&m.id).unwrap_or_else(||json!({"status":if matches!(m.to,Address::Connector{..}){"queued"}else{"accepted"},"accepted_on":m.accepted_on}))})
+    json!({"id":m.id,"network":m.network,"from":project_address(&m.sender),"to":project_address(&m.to),"subject":if m.subject.is_empty(){Value::Null}else{json!(m.subject)},"body":m.body,"service":m.service,"reply_to":project_address(&m.reply_to),"in_reply_to":m.in_reply_to,"origin":m.origin,"accepted_at":m.accepted_at,"seq":m.seq,"delivery":jobs.mailboxes.receipt(&m.id).unwrap_or_else(||json!({"status":if matches!(m.to,Address::Connector{..}){"queued"}else{"accepted"},"accepted_on":m.accepted_on}))})
 }
 pub fn authorize_action(
     jobs: &Jobs,
@@ -780,9 +789,12 @@ pub fn operation(
                 Ok(project(jobs, &jobs.send_mail(owner, from, spec, source)?))
             }
             "status" => {
-                let m = jobs
-                    .mailboxes
-                    .get(owner, args["id"].as_str().ok_or("message id required")?)?;
+                let participant = resident.map(|id| Address::Resident { id: id.into() });
+                let m = jobs.mailboxes.participant_message(
+                    owner,
+                    participant.as_ref(),
+                    args["id"].as_str().ok_or("message id required")?,
+                )?;
                 if let Some(r) = resident
                     && m.sender != (Address::Resident { id: r.into() })
                     && m.to != (Address::Resident { id: r.into() })

@@ -88,7 +88,7 @@ envelope use the existing [client API](client-api.md):
 
 The result is an ordinary run snapshot with `record.imported` provenance. Repeating
 the exact ID/native-ID/owner returns the accepted snapshot without reading or
-executing the source again. Conflicting ID reuse, another owner's access, an ID
+executing the source again. Authenticated network operators can inspect and retry the same accepted import while original ownership remains retained. Conflicting ID reuse, an ID
 already used by a resident, and a native thread already registered in this daemon
 are rejected. This ownership guard covers this daemon, not other daemon stores or
 external Codex clients. Promotion is a separate [resident operation](resident-promotion.md).

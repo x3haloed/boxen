@@ -113,9 +113,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         return lines[-1].strip().split('#')[1]
     tokens=[daemon(i) for i in range(2)]
     target={'peer':keys[1],'address':f'127.0.0.1:{peers[1]}'}
-    def api(op,watch=False):
+    def api(op,watch=False,local=False):
         request=urllib.request.Request(f'http://127.0.0.1:{uis[0]}/api/'+('watch' if watch else 'operation'),
-            headers={'Authorization':'Bearer '+tokens[0],'Content-Type':'application/json'},data=json.dumps({**target,'request':op}).encode())
+            headers={'Authorization':'Bearer '+tokens[0],'Content-Type':'application/json'},data=json.dumps({**({'peer':keys[0],'address':''} if local else target),'request':op}).encode())
         response=urllib.request.urlopen(request,timeout=15)
         return response if watch else json.load(response)
     def start(prompt,thread=None):
@@ -139,7 +139,11 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
     def activate(r,directions=''):return api({'op':'resident_activate','id':r['id'],'activation_id':secrets.token_hex(32),'directions':directions})
     client=secrets.token_hex(32)
     def send(r,body):return api({'op':'mailbox_send','client_id':client,'message':{'id':secrets.token_hex(32),'to':{'type':'resident','id':r['id']},'subject':'Test','body':body}})
-    def inbox():return api({'op':'client_inbox','client_id':client})['messages']
+    def inbox():
+        deadline=time.monotonic()+40
+        while api({'op':'mailbox_status'})['network_pending']:
+            assert time.monotonic()<deadline;time.sleep(.1)
+        return api({'op':'client_inbox','client_id':client},local=True)['messages']
     try:
         assert api({'op':'runtime_info'})['backends'][1]['configured']
         log=directory/'runtime-log.jsonl';api({'op':'log_file','path':str(log),'filter':{'targets':['runtime'],'events':['inference.']}})

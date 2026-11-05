@@ -15,9 +15,9 @@ Addresses are typed:
 {"type":"client","machine":"AUTHENTICATED_OWNER_MACHINE_KEY","id":"CLIENT_ID"}
 ```
 
-Mailbox sequence cursors are host-global: gaps in a filtered inbox are normal, unlike the contiguous per-run execution event sequence. Client IDs are stable lowercase 64-character hex identifiers. Multiple clients on one owning machine can use separate return queues. They share that machine's authenticated API authority; these namespaces are not isolation between mutually untrusted users. Resident and client addresses on this host must belong to the authenticated owner's domain. The Boxen transport does not route to other hosts or rooms; configured external instances route through their own service conversations. Reply-to describes an address, not an access grant.
+Mailbox sequence cursors are host-global: gaps in a filtered inbox are normal, unlike the contiguous per-run execution event sequence. Client IDs are stable lowercase 64-character hex identifiers. Multiple clients on one owning machine can use separate return queues. They share that machine's authenticated API authority; these namespaces are not isolation between mutually untrusted users. Machine operators now have network-wide access, while runtime tools retain their attached resident identity. The [network transport](network.md) routes stable resident IDs and explicit client machine addresses across hosts; external instances retain their service conversations. Reply-to describes an address, not an access grant.
 
-The receiving host durably retains an accepted message before returning it. `accepted_on` identifies that host. A successful send means queued there, not that a recipient read, understood, acted, or replied. A failed connection before acknowledgment leaves acceptance uncertain; retry keeps the same ID. A request to an unreachable executing host is not saved in a local outbox by this slice.
+The receiving host durably retains an accepted message before returning it. `accepted_on` identifies that host. A successful send means queued there, not that a recipient read, understood, acted, or replied. A failed connection before acknowledgment leaves acceptance uncertain; retry keeps the same ID. A new send accepted by the local daemon can now be saved in its durable network outbox while the destination is unreachable. Its queued receipt is distinct from destination mailbox acceptance; see [network](network.md).
 
 Every new or migrated resident defaults to `auto_activate: true`. Creation alone does not start inference. New mail notifies an event-driven dispatcher; there is no progress polling loop in the daemon. A resident with no active run receives a batch of queued messages in its next activation. Mail arriving during an active run stays queued; after the run ends it is coalesced into a subsequent activation rather than steering the current turn. Disabling automatic activation retains mail without running it. Manual activation can consume pending mail or run with no incoming messages and optional human-authored directions.
 
@@ -62,7 +62,7 @@ API version 2 advertises the fixed communication contracts in `/api/status`; ver
 | `mailbox_status` | None | Availability, journal sequence/count, and any subsystem incident |
 | `thread_result` | Anonymous run `id` | Snapshot, terminal `done` flag, and eventual conventional `response` |
 
-A resident can send to another owner-authorized resident on the same host; that message follows the recipient's activation policy. There is no automatic response routing to the original sender. Live execution events describe tool requests/results and private narration; correspondents only receive explicit messages in their client queues.
+A resident can send to another resident on the local host or a known network host; durable delivery follows the recipient's activation policy. There is no automatic response routing to the original sender. Live execution events describe tool requests/results and private narration; correspondents only receive explicit messages in their client queues.
 
 ## Persistence, migration, and recovery
 

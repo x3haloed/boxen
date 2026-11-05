@@ -295,6 +295,9 @@ impl Run {
             .cloned()
             .collect()
     }
+    pub fn owner(&self) -> String {
+        self.inner.lock().unwrap().snapshot.record.owner.clone()
+    }
     pub fn snapshot(&self) -> Snapshot {
         self.inner.lock().unwrap().snapshot.clone()
     }
@@ -549,6 +552,7 @@ impl History {
 }
 
 pub struct Jobs {
+    pub network: Mutex<Option<Arc<crate::state::State>>>,
     directory: PathBuf,
     runs: Mutex<HashMap<String, Arc<Run>>>,
     codex_path: String,
@@ -1120,6 +1124,7 @@ impl Jobs {
             residents.machine_id().into(),
         );
         let jobs = Arc::new(Self {
+            network: Mutex::new(None),
             definitions,
             connectors,
             observations,
@@ -1337,9 +1342,31 @@ impl Jobs {
         source: String,
     ) -> Result<Message> {
         self.validate_address(owner, &sender)?;
-        self.validate_address(owner, &spec.to)?;
+        if let Some(prior) = self.mailboxes.retry(&sender, &spec, &source)? {
+            return Ok(prior);
+        }
+        let network = self.network.lock().unwrap().clone();
+        let (recipient_owner, destination) = if !matches!(spec.to, Address::Connector { .. }) {
+            if let Some(state) = &network {
+                crate::network::route(state, self, &spec.to)?
+            } else {
+                self.validate_address(owner, &spec.to)?;
+                (owner.to_owned(), None)
+            }
+        } else {
+            self.validate_address(owner, &spec.to)?;
+            (owner.to_owned(), None)
+        };
         if let Some(reply) = &spec.reply_to {
-            self.validate_address(owner, reply)?;
+            if let Some(state) = &network {
+                if !matches!(reply, Address::Connector { .. }) {
+                    crate::network::route(state, self, reply)?;
+                } else {
+                    self.validate_address(owner, reply)?;
+                }
+            } else {
+                self.validate_address(owner, reply)?;
+            }
         }
         if matches!(&sender, Address::Connector { .. }) {
             return Err("native connector senders enter through scoped intake".into());
@@ -1401,7 +1428,19 @@ impl Jobs {
                 }
             }
         }
-        let message = self.mailboxes.send(owner, sender, spec, source)?;
+        let message = if destination.is_none() {
+            self.mailboxes
+                .send(&recipient_owner, sender, spec, source)?
+        } else {
+            self.mailboxes.accept_routed(
+                &recipient_owner,
+                sender,
+                spec,
+                source,
+                None,
+                destination.as_deref(),
+            )?
+        };
         self.notify();
         Ok(message)
     }
@@ -1674,6 +1713,59 @@ impl Jobs {
             }
         }
         (active.len(), queued.len())
+    }
+    pub fn operator_list(&self) -> Vec<Snapshot> {
+        let mut records: Vec<_> = self
+            .runs
+            .lock()
+            .unwrap()
+            .values()
+            .map(|r| r.snapshot())
+            .collect();
+        records.sort_by_key(|s| (s.record.created_at, s.record.spec.id.clone()));
+        records
+    }
+    pub fn operator_run(&self, id: &str) -> Result<Arc<Run>> {
+        valid_id(id)?;
+        self.runs
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "run not found on this machine".into())
+    }
+    pub fn thread_owner(&self, id: &str) -> Result<Option<String>> {
+        valid_id(id)?;
+        let runs = self.runs.lock().unwrap();
+        let mut owners = std::collections::BTreeSet::new();
+        for r in runs.values() {
+            let inner = r.inner.lock().unwrap();
+            if inner.snapshot.record.spec.thread_id == id {
+                owners.insert(inner.snapshot.record.owner.clone());
+            }
+        }
+        if owners.len() > 1 {
+            return Err("thread identity has conflicting historical namespaces".into());
+        }
+        Ok(owners.into_iter().next())
+    }
+    pub fn owners(&self) -> Vec<String> {
+        let mut owners: std::collections::BTreeSet<String> =
+            self.residents.all().into_iter().map(|r| r.owner).collect();
+        owners.insert(self.machine_id().into());
+        owners.extend(
+            self.runs
+                .lock()
+                .unwrap()
+                .values()
+                .map(|r| r.inner.lock().unwrap().snapshot.record.owner.clone()),
+        );
+        owners.extend(self.definitions.owners());
+        owners.extend(self.connectors.owners());
+        owners.extend(self.mailboxes.owners());
+        owners.extend(self.schedules.owners());
+        owners.extend(self.observations.owners());
+        owners.into_iter().collect()
     }
     pub fn list(&self, owner: &str) -> Vec<Snapshot> {
         let mut records: Vec<_> = self

@@ -293,8 +293,10 @@ fn handle(
         return Ok(());
     }
     if request == "POST /api/operation HTTP/1.1" {
-        let result = if local {
-            protocol::operation(jobs, peer, operation)
+        let result = if local && operation["op"] == "network" {
+            crate::network::operation(state, &operation["args"])
+        } else if local {
+            crate::operator::operation(jobs, peer, operation)
         } else {
             protocol::request(state, address, peer, operation.clone())
         };
@@ -329,7 +331,7 @@ fn handle(
             Some(session)
         };
         let local_run = if local {
-            Some(jobs.get(peer, id)?)
+            Some(crate::operator::run(jobs, id)?)
         } else {
             None
         };

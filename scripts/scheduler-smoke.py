@@ -101,8 +101,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-schedules-') as temporary:
         assert starts[-1]['payload']['params']['input'][1]['text'].find('host-local scheduled event')>=0
         assert not any('developerInstructions' in e['payload']['params'] for e in diagnostics if e['event']=='rpc.sent' and e['fields'].get('method') in ('thread/start','thread/resume'))
         assert not job['enabled'] and job['next_at_ms'] is None
-        rejected(lambda:api({'op':'schedule','args':{'action':'get','id':spec['id']}},local_owner=True))
-        print('PASS CLI/API one-time wake, native thread resumption, ordinary response, early stream and owner isolation',flush=True)
+        assert api({'op':'schedule','args':{'action':'get','id':spec['id']}},local_owner=True)['definition']['id']==spec['id']
+        print('PASS CLI/API one-time wake, native thread resumption, ordinary response, early stream and shared operator access',flush=True)
 
         repeating=schedule('create',spec=definition(thread,at=now()-3600000,interval=60000));repeating=accepted(repeating)
         assert repeating['last']['origin']['coalesced_occurrences']>=60 and repeating['next_at_ms']>now()

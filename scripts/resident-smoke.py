@@ -96,9 +96,9 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert request({"op":"resident_create","spec":definition}) == resident
         rejected({"op":"resident_create","spec":{**definition,"name":"different"}},"different input")
         foreign={"i":1,"destination":{"peer":keys[1],"address":""}}
-        rejected({"op":"resident_get","id":ident},"different peer",**foreign)
-        assert request({"op":"resident_list"},**foreign)==[]
-        print("PASS idle resident creation, retry-safe identity, canonical thread, placement and owner isolation")
+        assert request({"op":"resident_get","id":ident},**foreign)==resident
+        assert request({"op":"resident_list"},**foreign)==[resident]
+        print("PASS idle resident creation, retry-safe identity, canonical thread, placement and shared operator access")
 
         def race(memory):
             try:
@@ -114,8 +114,8 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         rejected({"op":"resident_update","id":ident,"patch":{"expected_revision":2,"model":"other"}},"managed sessions retain their model")
         rejected({"op":"resident_update","id":ident,"patch":{"expected_revision":2,"memory":"x"*300}},"quota exceeded")
         assert get_resident(ident)==resident
-        rejected({"op":"resident_update","id":ident,"patch":{"expected_revision":2,"memory":"stolen"}},"different peer",**foreign)
-        print("PASS concurrent memory writes use compare-and-set; stale/oversized/foreign writes leave durable state unchanged")
+        rejected({"op":"resident_update","id":ident,"patch":{"expected_revision":1,"memory":"stale shared update"}},"revision conflict",**foreign)
+        print("PASS concurrent memory writes use compare-and-set; stale/oversized writes across operators leave durable state unchanged")
 
         run=message(resident,"RESIDENT_WRITE")
         accepted=request(run)

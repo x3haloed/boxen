@@ -256,3 +256,7 @@ Remote observation setup allows twelve seconds for the loopback controller to
 resolve/connect/authenticate its peer before HTTP headers arrive. A delayed-setup
 regression verifies that a six-second setup still delivers retained activity;
 observation workers retain their finite body leases and cursor-based renewal.
+
+## Network discovery and outgoing mail
+
+The existing workspace refreshes daemon membership about every ten seconds and uses daemon-retained member endpoints. New members appear without rebuilding GUI state; removed or changed destinations detach their existing observers. Fresh mail submissions use the local daemon's durable network outbox. Existing receipt text distinguishes saved/queued mail from destination mailbox acceptance; background receipt checks do not clear newer drafts or resubmit messages. Network-origin provenance identifies the sender's machine for reply selection. No new panels or controls are added.

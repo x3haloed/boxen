@@ -339,6 +339,14 @@ impl Schedules {
         entry.job = job;
         Ok(())
     }
+    pub fn owners(&self) -> Vec<String> {
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| s.job.owner.clone())
+            .collect()
+    }
     pub fn list(&self, owner: &str) -> Vec<Job> {
         let mut result: Vec<_> = self
             .entries

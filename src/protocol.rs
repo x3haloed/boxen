@@ -261,6 +261,7 @@ fn connect_inner(
         || json!({"address":address}),
         || Value::Null,
     );
+    crate::network::remember(state, expected, address)?;
     Ok(Session {
         stream,
         transport: noise.into_transport_mode()?,
@@ -568,7 +569,9 @@ fn handle_inner(
     let request = session.receive()?;
     state.require_trust(&remote)?;
     let outcome = (|| -> Result<()> {
-        if request["op"] == "logs" {
+        if request["op"] == "network" {
+            session.send(&crate::network::operation(state, &request["args"])?)?;
+        } else if request["op"] == "logs" {
             session.diagnostics(false);
             let filter = serde_json::from_value::<Filter>(
                 request.get("filter").cloned().unwrap_or(json!({})),
@@ -587,6 +590,42 @@ fn handle_inner(
                     break;
                 }
             }
+        } else if request["op"] == "network_sync" {
+            let port = request["port"]
+                .as_u64()
+                .and_then(|v| u16::try_from(v).ok())
+                .filter(|p| *p > 0)
+                .ok_or("network listen port required")?;
+            let address =
+                std::net::SocketAddr::new(session.stream.peer_addr()?.ip(), port).to_string();
+            crate::network::merge(state, &remote, request["members"].clone())?;
+            crate::network::remember(state, &remote, &address)?;
+            let jobs = jobs.ok_or("workload service not available")?;
+            crate::network::retain_catalog(state, &remote, request["residents"].clone())?;
+            session.send(&json!({"members":crate::network::members(state)?,"residents":crate::network::catalog(jobs)}))?;
+        } else if request["op"] == "network_mail" {
+            let jobs = jobs.ok_or("workload service not available")?;
+            let message: crate::mailbox::Message =
+                serde_json::from_value(request["message"].clone())?;
+            match &message.to {
+                crate::mailbox::Address::Resident { id } => {
+                    let resident = jobs
+                        .residents
+                        .all()
+                        .into_iter()
+                        .find(|r| &r.id == id)
+                        .ok_or("network recipient is not resident on this machine")?;
+                    if resident.owner != message.owner {
+                        return Err("network recipient namespace changed".into());
+                    }
+                }
+                crate::mailbox::Address::Client { machine, .. }
+                    if machine == state.public_key() && message.owner == *machine => {}
+                _ => return Err("network mail recipient is not local".into()),
+            }
+            let accepted = jobs.mailboxes.accept_network(&remote, message)?;
+            jobs.notify();
+            session.send(&json!({"id":accepted.id,"status":"accepted","accepted_on":state.public_key(),"sequence":accepted.seq}))?;
         } else if request["op"] == "ping" {
             let message = request["message"].as_str().ok_or("message required")?;
             if message.len() > MAX_TEXT {
@@ -596,7 +635,8 @@ fn handle_inner(
         } else {
             let jobs = jobs.ok_or("workload service not available")?;
             if request["op"] == "watch" {
-                let run = jobs.get(&remote, request["id"].as_str().ok_or("run id required")?)?;
+                let run =
+                    crate::operator::run(jobs, request["id"].as_str().ok_or("run id required")?)?;
                 let mut after = request["after"].as_u64().unwrap_or(0);
                 loop {
                     state.require_trust(&remote)?;
@@ -612,7 +652,7 @@ fn handle_inner(
                     }
                 }
             } else {
-                session.send(&operation(jobs, &remote, &request)?)?;
+                session.send(&crate::operator::operation(jobs, &remote, &request)?)?;
             }
         }
         Ok(())

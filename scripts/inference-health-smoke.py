@@ -65,11 +65,10 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-health-') as temp:
   def health():return api({'op':'inference_health'})['incidents']
   first=activate();assert first['status']=='interrupted'
   h=health();assert len(h)==1 and h[0]['category']=='payment' and h[0]['http_status']==402 and h[0]['count']==1 and h[0]['active']
-  assert api({'op':'inference_health'},1)['incidents']==[]
-  reject(lambda:api({'op':'inference_resume','failed_run_id':first['record']['spec']['id'],'id':secrets.token_hex(32)},1))
+  assert api({'op':'inference_health'},1)['incidents']==h
   ident=secrets.token_hex(32);request={'op':'inference_resume','failed_run_id':first['record']['spec']['id'],'id':ident}
   second=wait(api(request));assert second['status']=='interrupted' and second['record']['spec']['thread_id']==rid
-  assert api(request)==second
+  assert api(request)==second and api(request,1)==second
   h=health();assert len(h)==1 and h[0]['count']==2 and h[0]['first_at']<=h[0]['last_at'] and h[0]['active']
   reject(lambda:api(request|{'id':secrets.token_hex(32)}))
   processes[1].terminate();processes[1].wait(timeout=10);daemon(1)
@@ -94,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-health-') as temp:
   mode='success';anon_id=secrets.token_hex(32)
   resumed=json.loads(cli(0,'inference-resume',f'127.0.0.1:{peers[1]}',keys[1],anonymous['record']['spec']['id'],'--id',anon_id));assert wait(resumed)['status']=='completed'
   assert api({'op':'thread_result','id':anon_id})['response']=='PRIVATE_RESUMED'
-  print('PASS payment classification, owner isolation, bounded/coalesced projection, restart, exact-ID continuation and stale rejection; successful resolution; source-qualified next-input notice; completed tools not replayed; CLI and ordinary request/response recovery')
+  print('PASS payment classification, shared operator access, bounded/coalesced projection, restart, exact-ID continuation and stale rejection; successful resolution; source-qualified next-input notice; completed tools not replayed; CLI and ordinary request/response recovery')
  finally:
   provider.shutdown();provider.server_close()
   for p in processes:

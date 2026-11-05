@@ -21,7 +21,7 @@ rendered browser transcript can preserve displayed text, but cannot claim origin
 Markdown, hidden prompts/reasoning, or raw voice/audio. The representation field
 records these limits. Tool-looking text remains text.
 
-The operation requires ownership, the expected resident revision and an empty
+The operation requires authenticated machine-operator access, the expected resident revision and an empty
 canonical conversation. Existing history is never overwritten or appended. A
 completed import means the history snapshot was accepted, not that any historical
 work succeeded. An exact retry with the same import ID returns the original

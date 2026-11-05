@@ -105,7 +105,7 @@ Identity-bearing agents use mailbox communication and receive their own mailbox 
 
 Identity-less ephemeral threads use ordinary request/response semantics. They are workload control channels rather than long-lived agents. Agents can address them by thread ID through dedicated thread request/response tools with Codex-like conventions; those tools are distinct from tools that send to agent mailboxes or rooms. The conventional response remains part of the ephemeral request contract, preserving the reliability of ordinary remote Codex work.
 
-The [mailbox implementation](mailboxes.md) now enforces these contracts for host-local communication. Existing residents are registered automatically, direct resident turn submissions are rejected, and activation is independent of message receipt. Automatic activation on new mail is enabled by default and configurable per resident. Mail arriving during execution waits for the next activation. Rooms, offline cross-host routing, and completion-driven resident activation remain later work.
+The [mailbox implementation](mailboxes.md) now enforces these contracts for host-local communication. Existing residents are registered automatically, direct resident turn submissions are rejected, and activation is independent of message receipt. Automatic activation on new mail is enabled by default and configurable per resident. Mail arriving during execution waits for the next activation. Rooms and completion-driven resident activation remain later work. Durable cross-host mail is now implemented through the [shared network](network.md).
 
 ## Scheduling and heartbeat pattern
 
@@ -143,3 +143,7 @@ Discord permission is operator policy; resident attention independently selects 
 ## Built-in resident model changes
 
 An operator can change a built-in inference resident’s model with a revision-checked resident update. Future activations use the saved model while accepted runs, source attribution, identity, memory, mailbox and canonical history remain intact. Backend and working-directory changes, managed-session model switching, and anonymous-thread model switching remain outside this operation. Definition application retains its existing post-execution pins.
+
+## Shared machine network
+
+Pairing admits a machine to one user's network, with propagated membership and full mutual operator access to existing agents and threads. Stored ownership remains provenance rather than an access barrier between members. Durable cross-host mail follows stable agent addresses through cached host directories and the existing correspondence journal. Hosts retain execution/history authority; membership and directories converge without replicating all journals. Removal is eventually propagated, with retained revocation records. Guest access, internet traversal, relocation and history replication remain separate work. See [network implementation](network.md).

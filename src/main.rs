@@ -19,6 +19,8 @@ mod media;
 mod message_policy;
 mod message_service;
 mod messaging;
+mod network;
+mod operator;
 mod platform;
 mod protocol;
 mod resident_bridge;
@@ -58,12 +60,13 @@ fn run() -> Result<()> {
         println!(
             "Boxen — LAN pairing prototype\n\n\
 boxen [--data-dir PATH] identity\n\
-boxen [--data-dir PATH] trust PUBLIC_KEY LABEL\n\
+boxen [--data-dir PATH] trust PUBLIC_KEY LABEL [--address HOST:PORT]\n\
 boxen [--data-dir PATH] untrust PUBLIC_KEY\n\
 boxen [--data-dir PATH] peers\n\
-boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--codex PATH] [--openrouter-key-file PATH]\n\
+boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
 boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|openrouter] [--context JSON]\n\
+boxen [--data-dir PATH] request HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] messages HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] discord-connector --instance ID [--url http://127.0.0.1:PORT]\n\
 boxen [--data-dir PATH] events HOST:PORT PUBLIC_KEY JSON\n\
@@ -139,8 +142,17 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
     let state = Arc::new(State::open(directory)?);
     match command.as_str() {
         "identity" if args.is_empty() => println!("{}", state.public_key()),
-        "trust" if args.len() == 2 => {
+        "trust" => {
+            let address = take_option(&mut args, "--address")?;
+            if args.len() != 2 {
+                return Err(
+                    "trust accepts a public key, label and optional --address HOST:PORT".into(),
+                );
+            }
             state.trust(&args[0], &args[1])?;
+            if let Some(address) = address {
+                network::set_endpoint(&state, &args[0], &address)?;
+            }
             println!("Trusted {} ({})", args[1], args[0]);
         }
         "untrust" if args.len() == 1 => {
@@ -175,6 +187,9 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
             let listen =
                 take_option(&mut args, "--listen")?.unwrap_or_else(|| "0.0.0.0:42424".into());
             let ui = take_option(&mut args, "--ui")?.unwrap_or_else(|| "127.0.0.1:42425".into());
+            let advertise = take_option(&mut args, "--advertise")?.unwrap_or_default();
+            let name = take_option(&mut args, "--name")?
+                .unwrap_or_else(|| format!("Machine {}", &state.public_key()[..8]));
             if !args.is_empty() {
                 return Err("unexpected serve arguments".into());
             }
@@ -192,6 +207,12 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 state.public_key().into(),
                 inference_config,
             )?;
+            network::configure(&state, &name, &advertise)?;
+            network::start(
+                state.clone(),
+                jobs.clone(),
+                peer_listener.local_addr()?.port(),
+            );
             jobs.start_dispatcher();
             logging::record(
                 Level::Info,
@@ -222,6 +243,13 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &args[1],
                     serde_json::json!({"op":"resident_promote","spec":spec})
                 )?)?
+            );
+        }
+        "request" if args.len() == 3 => {
+            let request: serde_json::Value = serde_json::from_str(&args[2])?;
+            println!(
+                "{}",
+                protocol::request(&state, &args[0], &args[1], request)?
             );
         }
         "residents" if args.len() == 2 => {

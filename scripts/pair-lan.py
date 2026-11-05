@@ -59,14 +59,14 @@ ssh(shlex.join(remote_command + ["trust", local_key, socket.gethostname()]))
 
 remote_log = remote_root + "/daemon.log"
 remote_pid = remote_root + "/daemon.pid"
-launch = remote_command + ["serve", "--listen", f"0.0.0.0:{args.port}", "--ui", f"127.0.0.1:{args.ui_port}"]
+launch = remote_command + ["serve", "--listen", f"0.0.0.0:{args.port}", "--ui", f"127.0.0.1:{args.ui_port}", "--name", args.host.rsplit("@",1)[-1]]
 ssh("umask 077; nohup " + shlex.join(launch) + " </dev/null >" + shlex.quote(remote_log)
     + " 2>&1 & echo $! >" + shlex.quote(remote_pid))
 log = local_root / "daemon.log"
 descriptor = os.open(log, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
 with os.fdopen(descriptor, "w") as output:
     process = subprocess.Popen(local_command + ["serve", "--listen", f"0.0.0.0:{args.port}",
-                               "--ui", f"127.0.0.1:{args.ui_port}"], stdin=subprocess.DEVNULL,
+                               "--ui", f"127.0.0.1:{args.ui_port}", "--name", socket.gethostname()], stdin=subprocess.DEVNULL,
                                stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
 (local_root / "daemon.pid").write_text(str(process.pid) + "\n")
 

@@ -134,8 +134,7 @@ They are unavailable through the resident-scoped tool.
 ```
 
 `get` takes `instance`; `update` takes `instance`, `expected_revision` and
-`enabled`. Creation is exact-ID idempotent. Foreign owners cannot inspect or
-configure the instance. Host limits are 16 retained external instances, 32 unique
+`enabled`. Creation is exact-ID idempotent. Authenticated machine operators share access to instances; resident tools and connector-instance capabilities retain their narrower bindings. Host limits are 16 retained external instances, 32 unique
 bindings per instance, eight receiving residents per native conversation, public
 settings of 8 KiB, and definition files of 32 KiB. Disabled instances retain
 correspondence while rejecting new intake and dispatch claims. Malformed instance
@@ -395,7 +394,7 @@ owner; no peer private key or new resident identity is needed. This local
 operator capability accepts only instance-matched runner actions (get, intake,
 cursors, outbox, claims/outcomes, health, Gateway, presence and attachment reads).
 It cannot configure connectors, access general workload operations, or be
-forwarded to another peer. Ordinary owner-scoped APIs remain unchanged. The
+forwarded to another peer. The bounded connector-runner capability remains distinct from full machine-operator access. The
 loopback control token is still a trusted host-administration credential, not a
 least-privilege addon credential.
 
@@ -404,3 +403,7 @@ reference for that runner. This supports placement changes without rewriting
 historical connector addresses or copying another machine's identity key.
 Secrets remain in owner-only local files. A service manager can restart the
 foreground subcommand independently of the GUI or another machine's controller.
+
+## Boxen network transport
+
+Bundled Boxen mail now routes between network hosts, with source-side durable queued acceptance, exact destination intake, retained delivery receipts and optional activation. Resident IDs remain stable; client addresses retain explicit machine/client IDs. Machine operators share access while resident tools and connector-instance capabilities remain identity-scoped. Outgoing copies are not incoming mail. See [network](network.md) for API status meanings, failure/retry behavior and bounds. External connector dispatch still never replays an uncertain external effect; safe retry of exact network-mail intake is a separate contract.

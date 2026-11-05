@@ -129,13 +129,9 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert collect(cancellation["id"])[1]["status"] == "cancelled"
         print("PASS cancellation is confirmed by backend interrupted state")
 
-        try:
-            request({"op": "control", "id": run["id"], "action": {"type": "cancel"}}, i=1,
-                    destination={"peer": keys[1], "address": ""})
-            raise AssertionError("different owner accessed run")
-        except urllib.error.HTTPError as error:
-            assert b"different peer" in error.read()
-        print("PASS run ownership enforced independently of machine trust")
+        shared=request({"op":"get","id":run["id"]},i=1,destination={"peer":keys[1],"address":""})
+        assert shared["record"]["owner"]==keys[0]
+        print("PASS host operator accesses paired workloads without rewriting source ownership")
 
         interrupted = spec("SLOW")
         request({"op": "start", "spec": interrupted})

@@ -61,8 +61,10 @@ pub struct Send {
     #[serde(default)]
     pub in_reply_to: Option<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<Value>,
     pub id: String,
@@ -176,7 +178,7 @@ impl Mailboxes {
     }
     pub fn status(&self) -> Value {
         let inner = self.inner.lock().unwrap();
-        json!({"available":self.issue.is_none(),"issue":self.issue,"last_seq":if self.issue.is_none(){Some(inner.seq)}else{None},"message_count":if self.issue.is_none(){Some(inner.messages.len())}else{None}})
+        json!({"available":self.issue.is_none(),"issue":self.issue,"last_seq":if self.issue.is_none(){Some(inner.seq)}else{None},"message_count":if self.issue.is_none(){Some(inner.messages.len())}else{None},"network_pending":inner.receipts.values().filter(|r|r["transport"]=="boxen_network" && r["status"]=="queued").count()})
     }
     fn load(directory: PathBuf, machine: String) -> Result<Self> {
         state::private_dir(&directory)?;
@@ -248,6 +250,9 @@ impl Mailboxes {
                 inner
                     .sources
                     .insert(message.source.clone(), message.id.clone());
+                if let Some(delivery) = event.get("network_delivery") {
+                    inner.receipts.insert(message.id.clone(), delivery.clone());
+                }
                 inner.ids.insert(message.id.clone(), inner.messages.len());
                 inner.messages.push(message);
             }
@@ -334,6 +339,17 @@ impl Mailboxes {
         source: String,
         origin: Option<Value>,
     ) -> Result<Message> {
+        self.accept_routed(owner, sender, spec, source, origin, None)
+    }
+    pub fn accept_routed(
+        &self,
+        owner: &str,
+        sender: Address,
+        spec: Send,
+        source: String,
+        origin: Option<Value>,
+        destination: Option<&str>,
+    ) -> Result<Message> {
         self.check()?;
         jobs::valid_id(&spec.id)?;
         sender.validate()?;
@@ -372,7 +388,14 @@ impl Mailboxes {
             .or_else(|| inner.ids.get(&spec.id).map(|i| &inner.messages[*i].id));
         if let Some(id) = prior {
             let prior = &inner.messages[inner.ids[id]];
-            if prior.matches(owner, &sender, &spec) && prior.origin == origin {
+            if prior.matches(owner, &sender, &spec)
+                && prior.origin == origin
+                && prior
+                    .network
+                    .as_ref()
+                    .and_then(|n| n["destination_machine"].as_str())
+                    == destination
+            {
                 return Ok(prior.clone());
             }
             return Err(
@@ -393,7 +416,19 @@ impl Mailboxes {
             return Err("connector pending outbox reached its 256-message bound".into());
         }
         let reply_to = spec.reply_to.clone().unwrap_or_else(|| sender.clone());
+        if destination.is_some()
+            && inner
+                .receipts
+                .values()
+                .filter(|r| r["transport"] == "boxen_network" && r["status"] == "queued")
+                .count()
+                >= 256
+        {
+            return Err("network pending outbox reached its 256-message bound".into());
+        }
         let message = Message {
+            network: destination
+                .map(|d| json!({"source_machine":self.machine,"destination_machine":d})),
             service: spec.service,
             id: spec.id,
             owner: owner.into(),
@@ -409,7 +444,11 @@ impl Mailboxes {
             source,
             origin,
         };
-        Self::append(&mut inner, json!({"kind":"message","message":message}))?;
+        let mut event = json!({"kind":"message","message":message});
+        if let Some(d) = destination {
+            event["network_delivery"] = json!({"transport":"boxen_network","destination_machine":d,"status":"queued","saved_on":self.machine,"attempts":0,"next_attempt_at":0});
+        }
+        Self::append(&mut inner, event)?;
         logging::record(
             Level::Info,
             Target::State,
@@ -426,6 +465,134 @@ impl Mailboxes {
             || json!({"subject":message.subject,"body":message.body}),
         );
         Ok(message)
+    }
+    pub fn accept_network(&self, remote: &str, mut message: Message) -> Result<Message> {
+        self.check()?;
+        jobs::valid_id(&message.id)?;
+        message.sender.validate()?;
+        message.to.validate()?;
+        message.reply_to.validate()?;
+        if message.network.as_ref().is_none_or(|n| {
+            n["source_machine"] != remote || n["destination_machine"] != self.machine
+        }) || message.accepted_on != remote
+            || message.subject.len() > 256
+            || message.subject.trim().is_empty()
+            || message.body.is_empty()
+            || message.body.len() > 32768
+            || message.service.is_some()
+            || message.origin.is_some()
+            || message.source.len() > 256
+            || serde_json::to_vec(&message.network)?.len() > 512
+            || crate::state::key(&message.owner).is_err()
+            || matches!(message.to, Address::Connector { .. })
+            || matches!(message.sender, Address::Connector { .. })
+        {
+            return Err("network mail envelope is invalid".into());
+        }
+        if let Some(id) = &message.in_reply_to {
+            jobs::valid_id(id)?;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(i) = inner.ids.get(&message.id) {
+            let prior = &inner.messages[*i];
+            message.seq = prior.seq;
+            if &message == prior {
+                return Ok(prior.clone());
+            }
+            return Err("network message identity conflicts with retained input".into());
+        }
+        if inner.sources.contains_key(&message.source) {
+            return Err("network message source conflicts with retained input".into());
+        }
+        message.seq = inner.seq + 1;
+        Self::append(
+            &mut inner,
+            json!({"kind":"message","message":message,"network_delivery":{"transport":"boxen_network","status":"accepted","accepted_on":self.machine,"source_machine":remote}}),
+        )?;
+        logging::record(
+            Level::Info,
+            Target::State,
+            "network.mail_received",
+            Context::peer(remote),
+            || json!({"message_id":message.id,"sequence":message.seq}),
+            || Value::Null,
+        );
+        Ok(message)
+    }
+    pub fn owners(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .messages
+            .iter()
+            .map(|m| m.owner.clone())
+            .collect()
+    }
+    pub fn retry(&self, sender: &Address, spec: &Send, source: &str) -> Result<Option<Message>> {
+        self.check()?;
+        let inner = self.inner.lock().unwrap();
+        let old = inner
+            .sources
+            .get(source)
+            .and_then(|id| inner.ids.get(id))
+            .or_else(|| inner.ids.get(&spec.id))
+            .and_then(|i| inner.messages.get(*i));
+        match old {
+            Some(m) if m.matches(&m.owner, sender, spec) => Ok(Some(m.clone())),
+            Some(_) => {
+                Err("message id or source already accepted with different input or sender".into())
+            }
+            None => Ok(None),
+        }
+    }
+    pub fn network_pending(&self, at: u64) -> Vec<Message> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .messages
+            .iter()
+            .filter(|m| {
+                inner.receipts.get(&m.id).is_some_and(|r| {
+                    r["transport"] == "boxen_network"
+                        && r["status"] == "queued"
+                        && r["next_attempt_at"].as_u64().unwrap_or(0) <= at
+                })
+            })
+            .take(8)
+            .cloned()
+            .collect()
+    }
+    pub fn network_outcome(&self, id: &str, outcome: Value) -> Result<()> {
+        self.check()?;
+        let mut inner = self.inner.lock().unwrap();
+        if !inner
+            .receipts
+            .get(id)
+            .is_some_and(|r| r["transport"] == "boxen_network" && r["status"] == "queued")
+        {
+            return Err("network delivery is not pending".into());
+        }
+        Self::append(
+            &mut inner,
+            json!({"kind":"connector_receipt","id":id,"receipt":outcome}),
+        )
+    }
+    pub fn participant_message(
+        &self,
+        owner: &str,
+        participant: Option<&Address>,
+        id: &str,
+    ) -> Result<Message> {
+        self.check()?;
+        let inner = self.inner.lock().unwrap();
+        inner
+            .ids
+            .get(id)
+            .and_then(|i| inner.messages.get(*i))
+            .filter(|m| {
+                m.owner == owner || participant.is_some_and(|p| &m.sender == p || &m.to == p)
+            })
+            .cloned()
+            .ok_or_else(|| "message unavailable to this participant".into())
     }
     pub fn get(&self, owner: &str, id: &str) -> Result<Message> {
         self.check()?;
@@ -693,7 +860,14 @@ impl Mailboxes {
         inner
             .messages
             .iter()
-            .filter(|m| m.owner == owner && &m.to == address && m.seq > after)
+            .filter(|m| {
+                m.owner == owner
+                    && &m.to == address
+                    && m.seq > after
+                    && m.network
+                        .as_ref()
+                        .is_none_or(|n| n["destination_machine"] == self.machine)
+            })
             .take(128)
             .take_while(|m| {
                 bytes += m.body.len()

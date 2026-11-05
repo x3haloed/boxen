@@ -16,14 +16,14 @@ Version 2 makes identity-bearing communication mailbox-based and rejects new dir
 }
 ```
 
-Use the local `identity` and an empty address for local execution. Remote addresses route to an already paired, pinned identity over authenticated Noise. Local HTTP authentication identifies the local machine's client; the destination records that machine as the workload owner. Different clients on one requesting machine see the same workload catalog. A client using another machine identity does not automatically own those runs.
+Use the local `identity` and an empty address for local execution. Remote addresses route to an already paired, pinned identity over authenticated Noise. Local HTTP authentication identifies the local machine's client; the destination records that machine as the workload owner. Different clients on one requesting machine see the same workload catalog. Authenticated network members have full operator access to those runs while stored creation ownership remains unchanged. Identity-scoped runtime tools and connector runners retain their narrower contracts. See [network access and mail](network.md).
 
 Operations:
 
 | Request | Successful response |
 | --- | --- |
 | `{"op":"list"}` | Array of run snapshots in stable acceptance order |
-| `{"op":"get","id":"RUN_ID"}` | One owner-authorized run snapshot |
+| `{"op":"get","id":"RUN_ID"}` | One network-operator-accessible run snapshot |
 | `{"op":"start","spec":SPEC}` | Accepted or previously accepted snapshot |
 | `{"op":"thread_import","spec":{"id":"BOXEN_ID","backend_thread_id":"CODEX_UUID"}}` | Read-only history import snapshot; no model execution or resident attachment |
 | `{"op":"resident_promote","spec":{"thread_id":"BOXEN_ID","name":"Name"}}` | Resident identity/mailbox attached to the existing conversation; no model execution |
@@ -101,13 +101,13 @@ legacy mailbox endpoints retain their original behavior.
 
 ## Resident definitions
 
-`resident_definition` accepts an `args` object with `action`: `list`, `get`, `history`, `create`, `update`, `instantiate`, `instances`, or `apply`. It follows the same authenticated destination envelope and owner scope as resident operations. See [resident definitions](resident-definitions.md) for exact inputs, immutable revisions, manual propagation and runtime pinning. Existing resident, mailbox, scheduling and run APIs operate on instances without a class-specific execution path.
+`resident_definition` accepts an `args` object with `action`: `list`, `get`, `history`, `create`, `update`, `instantiate`, `instances`, or `apply`. It follows the same authenticated destination envelope and shared operator access as resident operations. See [resident definitions](resident-definitions.md) for exact inputs, immutable revisions, manual propagation and runtime pinning. Existing resident, mailbox, scheduling and run APIs operate on instances without a class-specific execution path.
 
 [Resident promotion](resident-promotion.md) preserves an existing native Codex conversation and supplies resident operations through a scoped MCP bridge. The new identity uses ordinary resident/mailbox APIs; historical run records remain unchanged.
 
 ## Built-in inference health and continuation
 
-`{"op":"inference_health","offset":0}` returns owner-scoped coalesced incident
+`{"op":"inference_health","offset":0}` returns host-wide operator-visible coalesced incident
 rows with pagination. `{"op":"inference_resume","failed_run_id":"FAILED_RUN_ID","id":"NEW_RUN_ID"}`
 accepts an explicit continuation in the same canonical conversation. The source
 must remain its latest interrupted built-in run; stable exact IDs are retry-safe.

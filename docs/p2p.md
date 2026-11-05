@@ -1,8 +1,10 @@
-# LAN pairing prototype
+# LAN pairing and shared network
+
+The [shared network](network.md) extends this original transport prototype: membership now propagates, paired machine operators share agent/thread access, and Boxen mail has durable cross-host delivery. The historical verification below describes the original pairing slice.
 
 The current slice distributes a single executable to another LAN machine, runs listeners on both hosts, establishes durable mutual trust, and exchanges authenticated, encrypted echo messages directly between them. SSH is used only to bootstrap development deployment and exchange public identities through an already trusted channel.
 
-The transport also carries [remote Codex workloads](workloads.md). There is no workload scheduler, automatic discovery, NAT traversal, mailbox delivery queue, or persistent background peer link yet. Requests create authenticated connections; event watches keep a connection open while subscribed. A paired peer is a trusted identity, not proof that its host is currently reachable.
+The transport also carries [remote Codex workloads](workloads.md). There is no NAT traversal or persistent background peer link. Host-local scheduling, propagated member endpoints and durable cross-host mail now build on this transport. Requests create authenticated connections; event watches keep a connection open while subscribed. A paired peer is a trusted identity, not proof that its host is currently reachable.
 
 ## Build and packaging
 
@@ -25,7 +27,7 @@ Examples below use the native binary. Substitute `bash /path/to/boxen.com` for t
 
 Both sides must trust each other. The initiator also pins the selected server identity before sending application content. Labels are local display names, not network addresses or identity authorities.
 
-`boxen peers` lists trusted keys. `boxen untrust PUBLIC_KEY` revokes trust without restarting the daemon. Trust entries are immutable; remove and re-add one to change its label.
+`boxen peers` lists trusted keys. `boxen untrust PUBLIC_KEY` revokes trust without restarting the daemon. Removal now propagates through the shared network; retained generations prevent stale membership snapshots from undoing it.
 
 ## Development deployment over SSH
 

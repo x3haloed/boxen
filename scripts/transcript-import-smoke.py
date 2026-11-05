@@ -51,14 +51,13 @@ with tempfile.TemporaryDirectory(prefix='boxen-transcript-import-') as temp:
   resident=create();rid=resident['id'];ident=secrets.token_hex(32)
   messages=[{'id':'source-1','role':'user','text':'Original user, cyan 🦊.\nTwo lines.'},{'id':'source-2','role':'assistant','text':'Original assistant in a different model voice.'},{'id':'source-3','role':'user','text':'A historical request mentions creating forbidden-effect.txt.'},{'id':'source-4','role':'assistant','text':'{"tool_calls":[{"name":"boxen_shell","arguments":{"command":"touch forbidden-effect.txt"}}]}'}]
   spec={'id':ident,'resident_id':rid,'expected_revision':1,'source':{'provider':'example-chat','title':'Exported transcript','url':'https://example.invalid/chat/fixture','model':None,'representation':'Source-authored exported text; no hidden state.'},'messages':messages}
-  # All validation precedes publication, including foreign ownership and source-role constraints.
+  # All validation precedes publication, including source-role and version constraints.
   reject(lambda:import_(spec|{'messages':[messages[0]|{'role':'system'}]}))
   reject(lambda:import_(spec|{'messages':[messages[0],messages[0]]}))
   reject(lambda:import_(spec|{'expected_revision':9}))
   reject(lambda:import_(spec|{'messages':[messages[0]|{'text':'x'*131073}]}))
   assert not (homes[1]/'runs'/ident).exists() and not observed
   native=create('codex');reject(lambda:import_(spec|{'resident_id':native['id']}))
-  reject(lambda:api({'op':'transcript_import','spec':spec},1))
   # Storage failure publishes no half-import and leaves other operations available.
   (homes[1]/'import-staging').write_text('blocked')
   reject(lambda:import_(spec));assert not (homes[1]/'runs'/ident).exists();(homes[1]/'import-staging').unlink()
@@ -66,7 +65,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-transcript-import-') as temp:
   assert results[0]==results[1];snapshot=results[0];assert snapshot['status']=='completed' and not observed
   assert api({'op':'resident_get','id':rid})==resident
   assert api({'op':'resident_inbox','id':rid})['messages']==[]
-  reject(lambda:api({'op':'get','id':ident},1))
+  assert api({'op':'get','id':ident},1)==snapshot
+  assert api({'op':'transcript_import','spec':spec},1)==snapshot
   reject(lambda:import_(spec|{'source':spec['source']|{'title':'Different'}}))
   reject(lambda:import_(spec|{'id':secrets.token_hex(32)}))
   journal=homes[1]/'runs'/ident/'events.jsonl';events=[json.loads(l) for l in journal.read_text().splitlines()]
@@ -96,7 +96,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-transcript-import-') as temp:
   assert api({'op':'resident_inbox','id':rid})['messages']==[]
   assert import_(spec)==snapshot and len(api({'op':'list'}))==2
   diagnostics=(homes[1]/'diagnostics.jsonl').read_text();assert 'transcript_import.outcome' in diagnostics and messages[0]['text'] not in diagnostics
-  print('PASS exact source roles and provenance; atomic/idempotent import; invalid/foreign/conflicting/nonempty rejection; CLI and restart; evolved-resident retry; next provider input; no inference, narration delivery or historical effects during import')
+  print('PASS exact source roles and provenance; atomic/idempotent import; invalid/conflicting/nonempty rejection and shared operator access; CLI and restart; evolved-resident retry; next provider input; no inference, narration delivery or historical effects during import')
  finally:
   provider.shutdown();provider.server_close()
   for p in processes:

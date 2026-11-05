@@ -2,7 +2,7 @@
 
 A resident definition is a reusable, versioned template. Instantiating it creates an ordinary resident with its own ID, canonical thread, identity, mutable memory and mailbox. Instances inherit initial values; they do not share mutable continuity. Creation starts no inference. Instances remain present after their workloads finish. This slice adds no archive/delete or automatic cleanup.
 
-The first surface is the authenticated CLI/API, without new GUI controls or agent tools. Definitions are host-local and owner-scoped. Cross-machine synchronization, shared mutable memory and multiple conversations of one identity remain separate work.
+The first surface is the authenticated CLI/API, without new GUI controls or agent tools. Definitions remain host-local with original owner provenance; authenticated network operators share discovery and control. Cross-machine synchronization, shared mutable memory and multiple conversations of one identity remain separate work.
 
 ## CLI
 
@@ -64,6 +64,6 @@ A damaged definition is reported and isolated. Failure of the definition registr
 
 ## Verification
 
-`scripts/resident-class-smoke.py` exercises real paired daemons and the controlled Codex backend: independent memory and conversations, immutable revisions, explicit field application, concurrent/idempotent creation, owner isolation, quota/conflict atomicity, runtime pins, restart and definition failure isolation. These checks establish daemon behavior, not live model comprehension. The Linux rotation includes the same suite against the identical portable executable.
+`scripts/resident-class-smoke.py` exercises real paired daemons and the controlled Codex backend: independent memory and conversations, immutable revisions, explicit field application, concurrent/idempotent creation, shared operator access and runtime scope, quota/conflict atomicity, runtime pins, restart and definition failure isolation. These checks establish daemon behavior, not live model comprehension. The Linux rotation includes the same suite against the identical portable executable.
 
 On November 2, 2026, the class suite passed on native macOS ARM64, the actual APE on macOS ARM64, and the identical APE on Debian 13 x86-64. All 16 Linux controlled suites, direct LAN streaming/replay and remote cleanup passed. Native Clippy, 27 unit tests, relevant resident/mailbox/scheduler/messaging/import/inference regressions, and native/APE timing and idle-CPU checks also passed. No paid inference or live Discord traffic was used for this slice.

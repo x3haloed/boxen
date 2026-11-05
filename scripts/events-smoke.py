@@ -127,8 +127,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-schedules-') as temporary:
         manual=activate(passive);_,done=collect(manual);assert report_token in json.dumps(done['record'].get('observations',[]))
         assert substate(psub)['cursor']==1 and substate(wsub)['cursor']==1
         time.sleep(1.1);assert current(usgs)['seq']==1 and len(runs(awake['id']))==1
-        rejected(lambda:api({'op':'events','args':{'action':'source','id':usgs['spec']['id']}},local_owner=True))
-        print('PASS real USGS adapter parsing, independent collection, passive/waking batches, private resident activation, deduplication and owner isolation',flush=True)
+        assert api({'op':'events','args':{'action':'source','id':usgs['spec']['id']}},local_owner=True)['spec']['id']==usgs['spec']['id']
+        print('PASS real USGS adapter parsing, independent collection, passive/waking batches, private resident activation, deduplication and shared operator access',flush=True)
 
         anonymous=start('Anonymous game thread seed');collect(anonymous);thread=anonymous['record']['spec']['thread_id'];game_path=directory/'game-state.json'
         game=source([sys.executable,str(ROOT/'examples/adapters/grid-game.py'),str(game_path)],mode='latest',interval=60000,tools=[{'name':'look','description':'look returns current position, legal moves and revision.','kind':'query'},{'name':'move','description':'move accepts direction and current revision; stale revisions are rejected.','kind':'action'}]);gsub=subscribe(game,thread,kind='thread')

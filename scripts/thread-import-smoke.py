@@ -95,8 +95,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-import-') as temporary:
         assert len(log())==before,'idempotent retry reread the native source'
         rejected(lambda:operation(0,import_request(ident,'019a0000-0000-7000-8000-000000000002')))
         rejected(lambda:operation(0,import_request(secrets.token_hex(32))))
-        rejected(lambda:operation(1,{'op':'get','id':ident}))
-        rejected(lambda:operation(1,import_request(ident)))
+        assert operation(1,{'op':'get','id':ident})==imported
+        assert operation(1,import_request(ident))==imported
         missing=secrets.token_hex(32)
         rejected(lambda:operation(0,import_request(missing,'019a0000-0000-7000-8000-000000000099')))
         assert len(operation(0,{'op':'list'}))==1

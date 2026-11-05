@@ -27,7 +27,7 @@ Codex, and model credentials are not prerequisites. The runner checks for the
 optional probe commands before uploading rather than silently skipping tests.
 
 An optional `--codex /absolute/linux/path/to/codex --codex-model MODEL` keeps the
-nineteen controlled suites and changes the final direct-LAN check to a real Codex
+twenty controlled suites and changes the final direct-LAN check to a real Codex
 app-server workload and native thread follow-up. This opt-in path uses the Linux
 host's existing sign-in and consumes real model usage. The test does not install
 a CLI or copy authentication material. Its report distinguishes real Codex from
@@ -37,10 +37,11 @@ See [headless Codex setup and live evidence](workloads.md#headless-codex-on-linu
 Only the binary, selected test scripts, and controlled Codex fixture are copied
 to a private `/tmp/boxen-linux-*` directory. The worker records the actual OS,
 architecture, kernel, distribution, Python version, binary SHA-256, suite exit
-statuses and timings. These nineteen suites run against the uploaded file:
+statuses and timings. These twenty suites run against the uploaded file:
 
 - Blocking, notification and idle CPU checks (`platform`).
 - Pairing, authenticated controls and revocation (`smoke`).
+- Three-machine membership, shared access, durable mail and removal (`network`).
 - Workload streaming, control, ownership and restart (`workload`).
 - Text-history source roles, next-input exposure and effect-free import (`transcript-import`).
 - Independent resident definition instances and manual revision application (`resident-class`).
@@ -143,3 +144,5 @@ replay of all 46 events. The result recorded `transport: direct_tcp` and
 forwarded connections or automatic tunnel fallback participated. Temporary peers
 and the remote bundle were cleaned up. The normal daemon port 42424 is separate
 from this disposable test listener; no permanent Linux service was installed.
+
+The shared-network regression (`scripts/network-smoke.py`) uses three real daemons and is included in the controlled rotation. It covers indirect admission, shared object access, queued cross-host mail, lost acknowledgments, destination storage failure, pending bounds and membership removal. See [network](network.md).

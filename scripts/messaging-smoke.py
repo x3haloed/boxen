@@ -137,7 +137,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
         r1,r2,r3=[resident(n) for n in ['First resident','Second resident','Explicitly shared bot resident']]
         a=instance('First connector','1001',[r1],'fixture-a');b=instance('Second connector','1002',[r2,r3],'fixture-b')
         aid,bid=a['definition']['id'],b['definition']['id']
-        reject(lambda:msg('get',i=1,instance=aid))
+        assert msg('get',i=1,instance=aid)['owner']==keys[0]
         reject(lambda:msg('create',definition=a['definition']|{'account':'1002'}))
         def local_connector(instance,action,**kwargs):
             body={'peer':keys[1],'connector_instance':instance,'request':{'op':'messaging','args':{'instance':instance,'action':action,**kwargs}}}
@@ -152,8 +152,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
         reject(lambda:scoped_request({'peer':keys[1],'address':f'127.0.0.1:{peers[1]}','connector_instance':aid,'request':{'op':'messaging','args':{'action':'get','instance':aid}}},0))
 
         reject(lambda:local_connector(aid,'configure_gateway',expected_revision=1,enabled=True))
-        # Ordinary local APIs cannot claim a foreign owner; only the bounded runner route resolves it.
-        reject(lambda:msg('get',i=1,instance=aid))
+        # Machine operators share access; connector-instance capabilities remain bounded.
+        assert msg('get',i=1,instance=aid)['owner']==keys[0]
         local_key=homes[1]/'runner-local.key';local_key.write_text('fixture-a');local_key.chmod(0o600)
         def local_runner_once():
             r=subprocess.run(COMMAND+['--data-dir',str(homes[1]),'discord-connector','--instance',aid,'--credential-file',str(local_key),'--url',f'http://127.0.0.1:{uis[1]}','--api-base',f'http://127.0.0.1:{server.server_port}','--once'],capture_output=True,text=True,timeout=30)

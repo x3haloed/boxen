@@ -35,9 +35,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-resident-class-') as temp:
         processes.append(p);lines=[p.stdout.readline() for _ in range(3)];assert 'Local controls:' in lines[-1],lines
         return p,lines[-1].strip().split('#')[1]
     _,t0=daemon(0);remote,t1=daemon(1)
-    def api(request,foreign=False):
+    def api(request,foreign=False,local=False):
         i=1 if foreign else 0;token=t1 if foreign else t0
-        r=urllib.request.Request(f'http://127.0.0.1:{uis[i]}/api/operation',headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'},data=json.dumps({'peer':keys[1],'address':f'127.0.0.1:{peers[1]}','request':request}).encode())
+        r=urllib.request.Request(f'http://127.0.0.1:{uis[i]}/api/operation',headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'},data=json.dumps({'peer':keys[0] if local else keys[1],'address':'' if local else f'127.0.0.1:{peers[1]}','request':request}).encode())
         return json.load(urllib.request.urlopen(r,timeout=15))
     def classes(action,foreign=False,**args):return api({'op':'resident_definition','args':{'action':action,**args}},foreign)
     def get(r):return api({'op':'resident_get','id':r})
@@ -67,8 +67,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-resident-class-') as temp:
             created=list(pool.map(lambda _:classes('create',spec=spec),range(2)))
         assert created[0]==created[1] and created[0]['revision']==1
         assert classes('get',id=ident)['spec']['memory']==spec['memory']
-        reject(lambda:classes('get',foreign=True,id=ident))
-        assert classes('list',foreign=True)['definitions']==[]
+        assert classes('get',foreign=True,id=ident)==created[0]
+        assert classes('list',foreign=True)['definitions'][0]['id']==ident
         original=(homes[1]/'resident-definitions'/ident/'1.json').read_bytes()
         requests=[{'id':secrets.token_hex(32),'definition_id':ident,'definition_revision':1,'overrides':{'name':name}} for name in ['One','Two']]
         a,b=[classes('instantiate',spec=s) for s in requests]
@@ -81,7 +81,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-resident-class-') as temp:
         assert 'definition' not in standalone
         reject(lambda:apply(standalone['id'],1,['identity']))
         reject(lambda:classes('instantiate',spec=requests[0]|{'overrides':{'name':'other'}}))
-        reject(lambda:classes('instantiate',foreign=True,spec=requests[0]))
+        assert classes('instantiate',foreign=True,spec=requests[0])==a
         reject(lambda:classes('instantiate',spec={'id':secrets.token_hex(32),'definition_id':ident,'definition_revision':0}))
         reject(lambda:classes('instantiate',spec={'id':secrets.token_hex(32),'definition_id':ident,'definition_revision':1,'overrides':{'id':secrets.token_hex(32)}}))
         arun=activate(aid,'RESIDENT_WRITE');brun=activate(bid)
@@ -120,7 +120,10 @@ with tempfile.TemporaryDirectory(prefix='boxen-resident-class-') as temp:
         assert not api({'op':'resident_inbox','id':aid})['messages']
         assert len(api({'op':'resident_inbox','id':bid})['messages'])==1
         activate(bid)
-        replies=api({'op':'client_inbox','client_id':keys[0]})['messages'];assert len(replies)==1 and replies[0]['in_reply_to']==mail['id']
+        deadline=time.monotonic()+20
+        while api({'op':'mailbox_status'})['network_pending']:
+            assert time.monotonic()<deadline;time.sleep(.1)
+        replies=api({'op':'client_inbox','client_id':keys[0]},local=True)['messages'];assert len(replies)==1 and replies[0]['in_reply_to']==mail['id']
         # Legacy files need no migration, and no instance lifecycle depends on class storage availability.
         legacy=homes[1]/'residents'/(standalone['id']+'.json');record=json.loads(legacy.read_text());record.pop('instantiation',None);legacy.write_text(json.dumps(record))
         restart();assert get(aid)['memory']=='evolved '*40 and 'definition' not in get(standalone['id'])
