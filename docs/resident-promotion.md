@@ -7,13 +7,15 @@ remain in place. Registration starts no model turn and does not acquire an
 external writer. This slice adds CLI/API capability, with no GUI changes.
 
 Each promoted activation configures Codex's per-tool approval mode `approve` for
-`boxen_resident.boxen_send_message`. Explicit resident correspondence, including
+`boxen_resident.boxen_send_message` and `boxen_resident.boxen_mailbox`. Reading
+the activation-bound resident’s own inbox and explicit correspondence, including
 interpretation and review replies, therefore does not stop at an MCP tool approval
 prompt. Other bridge tools, servers, browser permissions and execution approvals
 keep their existing policies. This activation-scoped setting changes no global
 Codex configuration. Authenticated bridge identity, owner-local routing, message
 validation and stable-ID deduplication remain enforced by Boxen. The run retains
-`resident_message_approval_policy` alongside its normal call and delivery records;
+`resident_message_approval_policy` and `resident_mailbox_approval_policy` alongside
+its normal call and delivery records;
 approval does not turn private assistant narration into correspondence or prove
 that the recipient read the message.
 

@@ -76,6 +76,20 @@ try:
         body=json.dumps({'peer':peer,'address':'','request':request}).encode()
         req=urllib.request.Request(f'http://127.0.0.1:{ui_port}/api/operation',data=body,headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
         with urllib.request.urlopen(req,timeout=60) as r:return json.load(r)
+    def approve_fixture_continuity(run_id, answered):
+        # Only this disposable test's requested continuity operations are approved.
+        journal=data/'runs'/run_id/'events.jsonl'
+        if not journal.exists():return
+        for line in journal.read_text(encoding='utf-8').splitlines():
+            event=json.loads(line);message=event['data']
+            if event['kind']!='backend' or message.get('method')!='mcpServer/elicitation/request':continue
+            request_id=message['id']
+            if request_id in answered:continue
+            params=message['params']
+            assert params.get('serverName')=='boxen_resident' and '"boxen_continuity"' in params.get('message',''), 'unexpected approval: '+str(params.get('message'))
+            operation({'op':'control','id':run_id,'action':{'type':'respond','request_id':request_id,'result':{'action':'accept','content':{}}}})
+            answered.add(request_id)
+
     ident=secrets.token_hex(32)
     imported=operation({'op':'thread_import','spec':{'id':ident,'backend_thread_id':native}})
     assert imported['backend_thread']==native and imported['record']['imported']['turn_count']>=1
@@ -92,10 +106,12 @@ try:
         assert operation({'op':'client_inbox','client_id':peer})['messages']==[]
         message_id=secrets.token_hex(32)
         memory='promoted-memory-'+secrets.token_hex(10)
-        operation({'op':'mailbox_send','client_id':peer,'message':{'id':message_id,'to':{'type':'resident','id':ident},'subject':'Disposable promotion proof','body':f'This is a disposable migration test. Read your Boxen continuity through the MCP tools and update memory to exactly {memory}. Send one explicit mailbox reply to this message containing both the marker from the earlier conversation and the saved instruction sentinel. Native conversation history and saved instructions contain those values. No shell or file changes are needed.'}})
+        operation({'op':'mailbox_send','client_id':peer,'message':{'id':message_id,'to':{'type':'resident','id':ident},'subject':'Disposable promotion proof','body':f'This is a disposable migration test. Read your own inbox using boxen_mailbox, then read your Boxen continuity through the MCP tools and update memory to exactly {memory}. Send one explicit mailbox reply to this message containing both the marker from the earlier conversation and the saved instruction sentinel. Native conversation history and saved instructions contain those values. No shell or file changes are needed.'}})
         activated=operation({'op':'resident_activate','id':ident,'activation_id':secrets.token_hex(32)})
+        answered=set()
         deadline=time.monotonic()+180
         while time.monotonic()<deadline:
+            approve_fixture_continuity(activated['record']['spec']['id'],answered)
             current=operation({'op':'get','id':activated['record']['spec']['id']})
             if current['status'] in ('completed','failed','interrupted','cancelled'):break
             time.sleep(.2)
@@ -107,18 +123,22 @@ try:
         assert operation({'op':'resident_get','id':ident})['memory']==memory
         activation_events=[json.loads(line) for line in (data/'runs'/activated['record']['spec']['id']/'events.jsonl').read_text(encoding='utf-8').splitlines()]
         assert any(e['kind']=='resident_bridge_ready' for e in activation_events)
+        assert any(e['kind']=='resident_bridge_call' and e['data'].get('params',{}).get('name')=='boxen_mailbox' for e in activation_events), 'own-inbox tool was not exercised'
+        assert not any(e['kind']=='backend' and 'id' in e['data'] and e['data'].get('method')=='mcpServer/elicitation/request' and any('"'+tool+'"' in e['data'].get('params',{}).get('message','') for tool in ('boxen_mailbox','boxen_send_message')) for e in activation_events), 'resident correspondence unexpectedly needed approval'
         assert not any(e['kind']=='backend_session_rebuilt' for e in activation_events)
         assert journal.read_bytes()==retained_bytes,'promotion changed the historical import journal'
         quiet=operation({'op':'resident_activate','id':ident,'activation_id':secrets.token_hex(32),'directions':'This activation verifies selective correspondence. Read current Boxen continuity and finish with private narration only; send no outgoing message.'})
+        answered=set()
         deadline=time.monotonic()+180
         while time.monotonic()<deadline:
+            approve_fixture_continuity(quiet['record']['spec']['id'],answered)
             current=operation({'op':'get','id':quiet['record']['spec']['id']})
             if current['status'] in ('completed','failed','interrupted','cancelled'):break
             time.sleep(.2)
         assert current['status']=='completed' and current['backend_thread']==native,current
         assert len(operation({'op':'client_inbox','client_id':peer})['messages'])==1
         assert (codex_config.read_bytes() if codex_config.exists() else None)==config_before,'global native configuration changed'
-        report={'ok':True,'promotion':True,'native_thread_id':native,'boxen_thread_id':ident,'model':args.model,'marker_recalled':True,'saved_native_instructions_preserved':True,'global_codex_config_unchanged':True,'continuity_tool_write':True,'explicit_reply_provenance':True,'no_send_activation':True,'same_native_thread':True,'production_agents_changed':False}
+        report={'ok':True,'promotion':True,'native_thread_id':native,'boxen_thread_id':ident,'model':args.model,'marker_recalled':True,'saved_native_instructions_preserved':True,'global_codex_config_unchanged':True,'continuity_tool_write':True,'own_inbox_without_approval':True,'explicit_reply_provenance':True,'no_send_activation':True,'same_native_thread':True,'production_agents_changed':False}
         (output/'result.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps({**report,'evidence':str(output)}))
         sys.exit(0)
