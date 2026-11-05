@@ -722,7 +722,7 @@ impl Desktop {
             ("Show thread list".into(), None),
             ("Reset docking layout".into(), None),
             ("Machine connections…".into(), None),
-            ("Show correspondence".into(), None),
+            ("Show mail".into(), None),
             ("New message…".into(), None),
             ("Show agents".into(), None),
         ];
@@ -923,7 +923,7 @@ impl TabViewer for Viewer<'_> {
                 }
             }
             Pane::Agents => "Agents".into(),
-            Pane::Correspondence => "Correspondence".into(),
+            Pane::Correspondence => "Mail".into(),
             Pane::Compose(_) => "New message".into(),
             Pane::Message(k) => {
                 let text = RichText::new(correspondence::message_title(self.data, k));

@@ -137,9 +137,9 @@ history, not a large-history performance claim. The shipped native window also
 loaded an existing Mac Mini conversation through the running daemon without
 submitting a production workload.
 
-## Correspondence
+## Mail
 
-The **Correspondence** panel is docked on the left alongside Threads. It aggregates
+The **Mail** panel is docked on the left alongside Threads. It aggregates
 mail addressed to this controller's human client across configured machines;
 agent-to-agent traffic and private execution narration are not inbox messages.
 The client ID is the local daemon's stable public machine identity, so its address
@@ -153,7 +153,7 @@ thread previews share one global slot across all docking surfaces. Drafting or
 dragging pins a preview. Details include subject, sender, original text and a reply
 composer. **New message** opens a pinned editor with an agent-instance selector
 (machine and short ID distinguish names), subject and body. The palette offers
-**Show correspondence** and **New message**. Layout reset preserves open mail
+**Show mail** and **New message**. Layout reset preserves open mail
 editors and drafts, and existing saved layouts gain the new sidebar once.
 
 Sending queues ordinary Boxen mail, with explicit reply provenance when replying.
@@ -190,7 +190,7 @@ remain separate from controlled backend tests and do not send production mail.
 ## Agents panel
 
 Agents is a compact, independently dockable panel above the default
-Threads/Correspondence group. Existing saved layouts gain it once; closing it
+Threads/Mail group. Existing saved layouts gain it once; closing it
 stays respected across restarts, and **Show agents** in the command palette
 restores it. Existing editors, drafts and previews retain their layout/state.
 
@@ -227,7 +227,7 @@ resident/definition discovery with running and credential-blocked fixtures.
 
 Single-clicking a resident or an expanded class instance opens its **Activity**
 view as the workspace preview; double-clicking pins it. Activity, ordinary threads
-and correspondence share one preview across docking groups, floating surfaces
+and mail share one preview across docking groups, floating surfaces
 and machines. Dragging an activity tab or choosing **Keep open** pins it. Class
 headers continue to expand their instances rather than open a combined identity.
 Layout reset and saved-workspace restoration preserve pinned activity tabs.
@@ -238,7 +238,7 @@ status, incidents and context-cut metadata are grouped by run. Historical import
 are labeled separately from execution and retain source-role labels. This is an
 audit view: private narration is not a delivered reply, and viewing, replaying or
 loading older activity never submits mail, starts inference or repeats effects.
-Correspondence remains the message-sending surface.
+Mail remains the message-sending surface.
 
 A view initially observes the latest ten runs. **Load earlier activity** extends
 its retained-history window by ten. Its earliest loaded run remains anchored when

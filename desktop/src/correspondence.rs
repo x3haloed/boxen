@@ -398,7 +398,7 @@ pub fn message_title(data: &Data, key: &ThreadKey) -> String {
 }
 pub fn inbox(ui: &mut egui::Ui, data: &mut Data, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
-        ui.heading("Correspondence");
+        ui.heading("Mail");
         if ui.small_button("New message").clicked() {
             actions.push(Action::Mail(MailAction::New));
         }
