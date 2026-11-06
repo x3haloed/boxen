@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
                 send["body"]=json.dumps(report)
             response, sent=invoke("boxen_send_message",send,11)''')
     fixture_source=fixture_source.replace('        if eligible:', '        eligible += [m for m in activation["messages"] if "boxen.operator-question.v1" in m["body"]]\n        if eligible:')
-    fixture_source='import base64,re\n'+fixture_source
+    fixture_source=fixture_source.replace('\n', '\nimport base64,re\n', 1)
     browser_command_marker='    notification("item/started", {"item": {"id": "command",'
     assert fixture_source.count(browser_command_marker)==1
     fixture_source=fixture_source.replace(browser_command_marker,'''    browser_marker=re.search(r'BOXEN_BROWSER_APPROVAL_FIXTURE:([A-Za-z0-9+/=]+)',prompt)
