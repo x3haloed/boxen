@@ -27,6 +27,12 @@ This Cargo package builds separately from portable Boxen:
 cargo build --release --locked
 ```
 
+For distributable artifacts, `python scripts/build-work-items.py` from the
+repository root remaps local source/dependency paths. The Windows installer uses
+that helper. The native desktop's Work panel and the
+[local operator JSON API](WORKFLOW.md#direct-operator-interface) expose status,
+questions and correction returns directly to the human operator.
+
 An operator-authored JSON configuration supplies these fields:
 
 ```json

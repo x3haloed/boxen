@@ -5,9 +5,10 @@ import plistlib
 import shutil
 import subprocess
 import sys
+from build_environment import environment
 
 root = pathlib.Path(__file__).resolve().parent.parent
-subprocess.run(['cargo', 'build', '--locked', '--release', '--manifest-path', str(root / 'desktop/Cargo.toml')], check=True)
+subprocess.run(['cargo', 'build', '--locked', '--release', '--manifest-path', str(root / 'desktop/Cargo.toml')], env=environment(root), check=True)
 binary = root / 'desktop/target/release' / ('boxen-desktop.exe' if sys.platform == 'win32' else 'boxen-desktop')
 if sys.platform == 'darwin':
     app = root / 'work/Boxen.app'

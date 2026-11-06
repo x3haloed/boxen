@@ -4,6 +4,7 @@ mod client;
 mod correspondence;
 mod field;
 mod model;
+mod work;
 mod workspace;
 use client::{Bus, Client, Pending, Update, run_key};
 use eframe::egui::{self, RichText};
@@ -34,6 +35,8 @@ struct Saved {
     mail: correspondence::SavedMail,
     correspondence_added: bool,
     agents_added: bool,
+    work_added: bool,
+    work: work::Saved,
 }
 struct Observing {
     epoch: u64,
@@ -44,6 +47,7 @@ struct Observing {
 }
 #[derive(Default)]
 struct Data {
+    work: work::State,
     local_key: String,
     mail: correspondence::Mailbox,
     agents: agents::State,
@@ -59,6 +63,7 @@ struct Data {
     sending: HashSet<String>,
 }
 enum Action {
+    Work(work::Action),
     OpenActivity(ThreadKey, bool),
     Mail(correspondence::MailAction),
     Open(ThreadKey, bool),
@@ -135,9 +140,14 @@ impl Desktop {
             saved.workspace.show_agents();
             saved.agents_added = true;
         }
+        if !saved.work_added {
+            saved.workspace.show_work();
+            saved.work_added = true;
+        }
         let bus = Bus::new(cc.egui_ctx.clone());
         let mut app = Self {
             data: Data {
+                work: work::State::new(&home, &origin),
                 local_key: String::new(),
                 mail: Default::default(),
                 agents: Default::default(),
@@ -722,6 +732,22 @@ impl Desktop {
     }
     fn action(&mut self, action: Action) {
         match action {
+            Action::Work(action) => match action {
+                work::Action::Submit => {
+                    if self.data.work.prepare(&mut self.data.saved.work) && self.persist() {
+                        self.data.work.send(&self.data.saved.work, &self.bus.ctx);
+                    }
+                }
+                work::Action::Retry => {
+                    if self.persist() {
+                        self.data.work.send(&self.data.saved.work, &self.bus.ctx);
+                    }
+                }
+                work::Action::Discard => {
+                    self.data.saved.work.pending = None;
+                    self.persist();
+                }
+            },
             Action::OpenActivity(key, pin) => self
                 .data
                 .saved
@@ -804,6 +830,7 @@ impl Desktop {
             ("Show mail".into(), None),
             ("New message…".into(), None),
             ("Show agents".into(), None),
+            ("Show work".into(), None),
         ];
         for dest in &self.data.saved.destinations {
             for thread in self.data.catalogs.get(&dest.key).into_iter().flatten() {
@@ -886,6 +913,7 @@ impl Desktop {
                     4 => self.data.saved.workspace.show_correspondence(),
                     5 => self.mail_action(correspondence::MailAction::New),
                     6 => self.data.saved.workspace.show_agents(),
+                    7 => self.data.saved.workspace.show_work(),
                     0 => self.new_thread = true,
                     1 => self.data.saved.workspace.show_list(),
                     2 => {
@@ -1002,6 +1030,7 @@ impl TabViewer for Viewer<'_> {
                 }
             }
             Pane::Agents => "Agents".into(),
+            Pane::Work => "Work".into(),
             Pane::Correspondence => "Mail".into(),
             Pane::Compose(_) => "New message".into(),
             Pane::Message(k) => {
@@ -1034,6 +1063,7 @@ impl TabViewer for Viewer<'_> {
             Pane::Message(k) => egui::Id::new(("mail", &k.peer, &k.id)),
             Pane::Compose(id) => egui::Id::new(("compose", id)),
             Pane::Agents => egui::Id::new("agents"),
+            Pane::Work => egui::Id::new("work"),
             Pane::Correspondence => egui::Id::new("correspondence"),
             Pane::Threads => egui::Id::new("threads"),
             Pane::Welcome => egui::Id::new("welcome"),
@@ -1084,6 +1114,11 @@ impl TabViewer for Viewer<'_> {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
         match tab {
             Pane::Agents => agents::panel(ui, self.data, self.actions),
+            Pane::Work => {
+                if let Some(action) = self.data.work.panel(ui, &mut self.data.saved.work) {
+                    self.actions.push(Action::Work(action));
+                }
+            }
             Pane::Activity(key) => activity::panel(ui, self.data, key),
             Pane::Correspondence => correspondence::inbox(ui, self.data, self.actions),
             Pane::Message(_) | Pane::Compose(_) => {
@@ -1405,6 +1440,20 @@ impl TabViewer for Viewer<'_> {
 }
 impl eframe::App for Desktop {
     fn logic(&mut self, _: &egui::Context, _: &mut eframe::Frame) {
+        let visible = self
+            .data
+            .saved
+            .workspace
+            .dock
+            .find_tab(&Pane::Work)
+            .is_some();
+        if self
+            .data
+            .work
+            .pump(&mut self.data.saved.work, visible, &self.bus.ctx)
+        {
+            self.persist();
+        }
         self.updates();
         self.poll();
         self.observe();
@@ -1426,6 +1475,9 @@ impl eframe::App for Desktop {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Boxen").strong());
+                if ui.button("Work").clicked() {
+                    self.data.saved.workspace.show_work();
+                }
                 if !self.ready && ui.button("Reconnect daemon").clicked() {
                     self.connect();
                 }

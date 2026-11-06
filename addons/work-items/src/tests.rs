@@ -1223,6 +1223,150 @@ fn workflow_step(
         transport::dispatch(&f.s, &f.cfg, api, &job).unwrap();
     }
 }
+
+fn operator_fixture() -> (Fixture, WorkflowApi, workflow::Settings, WorkflowDriver) {
+    let (f, api, settings, mut driver) = workflow_fixture(false);
+    fs::write(
+        f.root.join("workflow.json"),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
+    for _ in 0..25 {
+        workflow_step(&f, &api, &settings, &mut driver);
+    }
+    assert_eq!(operator::detail(&f.s, 1).unwrap()["stage"], "published");
+    (f, api, settings, driver)
+}
+
+#[test]
+fn operator_return_preserves_original_candidate_same_coder_and_fresh_reviews() {
+    let (f, api, settings, mut driver) = operator_fixture();
+    let before = operator::detail(&f.s, 1).unwrap();
+    let original_sources = api
+        .mail
+        .lock()
+        .unwrap()
+        .values()
+        .filter_map(|m| serde_json::from_str::<Value>(m["body"].as_str()?).ok())
+        .filter_map(|v| v["packet_path"].as_str().map(PathBuf::from))
+        .map(|p| {
+            let bytes = fs::read(&p).unwrap();
+            (p, bytes)
+        })
+        .collect::<Vec<_>>();
+
+    let input = json!({"id":hash("operator-return"),"item":1,"kind":"correction","text":"After reopening the sample form, the selected value resets.","basis":before["basis"]});
+    let mut stale = input.clone();
+    stale["basis"] = json!(hash("stale"));
+    assert!(operator::submit(&f.s, &f.cfg, &stale).is_err());
+    let receipt = operator::locked_submit(&f.s, &f.cfg, &input).unwrap();
+    assert_eq!(
+        operator::detail(&f.s, 1).unwrap()["status"],
+        "Feedback pending"
+    );
+    assert_eq!(
+        operator::submit(&Store::open(&f.s.path).unwrap(), &f.cfg, &input).unwrap(),
+        receipt
+    );
+    let mut changed = input.clone();
+    changed["text"] = json!("different feedback");
+    assert!(operator::submit(&f.s, &f.cfg, &changed).is_err());
+    for _ in 0..30 {
+        workflow_step(&f, &api, &settings, &mut driver);
+    }
+    let after = operator::detail(&f.s, 1).unwrap();
+    for (path, bytes) in original_sources {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            bytes,
+            "Original packet reference changed during return"
+        );
+    }
+
+    assert_eq!(after["stage"], "published", "{after}");
+    assert_eq!(after["workflow"]["assignment_version"], 2);
+    assert_eq!(
+        after["workflow"]["coder_id"],
+        before["workflow"]["coder_id"]
+    );
+    assert_ne!(after["commit"], before["commit"]);
+    assert_eq!(
+        after["workflow"]["context_review"]["reviewed_commit"],
+        after["commit"]
+    );
+    assert_eq!(
+        after["workflow"]["technical_review"]["reviewed_commit"],
+        after["commit"]
+    );
+    assert_eq!(after["feedback"][0]["state"], "workflow_published");
+    assert_eq!(driver.calls.iter().filter(|c| *c == "create_pr").count(), 1);
+    let mail = api.mail.lock().unwrap();
+    let request = mail
+        .values()
+        .filter_map(|m| serde_json::from_str::<Value>(m["body"].as_str()?).ok())
+        .find(|v| v["operator_feedback"]["id"] == input["id"])
+        .unwrap();
+    assert_eq!(request["operator_feedback"]["original_text"], input["text"]);
+    let prior: Value = serde_json::from_str(
+        &fs::read_to_string(request["prior_delivery"]["evidence_path"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(prior["candidate"]["commit"], before["commit"]);
+    assert_eq!(operator::submit(&f.s, &f.cfg, &input).unwrap(), receipt);
+}
+
+#[test]
+fn operator_old_interpretation_cannot_advance_return_and_active_work_rejects_correction() {
+    let (f, mut api, settings, mut driver) = operator_fixture();
+    let old = api
+        .mail
+        .lock()
+        .unwrap()
+        .values()
+        .find(|m| m["subject"] == "Work item 1: interpretation")
+        .unwrap()
+        .clone();
+    let before = operator::detail(&f.s, 1).unwrap();
+    let input = json!({"id":hash("late-return"),"item":1,"kind":"correction","text":"The observed path differs.","basis":before["basis"]});
+    operator::submit(&f.s, &f.cfg, &input).unwrap();
+    api.auto_answer = false;
+    workflow_step(&f, &api, &settings, &mut driver);
+    api.answer(&old,json!({"protocol":"boxen.interpretation.v1","decision":"ready","scenarios":[{"id":"s1"}],"holds":[],"questions":[],"evidence_refs":["old"],"existing_work":{"unresolved_ownership":false}}),old["to"].clone());
+    workflow_step(&f, &api, &settings, &mut driver);
+    assert_eq!(operator::detail(&f.s, 1).unwrap()["stage"], "interpreting");
+    let mut concurrent = input.clone();
+    concurrent["id"] = json!(hash("concurrent"));
+    concurrent["basis"] = operator::detail(&f.s, 1).unwrap()["basis"].clone();
+    assert!(operator::submit(&f.s, &f.cfg, &concurrent).is_err());
+    assert_eq!(driver.calls.iter().filter(|c| *c == "push").count(), 1);
+}
+
+#[test]
+fn operator_questions_are_explicit_mail_and_status_keeps_prior_delivery_after_refresh() {
+    let (f, api, settings, _) = operator_fixture();
+    let before = operator::detail(&f.s, 1).unwrap();
+    let input = json!({"id":hash("operator-question"),"item":1,"kind":"question","text":"What remains unverified?","basis":before["basis"]});
+    operator::submit(&f.s, &f.cfg, &input).unwrap();
+    operator::tick(&f.s, &f.cfg, &api, &settings).unwrap();
+    operator::tick(&Store::open(&f.s.path).unwrap(), &f.cfg, &api, &settings).unwrap();
+    let mail = api.mail.lock().unwrap();
+    let m = &mail[input["id"].as_str().unwrap()];
+    assert_eq!(m["to"]["id"], settings.context_resident);
+    let body: Value = serde_json::from_str(m["body"].as_str().unwrap()).unwrap();
+    assert_eq!(body["original_text"], input["text"]);
+    assert!(m["body"].as_str().unwrap().len() < 32768);
+    drop(mail);
+    let c = f.s.connect().unwrap();
+    c.execute("INSERT INTO workflow_attempts(id,source,item,digest,stage,data,created) VALUES(?1,?2,1,?3,'no_action','{}',?4)",params![hash("refresh"),ado::config(&f.s).unwrap().source(),hash("new-source"),now()+1]).unwrap();
+    let after = operator::detail(&f.s, 1).unwrap();
+    assert_eq!(after["commit"], before["commit"]);
+    assert_eq!(after["pr"], before["pr"]);
+    assert_eq!(
+        after["workflow"]["technical_review"],
+        before["workflow"]["technical_review"]
+    );
+    assert_eq!(after["status"], "PR delivered · no further action");
+}
 #[test]
 fn operator_resume_keeps_coder_versions_assignment_and_deduplicates_after_dispatch() {
     let (f, api, settings, mut driver) = workflow_fixture(false);
@@ -2021,4 +2165,55 @@ fn approval_projection_upgrade_finds_pending_native_requests_without_repeating_a
         .unwrap();
     approvals::tick(&f.s, &f.cfg, &api).unwrap();
     assert_eq!(api.controls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn operator_changed_source_keeps_feedback_without_gating_new_questions() {
+    let (f, api, settings, _) = operator_fixture();
+    let current = operator::detail(&f.s, 1).unwrap();
+    let input = json!({"id":hash("changing-source-feedback"),"item":1,"kind":"correction","text":"The sample value resets.","basis":current["basis"]});
+    operator::submit(&f.s, &f.cfg, &input).unwrap();
+    f.s.connect()
+        .unwrap()
+        .execute(
+            "UPDATE ado_items SET revision=revision+1,raw=json_set(raw,'$.rev',2) WHERE id=1",
+            [],
+        )
+        .unwrap();
+    operator::tick(&f.s, &f.cfg, &api, &settings).unwrap();
+    let current = operator::detail(&f.s, 1).unwrap();
+    assert_eq!(current["feedback"][0]["state"], "needs_reconciliation");
+    assert_eq!(current["stage"], "published");
+    let question = json!({"id":hash("later-question"),"item":1,"kind":"question","text":"What changed in the source?","basis":current["basis"]});
+    operator::submit(&f.s, &f.cfg, &question).unwrap();
+    operator::tick(&f.s, &f.cfg, &api, &settings).unwrap();
+    assert!(
+        api.mail
+            .lock()
+            .unwrap()
+            .contains_key(question["id"].as_str().unwrap())
+    );
+}
+
+#[test]
+fn operator_observed_items_support_questions_without_creating_assignments() {
+    let (f, api, settings, _) = workflow_fixture(false);
+    fs::write(
+        f.root.join("workflow.json"),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
+    let current = operator::detail(&f.s, 1).unwrap();
+    assert_eq!(current["status"], "Observed");
+    assert_eq!(current["can_return"], false);
+    let input = json!({"id":hash("observed-question"),"item":1,"kind":"question","text":"What is known about this request?","basis":current["basis"]});
+    operator::submit(&f.s, &f.cfg, &input).unwrap();
+    operator::tick(&f.s, &f.cfg, &api, &settings).unwrap();
+    assert!(f.s.status().unwrap()["jobs"].as_array().unwrap().is_empty());
+    assert!(
+        api.mail
+            .lock()
+            .unwrap()
+            .contains_key(input["id"].as_str().unwrap())
+    );
 }

@@ -23,6 +23,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
                 report["cleanup"]["no_owned_runtime_resources"]=True
                 send["body"]=json.dumps(report)
             response, sent=invoke("boxen_send_message",send,11)''')
+    fixture_source=fixture_source.replace('        if eligible:', '        eligible += [m for m in activation["messages"] if "boxen.operator-question.v1" in m["body"]]\n        if eligible:')
     fixture_source='import base64,re\n'+fixture_source
     browser_command_marker='    notification("item/started", {"item": {"id": "command",'
     assert fixture_source.count(browser_command_marker)==1
@@ -213,6 +214,40 @@ with tempfile.TemporaryDirectory(prefix='boxen-work-items-') as tmp:
         stop(worker);start_worker();time.sleep(2.5);assert len(json.loads(command('approvals').stdout)['decisions'])==3
         assert len(api({'op':'list'}))==len(runs),'Approval recovery replayed inference'
         print('PASS assigned-browser launch and native Edge CUA/Node one-time approvals through real Boxen retained requests/control, restart without approval or inference replay')
+        # Direct operator question -> actual daemon -> controlled resident -> human
+        # mailbox, without the external developer bridge or an implementation retry.
+        stop(worker);wait(idle)
+        context=digest('operator context')
+        api({'op':'resident_create','spec':{'id':context,'name':'Context fixture','cwd':str(pack),'identity':'RESIDENT_READ','auto_activate':True}})
+        packet=json.loads(command('packet','1').stdout)
+        settings={'enabled':True,'allow_new_copies':False,'publication':False,'post_clarifications':False,
+                  'authority':'Synthetic local operator workflow','context_resident':context,
+                  'review_definition':definition,'review_revision':1,'notify_to':{'type':'client','machine':owner,'id':owner},
+                  'driver':str(root/'unused-driver'),'driver_args':[],'driver_script':str(root/'unused-script'),
+                  'driver_hash':digest('unused'),'project':{'azure_organization':cfg['organization'],'azure_project':cfg['project']},'items':[1]}
+        (home/'workflow.json').write_text(json.dumps(settings),encoding='utf-8')
+        with database(home/'work-items.sqlite3') as c:
+            c.execute('update ado_items set eligible=0')
+            c.execute("insert into workflow_attempts(id,source,item,digest,stage,data,created) values(?,?,1,?,'held',?,?)",(digest('operator attempt'),source,packet['source_digest'],json.dumps({'pause_reason':'Synthetic dependency waiting for an answer'}),int(time.time()*1000)))
+        def operator(value):
+            result=command('operator','--request-file',request_file('operator-request',value))
+            return json.loads(result.stdout.strip().splitlines()[-1])
+        detail=operator({'op':'detail','item':1})
+        assert detail['status']=='Blocked' and 'Synthetic dependency' in detail['reason']
+        feedback={'id':digest('operator-question'),'item':1,'kind':'question','text':'Which dependency is missing?','basis':detail['basis']}
+        accepted=operator({'op':'submit','feedback':feedback})
+        assert operator({'op':'submit','feedback':feedback})==accepted
+        start_worker()
+        def operator_replies():
+            return [m for m in api({'op':'client_inbox','client_id':owner,'after':0})['messages'] if m['in_reply_to']==feedback['id']]
+        reply=wait(operator_replies)[0];wait(idle)
+        assert reply['sender']=={'type':'resident','id':context} and reply['body']=='DELIVERED_EXPLICIT_REPLY'
+        before=len(api({'op':'list'}));stop(worker);start_worker();time.sleep(2.5)
+        assert len(api({'op':'list'}))==before and len(operator_replies())==1
+        assert operator({'op':'submit','feedback':feedback})==accepted
+        detail=operator({'op':'detail','item':1})
+        assert detail['feedback'][0]['state']=='mail_accepted'
+        print('PASS: direct operator status, exact feedback retry, real resident return to human mailbox and restart without replay')
         print('PASS real Boxen create/send/activation/reply, durable migration, exact retries, restart without replay, capacity queue/release, same-coder continuation with retained reservations, explicit owner transfer, immutable packets, supervised handoffs, one report-only recovery, durable notifications and private final isolation')
     finally:
         stop(worker);stop(daemon)

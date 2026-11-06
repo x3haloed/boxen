@@ -34,6 +34,13 @@ impl Default for Workspace {
     }
 }
 impl Workspace {
+    pub fn show_work(&mut self) {
+        if let Some(path) = self.dock.find_tab(&Pane::Work) {
+            self.focus(path);
+        } else {
+            self.open_editor(Pane::Work, true);
+        }
+    }
     pub fn open(&mut self, key: ThreadKey, pin: bool) {
         self.open_editor(Pane::Thread(key), pin);
     }
@@ -104,6 +111,7 @@ impl Workspace {
                 matches!(
                     p,
                     Pane::Thread(_)
+                        | Pane::Work
                         | Pane::Activity(_)
                         | Pane::Message(_)
                         | Pane::Compose(_)

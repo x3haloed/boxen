@@ -223,6 +223,23 @@ fn execute() -> Result<()> {
     );
     drop(c);
     match action.as_str() {
+        "operator" => {
+            let file = option(&mut args, "--request-file")?.context("--request-file required")?;
+            ensure!(args.is_empty(), "Unexpected operator arguments");
+            let input = read_json(&file)?;
+            let value = match input["op"].as_str() {
+                Some("list") => operator::list(&s)?,
+                Some("detail") => {
+                    operator::detail(&s, input["item"].as_i64().context("Work item required")?)?
+                }
+                Some("submit") => {
+                    let _lock = lock(&home, "workflow.lock")?;
+                    operator::submit(&s, &cfg, &input["feedback"])?
+                }
+                _ => bail!("Operator operation is list, detail or submit"),
+            };
+            println!("{}", serde_json::to_string(&value)?);
+        }
         "status" => {
             ensure!(args.is_empty(), "Unexpected status arguments");
             println!("{}", serde_json::to_string_pretty(&s.status()?)?);

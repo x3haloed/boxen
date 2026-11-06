@@ -137,7 +137,40 @@ history, not a large-history performance claim. The shipped native window also
 loaded an existing Mac Mini conversation through the running daemon without
 submitting a production workload.
 
-## Mail
+## Project work
+
+The **Work** toolbar button and **Show work** command open a single dockable project
+panel. It lists retained work items and presents current status/reason, PR link,
+candidate commit, context/technical review results and expandable evidence. Later
+no-action observations retain previous PR deliveries. Stale source observations
+and unavailable replies remain explicit. PR delivery does not claim merge or
+deployment, and the panel does not contact Azure to certify current PR state.
+
+Each item has its own saved feedback draft. **Ask a question** addresses the context
+resident and shows explicit replies alongside the original feedback and in Mail.
+**Return for correction** retains the displayed candidate and original operator
+text, then uses the service's fresh interpretation, same-coder assignment and
+review workflow. Returns become available for terminal workflow work; active work
+can still receive questions. The service validates the displayed basis rather than
+silently applying feedback to an unseen newer candidate.
+
+The optional service defaults to the sibling `.boxen-work-items` home;
+`BOXEN_WORK_ITEMS_HOME` selects another local installation. Its configured daemon
+home/origin must match the desktop attachment. Service/SQLite/HTTP work stays off
+the render thread. The service library is linked only into the independent native
+desktop package, outside the portable daemon graph. The local JSON operator CLI
+is documented in [the workflow contract](../addons/work-items/WORKFLOW.md).
+
+The panel is added once on upgrade; closing it remains respected. Drafts survive
+selection, layout and restart. Exact unresolved submissions are saved before I/O,
+never automatically resent after restart, and offer an explicit same-ID retry.
+Observation alone does not activate agents or perform workflow transitions.
+
+Native client/service release helpers remap source and dependency paths. The
+Windows executables also use a generic embedded PDB reference. Distributable
+artifacts still require a final personal-path/configuration scan.
+
+## Mail correspondence
 
 The **Mail** panel is docked on the left alongside Threads. It aggregates
 mail addressed to this controller's human client across configured machines;

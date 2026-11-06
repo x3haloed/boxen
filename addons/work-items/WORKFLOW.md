@@ -1,5 +1,64 @@
 # Automatic work-item workflow
 
+## Direct operator interface
+
+The native desktop **Work** panel and the local JSON CLI expose retained status,
+blockers, candidate commits, PR publication receipts, acceptance evidence, reviews,
+and original operator feedback without an intermediary agent. A later no-action
+assessment preserves earlier PR/evidence visibility. These are dated local
+observations; publication is distinct from merge, deployment and live remote state.
+
+`boxen-work-items --home ABS operator --request-file ABS_JSON` accepts:
+
+```json
+{"op":"list"}
+```
+
+```json
+{"op":"detail","item":123}
+```
+
+```json
+{"op":"submit","feedback":{"id":"OPERATOR_GENERATED_64_HEX_ID","item":123,"kind":"question","text":"Which dependency is missing?","basis":"OPAQUE_BASIS_FROM_DETAIL"}}
+```
+
+The local-user filesystem boundary authorizes this operator API, matching the
+existing operator CLI. It is not an operation parsed from incoming mail or a
+cross-host HTTP API. Desktop attachment checks the service's configured daemon
+home and origin. The portable daemon graph and its authenticated APIs are unchanged.
+Read operations do not advance workflows. Submit output can include metadata
+event JSONL before the final receipt. `kind` is `question` or `correction`.
+
+A question reaches the configured context resident through ordinary explicit
+mail from the operator's stable human client namespace. The recipient is captured
+at acceptance. Explicit replies retain `in_reply_to` and reach that same human
+mailbox; the desktop also projects matching replies beside the feedback. Private
+narration never becomes a reply. Reply lookup is bounded to four inbox pages and
+reports incomplete availability; the full Mail view remains independently usable.
+
+A correction names the exact displayed basis. Terminal workflow work can be
+returned once its existing assignment is idle and released. Original text,
+candidate, reviews and publication records are retained before fresh interpretation.
+The existing allocation path keeps the coder and creates a new assignment version;
+old interpretation/review responses cannot satisfy the new requests. New source
+packets have separate immutable paths. Existing holds and decision-owner roles
+remain in force; feedback grants no merge/deploy or broader publication authority.
+Source or work changes after acceptance retain a visible reconciliation condition
+without indefinitely blocking subsequent feedback. Transient failures retry stable
+mail identities with backoff. At most 256 queued submissions are accepted, and each
+pass processes at most eight, so a failed submission cannot monopolize dispatch.
+
+The desktop saves per-item drafts and an exact unresolved request before submission.
+Restart/polling does not submit it. Explicit retry uses the same ID/input; conflicting
+reuse rejects, and successful retries return the original acceptance receipt even
+after work evolves. Stopping local retries cannot undo already accepted feedback.
+Accepted feedback is not evidence of a reply or completed correction.
+
+Controlled tests cover return-to-same-coder, fresh reviews, retained earlier
+evidence, stale/late inputs, exact retries and restart. The work-item smoke suite
+checks the actual daemon/resident/human-mailbox question path with a controlled
+backend, without the external desktop bridge or real product/provider effects.
+
 `workflow.json` beside the service configuration enables an optional project
 workflow. The GUI is unchanged; compatible Boxen core supplies the bounded `thread_activity` metadata query. A missing file, or
 `"enabled": false`, preserves manual operation. Configuration and project-driver

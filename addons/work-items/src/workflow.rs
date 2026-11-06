@@ -166,6 +166,15 @@ fn save(s: &Store, a: &Attempt, stage: &str) -> Result<()> {
         "UPDATE workflow_attempts SET stage=?2,data=?3,error=NULL,next_due=0 WHERE id=?1",
         params![a.id, stage, a.data.to_string()],
     )?;
+    if matches!(stage, "published" | "held" | "no_action" | "superseded") {
+        tx.execute(
+            "UPDATE operator_feedback SET state=?2 WHERE id=?1 AND state='return_accepted'",
+            params![
+                a.data["operator_feedback"]["id"].as_str().unwrap_or(""),
+                format!("workflow_{stage}")
+            ],
+        )?;
+    }
     Store::log(
         &tx,
         a.data["job_id"].as_str().unwrap_or(&a.id),
@@ -193,6 +202,9 @@ fn enqueue(
         body["reviewed_commit"].as_str().unwrap_or(""),
         body["review_round"]
     );
+    if let Some(id) = a.data["operator_feedback"]["id"].as_str() {
+        identity.push_str(&format!(":operator:{id}"));
+    }
     if role.starts_with("notice:") {
         // Different version/outcome notices coexist; exact notice retries reuse their ID.
         identity.push_str(&format!(":{}", hash(&body.to_string())));
@@ -403,7 +415,7 @@ fn intake(s: &Store, cfg: &Config, api: &impl Boxen) -> Result<()> {
                         && state_data[format!("{}_request", body["role"].as_str().unwrap_or(""))]
                             == request
                 } else {
-                    stage == "interpreting"
+                    stage == "interpreting" && state_data["interpretation_request"] == request
                 };
                 accepted = current_response
                     && message["sender"] == serde_json::from_str::<Value>(&to)?
@@ -749,7 +761,9 @@ fn held(s: &Store, cfg: &Config, settings: &Settings, a: &Attempt, reason: &str)
         next.data["pause_reason"] = json!(reason);
         save(s, &next, "pausing")
     } else {
-        save(s, a, "held")
+        let mut next = a.clone();
+        next.data["pause_reason"] = json!(reason);
+        save(s, &next, "held")
     }
 }
 fn candidate(report: &Value) -> Result<()> {
@@ -838,6 +852,73 @@ fn correction(
     a.data["candidate"] = Value::Null;
     save(s, a, "coding")
 }
+/// Original operator feedback returns through interpretation and the existing
+/// same-coder allocation path. The previous candidate and reviews stay retained.
+pub(crate) fn operator_return(
+    s: &Store,
+    cfg: &Config,
+    api: &impl Boxen,
+    settings: &Settings,
+    id: &str,
+    input: &Value,
+    basis: &str,
+) -> Result<()> {
+    let prior: Value = serde_json::from_str(basis)?;
+    let mut a = load(s, prior["id"].as_str().context("Feedback attempt missing")?)?;
+    if a.data["operator_feedback"]["id"] == id {
+        return Ok(());
+    }
+    ensure!(
+        settings.enabled,
+        "Workflow is disabled; feedback remains saved"
+    );
+    if a.stage != prior["stage"] || a.data != prior["data"] || a.digest != prior["source_digest"] {
+        return Err(crate::operator::ReconciliationRequired("Work changed after feedback acceptance; original feedback remains retained for reconciliation").into());
+    }
+    if let Some(coder) = a.data["coder_id"].as_str() {
+        ensure!(
+            idle(api, coder)?,
+            "Return waits for the existing coder to become idle"
+        );
+        let (version, state, held): (i64, String, bool) = s.connect()?.query_row(
+            "SELECT version,state,holds_slot FROM work WHERE id=?1",
+            [a.data["job_id"].as_str().context("Job missing")?],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        ensure!(
+            a.data["assignment_version"] == version
+                && matches!(state.as_str(), "finished" | "paused")
+                && !held,
+            "Return waits for the expected assignment's resource release"
+        );
+    }
+    let root = s
+        .path
+        .parent()
+        .unwrap()
+        .join("workflow-evidence")
+        .join(&a.id);
+    fs::create_dir_all(&root)?;
+    let previous_data = if prior["delivery"].is_object() {
+        &prior["delivery"]
+    } else {
+        &a.data
+    };
+    let previous = retained_prior_delivery(&root, &previous_data.to_string())?;
+    let packet = s.packet(a.item)?;
+    if packet["source_digest"] != a.digest {
+        return Err(crate::operator::ReconciliationRequired(
+            "Source changed; original feedback remains retained for reconciliation",
+        )
+        .into());
+    }
+    a.data = json!({"packet":packet,"authority":settings.authority,
+        "allocation_request_key":format!("operator:{id}:allocation"),
+        "operator_prior_delivery":previous,
+        "operator_feedback":{"id":id,"original_text":input["text"],"author":{"type":"local_operator","machine":cfg.owner},"subject_commit":previous_data["candidate"]["commit"],"meaning":"Original operator feedback concerns the retained candidate. Fresh interpretation determines the correction scope while existing holds, owner roles and publication limits remain in force."}});
+    save(s, &a, "detected")
+}
+
 fn advance(
     s: &Store,
     cfg: &Config,
@@ -934,12 +1015,15 @@ fn advance(
     }
     match a.stage.as_str() {
         "detected" => {
-            let root = s
+            let mut root = s
                 .path
                 .parent()
                 .unwrap()
                 .join("workflow-evidence")
                 .join(&a.id);
+            if let Some(id) = a.data["operator_feedback"]["id"].as_str() {
+                root = root.join(format!("operator-{id}"));
+            }
             fs::create_dir_all(&root)?;
             let packet_path = root.join("source.json");
             let packet = &a.data["packet"];
@@ -959,10 +1043,14 @@ fn advance(
                 Ok(json!({"job_id":job,"coder_id":coder,"assignment_version":version,"state":state,"worktree":input["assignment"]["worktree"],"branch":input["assignment"]["branch"],"base_commit":input["assignment"]["base_commit"]}))
             }).transpose()?;
             let prior_delivery:Option<String>=s.connect()?.query_row("SELECT data FROM workflow_attempts WHERE source=?1 AND item=?2 AND stage='published' ORDER BY created DESC LIMIT 1",params![ado::config(s)?.source(),a.item],|r|r.get(0)).optional()?;
-            let prior_delivery = prior_delivery
+            let mut prior_delivery = prior_delivery
                 .map(|v| retained_prior_delivery(&root, &v))
                 .transpose()?;
+            if a.data["operator_prior_delivery"].is_object() {
+                prior_delivery = Some(a.data["operator_prior_delivery"].clone());
+            }
             let body = json!({"protocol":"boxen.interpretation-request.v1","packet_path":packet_path,"packet_sha256":hash(&bytes),"work_item_revision":packet["revision"],"existing_work":current,"prior_delivery":prior_delivery,
+                "operator_feedback":a.data["operator_feedback"],
                 "contract":{"protocol":"boxen.interpretation.v1","attempt_id":a.id,"work_item_id":a.item,"source_digest":a.digest,"decision":"ready|clarification_required|no_action|superseded","intended_outcome":"Concrete user-visible behavior","scenarios":[{"id":"scenario-id","role":"role","starting_state":"state/data","action":"user action","expected_result":"observable result"}],"preservation_targets":[],"authoritative_answers":[],"answer_contract":{"kind":"ado_comment|ado_revision","comment_id":"original ID","version":"original version","revision":"original revision","field":"changed requirement field for revision answers","authority_role":"product_owner|engineering_owner"},"questions":[],"question_contract":{"id":"stable across source refreshes","question":"Product question","existing_comment_id":"optional original question already posted; prevents re-posting","route":"work_item|operator|support","authority_needed":"decision owner"},"holds":[],"existing_work":{"unresolved_ownership":false},"evidence_refs":["Inspected source/comment identity"]},
                 "meaning":"An explicit JSON response to the authenticated reply_to with matching request_id, attempt_id, source_digest and in_reply_to records interpretation. Ready assesses intent; worker creation and publication are service decisions under configured human authority. Current holds, original comment authors and unknown ownership remain distinguishable. Private final narration is not a response."});
             let mid = enqueue(
@@ -1248,6 +1336,7 @@ fn advance(
             assigned["work_item"] = json!({"id":a.item,"revision":a.data["packet"]["revision"],"source_digest":a.digest});
             assigned["delivery"] = json!({"push":false,"create_or_update_pr":false,"merge":false,"deploy":false,"autocomplete":false});
             assigned["task"] = json!({"request":a.data["interpretation"]["intended_outcome"],"acceptance_criteria":a.data["interpretation"]["scenarios"],"preservation_targets":a.data["interpretation"]["preservation_targets"],"known_holds":[],"workflow":"Normal full local repository/SQL/application/authenticated-browser reproduction, implementation and validation. This assignment is the implementation stage. The service requests exact-commit context and independent technical reviews after a candidate handoff, returns findings to this same coder, and publishes a ready candidate as a full non-draft PR. No investigation-only restriction is introduced.","candidate_contract":{"protocol":"boxen.work-report.v1","commit":"full exact SHA","base":"current target base SHA","validation":{"local_runtime_exercised":true,"acceptance":[{"id":"scenario-id","status":"observed_pass","evidence":"retained real app observation reference"}]},"cleanup":{"no_owned_runtime_resources":true}},"cleanup":"Owned application processes, allocated synthetic database and temporary source configuration are cleaned after verified local work. The service-owned persistent browser/profile remains available for subsequent jobs. A candidate report distinguishes source checks, real observations, review-pending state and remaining required implementation work."});
+            assigned["task"]["operator_feedback"] = a.data["operator_feedback"].clone();
             if let Some(browser) = settings.project["browser_workflow"].as_str() {
                 assigned["task"]["browser_workflow"] = json!(browser);
             }
@@ -1650,6 +1739,7 @@ pub fn tick(
         "Boxen thread activity metadata is unavailable"
     );
     intake(s, cfg, api)?;
+    crate::operator::tick(s, cfg, api, settings)?;
     discover(s, settings)?;
     flush(s, cfg, settings, api)?;
     let c = s.connect()?;

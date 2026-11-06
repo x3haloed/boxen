@@ -1,5 +1,6 @@
 pub mod ado;
 pub mod approvals;
+pub mod operator;
 pub mod process;
 pub mod supervision;
 #[cfg(test)]
@@ -129,6 +130,7 @@ impl Store {
         supervision::migrate(&c)?;
         workflow::migrate(&c)?;
         approvals::migrate(&c)?;
+        operator::migrate(&c)?;
         Ok(s)
     }
     pub fn connect(&self) -> Result<Connection> {

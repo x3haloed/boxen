@@ -10,7 +10,7 @@ $bin=Join-Path $runtimeHome 'bin'
 $exe=Join-Path $bin 'boxen-work-items.exe'
 $wrapper=Join-Path $bin 'run-worker.ps1'
 $taskName='Boxen-Work-Items'
-if(!$NoBuild){& cargo build --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml') --release --locked;if($LASTEXITCODE -ne 0){throw 'Build failed'}}
+if(!$NoBuild){& python (Join-Path $PSScriptRoot '../../scripts/build-work-items.py');if($LASTEXITCODE -ne 0){throw 'Build failed'}}
 $old=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if($old){
     if(($old.Actions.Arguments -join ' ') -notlike ('*'+$runtimeHome+'*')){throw 'Existing task belongs to another service home'}
