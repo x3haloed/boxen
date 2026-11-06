@@ -306,7 +306,7 @@ fn row(
         response.on_hover_text(signal.label());
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 1.;
-            ui.set_max_width((ui.available_width() - 3.).max(1.));
+            ui.set_max_width((ui.available_width() - 65.).max(1.));
             let sense = if interactive {
                 egui::Sense::click()
             } else {
@@ -400,23 +400,33 @@ fn resident_row(
         r["backend"].as_str().unwrap_or_default(),
         r["model"].as_str().unwrap_or_default()
     );
-    let (clicked, pin) = row(
-        ui,
-        r["name"].as_str().unwrap_or("Resident"),
-        &format!("{line} · {}", dest.label),
-        signal,
-        &detail,
-        true,
-    );
-    if clicked || pin {
-        actions.push(Action::OpenActivity(
-            ThreadKey {
-                peer: dest.key.clone(),
-                id: id.into(),
-            },
-            pin,
-        ));
-    }
+    let key = ThreadKey {
+        peer: dest.key.clone(),
+        id: id.into(),
+    };
+    ui.horizontal(|ui| {
+        let (clicked, pin) = row(
+            ui,
+            r["name"].as_str().unwrap_or("Resident"),
+            &format!("{line} · {}", dest.label),
+            signal,
+            &detail,
+            true,
+        );
+        if clicked || pin {
+            actions.push(Action::OpenChat(key.clone(), pin));
+        }
+        let hover_id = ui.id().with(("activity-hover", id));
+        let was_hovered = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<bool>(hover_id).unwrap_or(false));
+        let button = ui.add_visible(was_hovered, egui::Button::new("Activity").small());
+        if button.clicked() {
+            actions.push(Action::OpenActivity(key.clone(), button.double_clicked()));
+        }
+        let hovered = ui.rect_contains_pointer(ui.min_rect());
+        ui.ctx().data_mut(|d| d.insert_temp(hover_id, hovered));
+    });
 }
 #[cfg(test)]
 mod tests {
@@ -528,9 +538,37 @@ mod tests {
                 modifiers: Modifiers::NONE,
             }]);
             assert!(
-                matches!(&actions[..],[Action::OpenActivity(k,p)] if k.peer=="p" && k.id=="resident" && *p==pinned)
+                matches!(&actions[..],[Action::OpenChat(k,p)] if k.peer=="p" && k.id=="resident" && *p==pinned)
             );
         }
+        let (out, _) = frame(vec![Event::PointerMoved(pos)]);
+        let activity = out
+            .shapes
+            .iter()
+            .find_map(|s| {
+                if let egui::epaint::Shape::Text(t) = &s.shape {
+                    (t.galley.job.text == "Activity").then_some(t.pos + t.galley.size() / 2.)
+                } else {
+                    None
+                }
+            })
+            .expect("Hover reveals Activity");
+        frame(vec![
+            Event::PointerMoved(activity),
+            Event::PointerButton {
+                pos: activity,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        let (_, actions) = frame(vec![Event::PointerButton {
+            pos: activity,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert!(matches!(&actions[..], [Action::OpenActivity(k, _)] if k.id == "resident"));
     }
     #[test]
     fn class_name_click_expands_instances() {
@@ -623,7 +661,13 @@ mod tests {
             .to_owned();
         let bus = Bus::new(egui::Context::default());
         let stop = Arc::new(AtomicBool::new(false));
-        client.mail_poll(dest.clone(), key, bus.publisher(), stop.clone());
+        client.mail_poll(
+            dest.clone(),
+            key,
+            bus.publisher(),
+            stop.clone(),
+            Default::default(),
+        );
         let mut state = State::default();
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {

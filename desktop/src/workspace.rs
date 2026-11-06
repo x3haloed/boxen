@@ -9,6 +9,8 @@ pub struct Workspace {
     pub mail_preview: Option<ThreadKey>,
     #[serde(default)]
     pub activity_preview: Option<ThreadKey>,
+    #[serde(default)]
+    pub chat_preview: Option<ThreadKey>,
 }
 impl Default for Workspace {
     fn default() -> Self {
@@ -30,6 +32,7 @@ impl Default for Workspace {
             preview: None,
             mail_preview: None,
             activity_preview: None,
+            chat_preview: None,
         }
     }
 }
@@ -52,6 +55,7 @@ impl Workspace {
     }
     pub fn is_preview(&self, pane: &Pane) -> bool {
         match pane {
+            Pane::Chat(k) => self.chat_preview.as_ref() == Some(k),
             Pane::Activity(k) => self.activity_preview.as_ref() == Some(k),
             Pane::Thread(k) => self.preview.as_ref() == Some(k),
             Pane::Message(k) => self.mail_preview.as_ref() == Some(k),
@@ -60,6 +64,7 @@ impl Workspace {
     }
     pub fn pin_pane(&mut self, pane: &Pane) {
         match pane {
+            Pane::Chat(k) if self.chat_preview.as_ref() == Some(k) => self.chat_preview = None,
             Pane::Activity(k) if self.activity_preview.as_ref() == Some(k) => {
                 self.activity_preview = None
             }
@@ -74,12 +79,15 @@ impl Workspace {
             .map(Pane::Thread)
             .or_else(|| self.mail_preview.clone().map(Pane::Message))
             .or_else(|| self.activity_preview.clone().map(Pane::Activity))
+            .or_else(|| self.chat_preview.clone().map(Pane::Chat))
     }
     fn set_preview(&mut self, pane: Pane) {
         self.preview = None;
         self.mail_preview = None;
         self.activity_preview = None;
+        self.chat_preview = None;
         match pane {
+            Pane::Chat(k) => self.chat_preview = Some(k),
             Pane::Activity(k) => self.activity_preview = Some(k),
             Pane::Thread(k) => self.preview = Some(k),
             Pane::Message(k) => self.mail_preview = Some(k),
@@ -112,6 +120,7 @@ impl Workspace {
                     p,
                     Pane::Thread(_)
                         | Pane::Work
+                        | Pane::Chat(_)
                         | Pane::Activity(_)
                         | Pane::Message(_)
                         | Pane::Compose(_)
@@ -228,6 +237,19 @@ mod tests {
             peer: "p".into(),
             id: id.into(),
         }
+    }
+    #[test]
+    fn chat_preview_is_global_and_drafting_pins_it() {
+        let mut w = Workspace::default();
+        let chat = Pane::Chat(key("agent"));
+        w.open_editor(chat.clone(), false);
+        w.open_editor(Pane::Activity(key("agent")), false);
+        assert!(w.dock.find_tab(&chat).is_none());
+        w.open_editor(chat.clone(), false);
+        w.pin_pane(&chat);
+        w.open(key("thread"), false);
+        assert!(w.dock.find_tab(&chat).is_some());
+        assert!(!w.is_preview(&chat));
     }
     #[test]
     fn preview_replaces_globally_after_docking() {

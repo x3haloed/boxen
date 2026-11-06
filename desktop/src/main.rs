@@ -65,6 +65,7 @@ struct Data {
 enum Action {
     Work(work::Action),
     OpenActivity(ThreadKey, bool),
+    OpenChat(ThreadKey, bool),
     Mail(correspondence::MailAction),
     Open(ThreadKey, bool),
     Pin(ThreadKey),
@@ -338,6 +339,20 @@ impl Desktop {
         let Some(client) = self.client.as_ref() else {
             return;
         };
+        *self.data.mail.watching.lock().unwrap() = self
+            .data
+            .saved
+            .workspace
+            .dock
+            .iter_all_tabs()
+            .filter_map(|(_, pane)| {
+                if let Pane::Chat(key) = pane {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
         for dest in &self.data.saved.destinations {
             if dest.address.is_empty() && dest.key != self.data.local_key {
                 continue;
@@ -350,6 +365,7 @@ impl Desktop {
                     self.data.local_key.clone(),
                     self.bus.publisher(),
                     stop.clone(),
+                    self.data.mail.watching.clone(),
                 );
                 self.polls.insert(dest.key.clone(), stop);
             }
@@ -748,6 +764,9 @@ impl Desktop {
                     self.persist();
                 }
             },
+            Action::OpenChat(key, pin) => {
+                self.data.saved.workspace.open_editor(Pane::Chat(key), pin)
+            }
             Action::OpenActivity(key, pin) => self
                 .data
                 .saved
@@ -927,6 +946,7 @@ impl Desktop {
                                 matches!(
                                     p,
                                     Pane::Thread(_)
+                                        | Pane::Chat(_)
                                         | Pane::Activity(_)
                                         | Pane::Message(_)
                                         | Pane::Compose(_)
@@ -1021,6 +1041,14 @@ impl TabViewer for Viewer<'_> {
     type Tab = Pane;
     fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
         match tab {
+            Pane::Chat(key) => {
+                let text = RichText::new(activity::title(self.data, key));
+                if self.data.saved.workspace.is_preview(tab) {
+                    text.italics().into()
+                } else {
+                    text.into()
+                }
+            }
             Pane::Activity(key) => {
                 let name = RichText::new(format!("{} · Activity", activity::title(self.data, key)));
                 if self.data.saved.workspace.is_preview(tab) {
@@ -1058,6 +1086,7 @@ impl TabViewer for Viewer<'_> {
     }
     fn id(&mut self, tab: &mut Pane) -> egui::Id {
         match tab {
+            Pane::Chat(k) => egui::Id::new(("chat", &k.peer, &k.id)),
             Pane::Activity(k) => egui::Id::new(("activity", &k.peer, &k.id)),
             Pane::Thread(k) => egui::Id::new((&k.peer, &k.id)),
             Pane::Message(k) => egui::Id::new(("mail", &k.peer, &k.id)),
@@ -1073,8 +1102,10 @@ impl TabViewer for Viewer<'_> {
         [false, false]
     }
     fn on_tab_button(&mut self, tab: &mut Pane, response: &egui::Response) {
-        if matches!(tab, Pane::Activity(_) | Pane::Message(_) | Pane::Compose(_))
-            && (response.double_clicked() || response.drag_started())
+        if matches!(
+            tab,
+            Pane::Chat(_) | Pane::Activity(_) | Pane::Message(_) | Pane::Compose(_)
+        ) && (response.double_clicked() || response.drag_started())
         {
             self.actions
                 .push(Action::Mail(correspondence::MailAction::Pin(tab.clone())));
@@ -1092,8 +1123,10 @@ impl TabViewer for Viewer<'_> {
         }
     }
     fn context_menu(&mut self, ui: &mut egui::Ui, tab: &mut Pane, _: egui_dock::NodePath) {
-        if matches!(tab, Pane::Thread(_) | Pane::Activity(_) | Pane::Message(_))
-            && ui.button("Keep open").clicked()
+        if matches!(
+            tab,
+            Pane::Thread(_) | Pane::Chat(_) | Pane::Activity(_) | Pane::Message(_)
+        ) && ui.button("Keep open").clicked()
         {
             self.actions
                 .push(Action::Mail(correspondence::MailAction::Pin(tab.clone())));
@@ -1119,6 +1152,7 @@ impl TabViewer for Viewer<'_> {
                     self.actions.push(Action::Work(action));
                 }
             }
+            Pane::Chat(key) => correspondence::chat(ui, self.data, key, self.actions),
             Pane::Activity(key) => activity::panel(ui, self.data, key),
             Pane::Correspondence => correspondence::inbox(ui, self.data, self.actions),
             Pane::Message(_) | Pane::Compose(_) => {

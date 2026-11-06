@@ -12,6 +12,7 @@ pub enum Pane {
     Work,
     Agents,
     Activity(ThreadKey),
+    Chat(ThreadKey),
     Threads,
     Correspondence,
     Message(ThreadKey),

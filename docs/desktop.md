@@ -258,8 +258,21 @@ resident/definition discovery with running and credential-blocked fixtures.
 
 ## Resident activity
 
-Single-clicking a resident or an expanded class instance opens its **Activity**
-view as the workspace preview; double-clicking pins it. Activity, ordinary threads
+Single-clicking a resident or an expanded class instance opens a conversation
+preview titled with that agent's name; double-clicking pins it. The conversation
+is a chronological projection of mail between the human client and that instance,
+with sent messages on the right, received messages on the left and a simple message
+composer. Older mail subjects remain visible; new chat messages use a generic
+conversation subject. No private activity is presented as delivered correspondence.
+The Activity button beside a resident's name appears while its row is hovered and
+opens the separate **Activity** preview. Opening either view does not activate the
+resident. Drafting pins a conversation, and exact uncertain sends retain the same
+explicit retry behavior as other mail editors. Sent history is read through the
+existing paginated resident inbox API only for open conversations, filtered to this
+human client's sender identity; incoming mail retains the existing client inbox
+projection. Existing Mail panels and drafts remain accessible.
+
+Activity, ordinary threads
 and mail share one preview across docking groups, floating surfaces
 and machines. Dragging an activity tab or choosing **Keep open** pins it. Class
 headers continue to expand their instances rather than open a combined identity.
@@ -271,7 +284,7 @@ status, incidents and context-cut metadata are grouped by run. Historical import
 are labeled separately from execution and retain source-role labels. This is an
 audit view: private narration is not a delivered reply, and viewing, replaying or
 loading older activity never submits mail, starts inference or repeats effects.
-Mail remains the message-sending surface.
+The conversation composer and legacy Mail editors send ordinary Boxen mail.
 
 A view initially observes the latest ten runs. **Load earlier activity** extends
 its retained-history window by ten. Its earliest loaded run remains anchored when

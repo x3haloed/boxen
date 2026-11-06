@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -47,8 +47,17 @@ pub struct Mailbox {
     pub sending: HashSet<String>,
     pub filter: String,
     pub selected: Option<ThreadKey>,
+    pub outgoing: HashMap<ThreadKey, Value>,
+    pub watching: Arc<Mutex<HashSet<ThreadKey>>>,
+    pub history_errors: HashMap<ThreadKey, String>,
 }
 pub enum MailUpdate {
+    Outgoing {
+        peer: String,
+        messages: Vec<Value>,
+        agent: String,
+        error: Option<String>,
+    },
     Receipt {
         draft: String,
         id: String,
@@ -83,10 +92,12 @@ impl Client {
         client_id: String,
         publisher: Publisher,
         stop: Arc<AtomicBool>,
+        watching: Arc<Mutex<HashSet<ThreadKey>>>,
     ) {
         let client = self.clone();
         std::thread::spawn(move || {
             let mut after = 0;
+            let mut sent_cursors = HashMap::new();
             let mut resident_refresh = std::time::Instant::now() - Duration::from_secs(10);
             let mut resident_cache: Result<Vec<Value>, String> = Ok(vec![]);
             let mut definitions = Ok(json!({"definitions":[]}));
@@ -122,6 +133,58 @@ impl Client {
                         health = Err("Machine unavailable".into());
                     }
                     resident_refresh = std::time::Instant::now();
+                }
+                if let Ok(rows) = &resident_cache {
+                    for resident in rows {
+                        let Some(id) = resident["id"].as_str() else {
+                            continue;
+                        };
+                        if !watching.lock().unwrap().contains(&ThreadKey {
+                            peer: destination.key.clone(),
+                            id: id.into(),
+                        }) {
+                            continue;
+                        }
+                        let cursor = sent_cursors.entry(id.to_owned()).or_insert(0);
+                        match client.operation(
+                            &destination,
+                            json!({"op":"resident_inbox","id":id,"after":*cursor}),
+                        ) {
+                            Ok(page) => {
+                                *cursor =
+                                    page["next_after"].as_u64().unwrap_or(*cursor).max(*cursor);
+                                let messages = page["messages"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter(|m| {
+                                        m["sender"]["type"] == "client"
+                                            && m["sender"]["machine"] == client_id
+                                            && m["sender"]["id"] == client_id
+                                    })
+                                    .cloned()
+                                    .collect();
+                                if !publisher.send(Update::Mail(MailUpdate::Outgoing {
+                                    peer: destination.key.clone(),
+                                    messages,
+                                    agent: id.into(),
+                                    error: None,
+                                })) {
+                                    return;
+                                }
+                            }
+                            Err(error) => {
+                                if !publisher.send(Update::Mail(MailUpdate::Outgoing {
+                                    peer: destination.key.clone(),
+                                    agent: id.into(),
+                                    messages: vec![],
+                                    error: Some(error),
+                                })) {
+                                    return;
+                                }
+                            }
+                        }
+                    }
                 }
                 let residents = resident_cache.clone();
                 let previous = after;
@@ -198,6 +261,33 @@ impl Client {
 impl Desktop {
     pub(crate) fn mail_update(&mut self, update: MailUpdate) {
         match update {
+            MailUpdate::Outgoing {
+                peer,
+                messages,
+                agent,
+                error,
+            } => {
+                let key = ThreadKey {
+                    peer: peer.clone(),
+                    id: agent,
+                };
+                if let Some(error) = error {
+                    self.data.mail.history_errors.insert(key, error);
+                } else {
+                    self.data.mail.history_errors.remove(&key);
+                }
+                for message in messages {
+                    if let Some(id) = message["id"].as_str() {
+                        self.data.mail.outgoing.insert(
+                            ThreadKey {
+                                peer: peer.clone(),
+                                id: id.into(),
+                            },
+                            message,
+                        );
+                    }
+                }
+            }
             MailUpdate::Page {
                 destination,
                 client_id,
@@ -282,10 +372,19 @@ impl Desktop {
                         .is_some_and(|p| p.request["message"]["id"] == id)
                 {
                     match result {
-       Ok(v) if v["id"]==id=>{d.pending=None;d.last_receipt=Some(v);d.accepted=Some(id);d.error=None;d.body.clear();},
-       Ok(_)=>d.error=Some("The daemon returned an unexpected receipt. Delivery remains unconfirmed.".into()),
-       Err(e)=>d.error=Some(format!("Delivery unconfirmed: {e}")),
-      }
+                        Ok(v) if v["id"] == id => {
+                            if let Some(target) = &d.recipient {
+                                self.data.mail.outgoing.insert(ThreadKey { peer: target.peer.clone(), id: id.clone() }, v.clone());
+                            }
+                            d.pending = None;
+                            d.last_receipt = Some(v);
+                            d.accepted = Some(id);
+                            d.error = None;
+                            d.body.clear();
+                        }
+                        Ok(_) => d.error = Some("The daemon returned an unexpected receipt. Delivery remains unconfirmed.".into()),
+                        Err(e) => d.error = Some(format!("Delivery unconfirmed: {e}")),
+                    }
                 }
                 self.persist();
             }
@@ -467,7 +566,8 @@ pub fn inbox(ui: &mut egui::Ui, data: &mut Data, actions: &mut Vec<Action>) {
         .drafts
         .iter()
         .filter(|d| {
-            d.parent.is_none()
+            !d.id.starts_with("chat:")
+                && d.parent.is_none()
                 && (d.pending.is_some()
                     || (d.accepted.is_none() && (!d.subject.is_empty() || !d.body.is_empty())))
         })
@@ -773,6 +873,157 @@ pub fn details(ui: &mut egui::Ui, pane: &Pane, data: &mut Data, actions: &mut Ve
     }
 }
 
+/// A read-only timeline over accepted correspondence, with an ordinary mailbox composer.
+pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut Vec<Action>) {
+    let name = crate::activity::title(data, key);
+    ui.heading(&name);
+    if let Some(error) = data.mail.errors.get(&key.peer) {
+        ui.colored_label(egui::Color32::YELLOW, error);
+    }
+    if let Some(error) = data.mail.history_errors.get(key) {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            format!("Sent history unavailable: {error}"),
+        );
+    }
+    let draft_id = format!("chat:{}:{}", key.peer, key.id);
+    if !data.saved.mail.drafts.iter().any(|d| d.id == draft_id) {
+        data.saved.mail.drafts.push(Draft {
+            id: draft_id.clone(),
+            recipient: Some(key.clone()),
+            subject: "Conversation".into(),
+            ..Default::default()
+        });
+    }
+    let mut messages: HashMap<String, (bool, Value)> = HashMap::new();
+    for (k, m) in &data.mail.messages {
+        if incoming_for(m, k, key) {
+            messages.insert(m["id"].as_str().unwrap_or("").into(), (false, m.clone()));
+        }
+    }
+    for (k, m) in &data.mail.outgoing {
+        if k.peer == key.peer && m["to"]["type"] == "resident" && m["to"]["id"] == key.id {
+            messages.insert(m["id"].as_str().unwrap_or("").into(), (true, m.clone()));
+        }
+    }
+    for draft in &data.saved.mail.drafts {
+        if draft.recipient.as_ref() == Some(key)
+            && let Some(m) = &draft.last_receipt
+            && m["to"]["type"] == "resident"
+            && m["to"]["id"] == key.id
+        {
+            messages
+                .entry(m["id"].as_str().unwrap_or("").into())
+                .or_insert((true, m.clone()));
+        }
+    }
+    let mut messages: Vec<_> = messages.into_iter().collect();
+    messages.sort_by(|(ia, (_, a)), (ib, (_, b))| {
+        a["accepted_at"]
+            .as_u64()
+            .cmp(&b["accepted_at"].as_u64())
+            .then_with(|| ia.cmp(ib))
+    });
+    let parent = messages
+        .iter()
+        .rev()
+        .find(|(_, (outgoing, _))| !outgoing)
+        .map(|(id, _)| ThreadKey {
+            peer: key.peer.clone(),
+            id: id.clone(),
+        });
+    egui::ScrollArea::vertical()
+        .id_salt(("chat-history", key))
+        .stick_to_bottom(true)
+        .max_height((ui.available_height() - 150.).max(40.))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if messages.is_empty() {
+                ui.weak("No messages yet.");
+            }
+            for (_, (outgoing, m)) in messages {
+                ui.with_layout(
+                    if outgoing {
+                        egui::Layout::top_down(egui::Align::Max)
+                    } else {
+                        egui::Layout::top_down(egui::Align::Min)
+                    },
+                    |ui| {
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.strong(if outgoing { "You" } else { &name });
+                            let subject = m["subject"].as_str().unwrap_or("");
+                            if !subject.is_empty() && subject != "Conversation" {
+                                ui.weak(subject);
+                            }
+                            ui.add(
+                                egui::Label::new(m["body"].as_str().unwrap_or(""))
+                                    .wrap()
+                                    .selectable(true),
+                            );
+                            if outgoing && m["delivery"]["status"] == "queued" {
+                                ui.small("Queued for delivery");
+                            }
+                        });
+                    },
+                );
+                ui.add_space(6.);
+            }
+        });
+    ui.separator();
+    let draft = data
+        .saved
+        .mail
+        .drafts
+        .iter_mut()
+        .find(|d| d.id == draft_id)
+        .unwrap();
+    let pending = draft.pending.is_some();
+    let edited = ui
+        .add_enabled(
+            !pending,
+            egui::TextEdit::multiline(&mut draft.body)
+                .hint_text("Message…")
+                .desired_rows(3)
+                .desired_width(f32::INFINITY),
+        )
+        .changed();
+    if edited {
+        draft.error = None;
+        actions.push(Action::Mail(MailAction::Pin(Pane::Chat(key.clone()))));
+    }
+    if let Some(error) = &draft.error {
+        ui.colored_label(egui::Color32::YELLOW, error);
+    }
+    let sending = data.mail.sending.contains(&draft_id);
+    if pending {
+        ui.weak("Delivery remains unconfirmed.");
+        if ui
+            .add_enabled(!sending, egui::Button::new("Retry same message"))
+            .clicked()
+        {
+            actions.push(Action::Mail(MailAction::Retry(draft_id)));
+        }
+    } else {
+        let valid = !draft.body.trim().is_empty() && draft.body.len() <= 32768;
+        let shortcut = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
+        if ui.add_enabled(valid, egui::Button::new("Send")).clicked() || (valid && shortcut) {
+            draft.parent = parent;
+            actions.push(Action::Mail(MailAction::Send(draft_id)));
+        }
+        if draft.body.len() > 32768 {
+            ui.weak("Messages allow 32 KiB of text.");
+        }
+    }
+}
+fn incoming_for(message: &Value, stored: &ThreadKey, agent: &ThreadKey) -> bool {
+    message["sender"]["type"] == "resident"
+        && message["sender"]["id"] == agent.id
+        && message["network"]["source_machine"]
+            .as_str()
+            .unwrap_or(&stored.peer)
+            == agent.peer
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -892,6 +1143,7 @@ mod tests {
             client_id.clone(),
             bus.publisher(),
             stop.clone(),
+            Default::default(),
         );
         let inbox_deadline = std::time::Instant::now() + Duration::from_secs(15);
         let incoming = loop {
@@ -917,6 +1169,38 @@ mod tests {
             }
         };
         stop.store(true, Ordering::Relaxed);
+        let watching = Arc::new(Mutex::new(HashSet::from([ThreadKey {
+            peer: dest.key.clone(),
+            id: resident.clone(),
+        }])));
+        let sent_stop = Arc::new(AtomicBool::new(false));
+        client.mail_poll(
+            dest.clone(),
+            client_id.clone(),
+            bus.publisher(),
+            sent_stop.clone(),
+            watching,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Sent history deadline"
+            );
+            if let Update::Mail(MailUpdate::Outgoing {
+                messages, error, ..
+            }) = bus.rx.recv_timeout(Duration::from_secs(12)).unwrap()
+            {
+                assert!(error.is_none(), "{error:?}");
+                if messages
+                    .iter()
+                    .any(|m| m["id"] == first["id"] && m["body"] == "REPLY client message")
+                {
+                    break;
+                }
+            }
+        }
+        sent_stop.store(true, Ordering::Relaxed);
         assert_eq!(incoming["body"], "DELIVERED_EXPLICIT_REPLY");
         assert_eq!(incoming["sender"]["id"], resident);
         let silent = PendingMail {
