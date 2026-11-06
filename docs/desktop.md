@@ -173,7 +173,7 @@ artifacts still require a final personal-path/configuration scan.
 ## Mail correspondence
 
 The **Mail** panel is docked on the left alongside Threads. It aggregates
-mail addressed to this controller's human client across configured machines;
+mail addressed to stable human desktop clients across configured machines;
 agent-to-agent traffic and private execution narration are not inbox messages.
 The client ID is the local daemon's stable public machine identity, so its address
 `client:MACHINE:MACHINE` is discoverable by any authorized custom client without
@@ -269,8 +269,14 @@ opens the separate **Activity** preview. Opening either view does not activate t
 resident. Drafting pins a conversation, and exact uncertain sends retain the same
 explicit retry behavior as other mail editors. Sent history is read through the
 existing paginated resident inbox API only for open conversations, filtered to this
-human client's sender identity; incoming mail retains the existing client inbox
-projection. Existing Mail panels and drafts remain accessible.
+network's stable human-client sender identities. Each host's stable human inbox
+and this desktop's explicit machine/client inbox are paginated independently.
+This also exposes correspondence retained before another desktop attached;
+reading history does not move mail, repeat delivery or activate the agent.
+Arbitrary client IDs, including automation clients, remain separate. Original
+addresses and journals remain authoritative; the desktop combines their views.
+These reads work with network-capable daemons without a daemon upgrade.
+Existing Mail panels and drafts remain accessible.
 
 Activity, ordinary threads
 and mail share one preview across docking groups, floating surfaces

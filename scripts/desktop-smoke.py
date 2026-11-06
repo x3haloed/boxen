@@ -66,7 +66,19 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
         deadline=time.monotonic()+20
         while operation({'op':'get','id':blocked['record']['spec']['id']})['status'] not in ['interrupted','failed']:
             assert time.monotonic()<deadline;time.sleep(.05)
-        env=os.environ|{'BOXEN_GUI_TEST_HOME':str(homes[0]),'BOXEN_GUI_TEST_URL':f'http://127.0.0.1:{controls[0]}','BOXEN_GUI_TEST_DEST':json.dumps(destination),'BOXEN_GUI_TEST_CLASS':definition,'BOXEN_GUI_TEST_ACTIVE_AGENT':instances[2]}
+        # Retained correspondence predates attachment from a different machine.
+        historical=secrets.token_hex(32)
+        def host_operation(request):
+            req=urllib.request.Request(f'http://127.0.0.1:{controls[1]}/api/operation',headers={'Authorization':'Bearer '+tokens[1],'Content-Type':'application/json'},data=json.dumps({'peer':keys[1],'address':'','request':request}).encode())
+            return json.load(urllib.request.urlopen(req,timeout=12))
+        host_operation({'op':'resident_create','spec':{'id':historical,'name':'Historical correspondence fixture','cwd':temporary,'auto_activate':False}})
+        historical_mail=host_operation({'op':'mailbox_send','client_id':keys[1],'message':{'id':secrets.token_hex(32),'to':{'type':'resident','id':historical},'subject':'Earlier human message','body':'REPLY historical human message'}})
+        historical_run=host_operation({'op':'resident_activate','id':historical,'activation_id':secrets.token_hex(32)})
+        deadline=time.monotonic()+20
+        while host_operation({'op':'get','id':historical_run['record']['spec']['id']})['status'] not in ['completed','failed','interrupted']:
+            assert time.monotonic()<deadline;time.sleep(.05)
+        host_operation({'op':'mailbox_send','client_id':secrets.token_hex(32),'message':{'id':secrets.token_hex(32),'to':{'type':'resident','id':historical},'subject':'Automation message','body':'AUTOMATION_NOT_HUMAN'}})
+        env=os.environ|{'BOXEN_GUI_TEST_HOME':str(homes[0]),'BOXEN_GUI_TEST_URL':f'http://127.0.0.1:{controls[0]}','BOXEN_GUI_TEST_DEST':json.dumps(destination),'BOXEN_GUI_TEST_HISTORY_AGENT':historical,'BOXEN_GUI_TEST_HISTORY_MAIL':historical_mail['id'],'BOXEN_GUI_TEST_CLASS':definition,'BOXEN_GUI_TEST_ACTIVE_AGENT':instances[2]}
         subprocess.run(['cargo','test','--locked','--manifest-path',str(ROOT/'desktop/Cargo.toml'),'real_daemon_boundary','--','--ignored','--nocapture'],env=env,check=True)
         if args.interactive:
             # Seed the human inbox through real resident tools, never fabricated journal rows.

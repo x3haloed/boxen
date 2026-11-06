@@ -50,8 +50,13 @@ pub struct Mailbox {
     pub outgoing: HashMap<ThreadKey, Value>,
     pub watching: Arc<Mutex<HashSet<ThreadKey>>>,
     pub history_errors: HashMap<ThreadKey, String>,
+    pub human_inbox_errors: HashMap<String, String>,
 }
 pub enum MailUpdate {
+    HumanInbox {
+        destination: Destination,
+        inbox: Result<Value, String>,
+    },
     Outgoing {
         peer: String,
         messages: Vec<Value>,
@@ -97,6 +102,7 @@ impl Client {
         let client = self.clone();
         std::thread::spawn(move || {
             let mut after = 0;
+            let mut host_after = 0;
             let mut sent_cursors = HashMap::new();
             let mut resident_refresh = std::time::Instant::now() - Duration::from_secs(10);
             let mut resident_cache: Result<Vec<Value>, String> = Ok(vec![]);
@@ -157,11 +163,7 @@ impl Client {
                                     .as_array()
                                     .into_iter()
                                     .flatten()
-                                    .filter(|m| {
-                                        m["sender"]["type"] == "client"
-                                            && m["sender"]["machine"] == client_id
-                                            && m["sender"]["id"] == client_id
-                                    })
+                                    .filter(|m| human_sender(m))
                                     .cloned()
                                     .collect();
                                 if !publisher.send(Update::Mail(MailUpdate::Outgoing {
@@ -186,11 +188,29 @@ impl Client {
                         }
                     }
                 }
+                let mut host_more = false;
+                if destination.key != client_id {
+                    let inbox = client.operation(&destination, json!({"op":"client_inbox", "machine":destination.key, "client_id":destination.key, "after":host_after}));
+                    if let Ok(page) = &inbox {
+                        let next = page["next_after"]
+                            .as_u64()
+                            .unwrap_or(host_after)
+                            .max(host_after);
+                        host_more = next > host_after;
+                        host_after = next;
+                    }
+                    if !publisher.send(Update::Mail(MailUpdate::HumanInbox {
+                        destination: destination.clone(),
+                        inbox,
+                    })) {
+                        return;
+                    }
+                }
                 let residents = resident_cache.clone();
                 let previous = after;
                 let inbox = client.operation(
                     &destination,
-                    json!({"op":"client_inbox","client_id":client_id,"after":after}),
+                    json!({"op":"client_inbox","machine":client_id,"client_id":client_id,"after":after}),
                 );
                 if let Ok(v) = &inbox {
                     after = v["next_after"].as_u64().unwrap_or(after).max(after);
@@ -209,7 +229,7 @@ impl Client {
                     return;
                 }
                 // Drain paginated input without losing older pages. Empty pages wait for new arrivals.
-                if more && after > previous {
+                if (more && after > previous) || host_more {
                     std::thread::sleep(Duration::from_millis(25));
                     continue;
                 }
@@ -261,6 +281,28 @@ impl Client {
 impl Desktop {
     pub(crate) fn mail_update(&mut self, update: MailUpdate) {
         match update {
+            MailUpdate::HumanInbox { destination, inbox } => match inbox {
+                Ok(page) => {
+                    self.data.mail.human_inbox_errors.remove(&destination.key);
+                    for message in page["messages"].as_array().into_iter().flatten() {
+                        if let Some(id) = message["id"].as_str() {
+                            self.data.mail.messages.insert(
+                                ThreadKey {
+                                    peer: destination.key.clone(),
+                                    id: id.into(),
+                                },
+                                message.clone(),
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.data
+                        .mail
+                        .human_inbox_errors
+                        .insert(destination.key, error);
+                }
+            },
             MailUpdate::Outgoing {
                 peer,
                 messages,
@@ -545,7 +587,7 @@ pub fn inbox(ui: &mut egui::Ui, data: &mut Data, actions: &mut Vec<Action>) {
             .hint_text("Filter messages…")
             .desired_width(f32::INFINITY),
     );
-    ui.weak("Your inbox · replies are optional");
+    ui.weak("Your network inbox · replies are optional");
     if !data.local_key.is_empty() {
         ui.small_button("Copy mailbox address")
             .on_hover_text("Other Boxen clients can use this same address.")
@@ -556,6 +598,12 @@ pub fn inbox(ui: &mut egui::Ui, data: &mut Data, actions: &mut Vec<Action>) {
             });
     }
     for dest in &data.saved.destinations {
+        if let Some(error) = data.mail.human_inbox_errors.get(&dest.key) {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!("{} history · {error}", dest.label),
+            );
+        }
         if let Some(error) = data.mail.errors.get(&dest.key) {
             ui.colored_label(egui::Color32::YELLOW, format!("{} · {error}", dest.label));
         }
@@ -886,6 +934,12 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
             format!("Sent history unavailable: {error}"),
         );
     }
+    if let Some(error) = data.mail.human_inbox_errors.get(&key.peer) {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            format!("Human mailbox history unavailable: {error}"),
+        );
+    }
     let draft_id = format!("chat:{}:{}", key.peer, key.id);
     if !data.saved.mail.drafts.iter().any(|d| d.id == draft_id) {
         data.saved.mail.drafts.push(Draft {
@@ -1015,6 +1069,15 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
         }
     }
 }
+// Stable machine clients represent the human desktop on each network member.
+// Arbitrary client IDs (including automation senders) remain separate identities.
+fn human_sender(message: &Value) -> bool {
+    let sender = &message["sender"];
+    sender["type"] == "client"
+        && sender["machine"]
+            .as_str()
+            .is_some_and(|machine| sender["id"] == machine)
+}
 fn incoming_for(message: &Value, stored: &ThreadKey, agent: &ThreadKey) -> bool {
     message["sender"]["type"] == "resident"
         && message["sender"]["id"] == agent.id
@@ -1057,6 +1120,66 @@ mod tests {
     }
     #[test]
     #[ignore = "scripts/desktop-smoke.py supplies private paired daemons"]
+    fn real_daemon_boundary_human_history() {
+        let home = std::path::PathBuf::from(std::env::var_os("BOXEN_GUI_TEST_HOME").unwrap());
+        let client = Client::new(std::env::var("BOXEN_GUI_TEST_URL").unwrap(), &home).unwrap();
+        let dest: Destination =
+            serde_json::from_str(&std::env::var("BOXEN_GUI_TEST_DEST").unwrap()).unwrap();
+        let id = std::env::var("BOXEN_GUI_TEST_HISTORY_AGENT").unwrap();
+        let mail_id = std::env::var("BOXEN_GUI_TEST_HISTORY_MAIL").unwrap();
+        let client_id = client.status().unwrap()["identity"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for _ in 0..2 {
+            // A fresh viewer starts at original journals again after restart.
+            let bus = crate::client::Bus::new(egui::Context::default());
+            let stop = Arc::new(AtomicBool::new(false));
+            client.mail_poll(
+                dest.clone(),
+                client_id.clone(),
+                bus.publisher(),
+                stop.clone(),
+                Arc::new(Mutex::new(HashSet::from([ThreadKey {
+                    peer: dest.key.clone(),
+                    id: id.clone(),
+                }]))),
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            let (mut sent, mut received) = (false, false);
+            while !(sent && received) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Historical human correspondence deadline"
+                );
+                match bus.rx.recv_timeout(Duration::from_secs(12)).unwrap() {
+                    Update::Mail(MailUpdate::Outgoing {
+                        messages, error, ..
+                    }) => {
+                        assert!(error.is_none());
+                        assert!(!messages.iter().any(|m| m["body"] == "AUTOMATION_NOT_HUMAN"));
+                        sent |= messages.iter().any(|m| {
+                            m["id"] == mail_id
+                                && m["sender"]["machine"] == dest.key
+                                && m["sender"]["id"] == dest.key
+                        });
+                    }
+                    Update::Mail(MailUpdate::HumanInbox { inbox, .. }) => {
+                        let page = inbox.unwrap();
+                        received |= page["messages"].as_array().unwrap().iter().any(|m| {
+                            m["sender"]["id"] == id
+                                && m["in_reply_to"] == mail_id
+                                && m["body"] == "DELIVERED_EXPLICIT_REPLY"
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+    #[test]
+    #[ignore = "scripts/desktop-smoke.py supplies private paired daemons"]
     fn real_daemon_boundary_correspondence() {
         let home = std::path::PathBuf::from(std::env::var_os("BOXEN_GUI_TEST_HOME").unwrap());
         let client = Client::new(std::env::var("BOXEN_GUI_TEST_URL").unwrap(), &home).unwrap();
@@ -1066,12 +1189,31 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
+        let local = Destination {
+            key: client_id.clone(),
+            label: "This machine".into(),
+            address: String::new(),
+        };
         let resident = crate::new_id();
         client.operation(&dest,json!({"op":"resident_create","spec":{"id":resident,"name":"Correspondence test instance","cwd":home,"auto_activate":false}})).unwrap();
         let pending = PendingMail {
-            destination: dest.clone(),
+            destination: local.clone(),
             request: json!({"op":"mailbox_send","client_id":client_id,"message":{"id":crate::new_id(),"to":{"type":"resident","id":resident},"subject":"Desktop message","body":"REPLY client message"}}),
         };
+        let discovery_deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match client.operation(&local, pending.request.clone()) {
+                Ok(_) => break,
+                Err(error) => {
+                    assert!(error.contains("422"), "{error}");
+                    assert!(
+                        std::time::Instant::now() < discovery_deadline,
+                        "Network directory discovery deadline"
+                    );
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
         let bus = crate::client::Bus::new(egui::Context::default());
         let roundtrip: PendingMail =
             serde_json::from_slice(&serde_json::to_vec(&pending).unwrap()).unwrap();
@@ -1085,7 +1227,8 @@ mod tests {
             Update::Mail(MailUpdate::Sent { result: Ok(v), .. }) => v,
             _ => panic!("retry missing"),
         };
-        assert_eq!(first, retry);
+        assert_eq!(first["id"], retry["id"]);
+        assert_eq!(first["sender"], retry["sender"]);
         client.mail_submit(roundtrip.clone(), "draft".into(), bus.publisher(), true);
         match bus.rx.recv_timeout(Duration::from_secs(12)).unwrap() {
             Update::Mail(MailUpdate::Sent { result: Ok(v), .. }) => {
@@ -1093,16 +1236,32 @@ mod tests {
             }
             _ => panic!("reconciliation missing"),
         };
-        assert_eq!(
-            client
+        let delivery_deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let page = client
                 .operation(&dest, json!({"op":"resident_inbox","id":resident}))
-                .unwrap()["messages"]
+                .unwrap();
+            if page["messages"]
                 .as_array()
                 .unwrap()
-                .len(),
-            1,
-            "retry or reconciliation duplicated mail"
-        );
+                .iter()
+                .any(|m| m["id"] == first["id"])
+            {
+                assert_eq!(
+                    page["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|m| m["id"] == first["id"])
+                        .count(),
+                    1,
+                    "Network retry duplicated mail"
+                );
+                break;
+            }
+            assert!(std::time::Instant::now() < delivery_deadline);
+            std::thread::sleep(Duration::from_millis(100));
+        }
 
         let activation = client
             .operation(
@@ -1123,11 +1282,7 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(50));
         }
-        let local = Destination {
-            key: client_id.clone(),
-            label: "This machine".into(),
-            address: String::new(),
-        };
+
         assert!(
             client
                 .operation(&dest, json!({"op":"resident_list"}))

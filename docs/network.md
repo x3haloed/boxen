@@ -99,8 +99,13 @@ authenticated operation without a GUI.
 
 An agent's stable resident ID is its Boxen address. The compact host directory
 locates it. Human client addresses retain their explicit machine and client IDs;
-joining a network does not merge separate human client identities. Operators can
-query a retained client namespace with `client_inbox` and an explicit `machine`.
+joining a network does not rewrite or merge separate client addresses. The desktop
+presents stable human clients (`id` equal to their machine key) together across
+network hosts, while arbitrary automation client IDs remain separate. Operators
+can query a retained client namespace with `client_inbox` and an explicit
+`machine`. This explicit address also retrieves history created on a host before
+a different desktop connected; the authenticated caller is not implicitly the
+historical recipient.
 
 The existing correspondence journal owns outgoing acceptance, destination mailbox
 intake and delivery receipts. There is no second network inbox database. A source
