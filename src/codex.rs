@@ -454,10 +454,8 @@ pub fn execute(
     run.diagnostic(Level::Info, "backend.execution_policy", || json!({"sandbox":"danger-full-access","approval_policy":"on-request","approvals_reviewer":"user"}), || Value::Null);
     if let Some(bridge) = &bridge {
         params["config"] = json!({"mcp_servers.boxen_resident":bridge.config()});
-        run.append("resident_message_approval_policy", json!({"server":"boxen_resident","tool":"boxen_send_message","approval_mode":"approve","scope":"activation"}))?;
-        run.diagnostic(Level::Info, "backend.resident_message_approval_policy", || json!({"server":"boxen_resident","tool":"boxen_send_message","approval_mode":"approve","scope":"activation"}), || Value::Null);
-        run.append("resident_mailbox_approval_policy", json!({"server":"boxen_resident","tool":"boxen_mailbox","approval_mode":"approve","scope":"activation"}))?;
-        run.diagnostic(Level::Info, "backend.resident_mailbox_approval_policy", || json!({"server":"boxen_resident","tool":"boxen_mailbox","approval_mode":"approve","scope":"activation"}), || Value::Null);
+        run.append("resident_bridge_approval_policy", json!({"server":"boxen_resident","default_tools_approval_mode":"approve","scope":"activation"}))?;
+        run.diagnostic(Level::Info, "backend.resident_bridge_approval_policy", || json!({"server":"boxen_resident","default_tools_approval_mode":"approve","scope":"activation"}), || Value::Null);
     }
     if !spec.model.is_empty() {
         params["model"] = json!(spec.model);

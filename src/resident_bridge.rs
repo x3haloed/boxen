@@ -77,7 +77,7 @@ impl Bridge {
     }
     pub fn config(&self) -> Value {
         json!({"url":format!("http://{}/mcp",self.address),"bearer_token_env_var":TOKEN_ENV,"enabled":true,"required":true,"startup_timeout_sec":15,"tool_timeout_sec":60,
-            "tools":{"boxen_send_message":{"approval_mode":"approve"},"boxen_mailbox":{"approval_mode":"approve"}}})
+            "default_tools_approval_mode":"approve"})
     }
 }
 impl Drop for Bridge {

@@ -234,7 +234,7 @@ for line in sys.stdin:
             assert method=='thread/resume'
             assert 'developerInstructions' not in request['params']
             promoted_bridge=request['params']['config']['mcp_servers.boxen_resident']
-            assert promoted_bridge['tools']=={'boxen_send_message':{'approval_mode':'approve'},'boxen_mailbox':{'approval_mode':'approve'}}, 'resident correspondence trust must be tool-specific'
+            assert promoted_bridge['default_tools_approval_mode']=='approve' and not promoted_bridge.get('tools'), 'all resident bridge tools use server-wide approval'
             bridge_rejection_checks()
             try:
                 urllib.request.urlopen(urllib.request.Request(promoted_bridge['url'],data=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',headers={'Content-Type':'application/json'}),timeout=2)
