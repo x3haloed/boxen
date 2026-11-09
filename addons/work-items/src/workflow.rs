@@ -766,6 +766,31 @@ fn held(s: &Store, cfg: &Config, settings: &Settings, a: &Attempt, reason: &str)
         save(s, &next, "held")
     }
 }
+const PR_DESCRIPTION_GUIDANCE: &str = "The PR description tells reviewers what went wrong and how the change fixes it. A typical bug fix reads: ‘There was a bug in `component-name` that [observable failure]. I fixed it by [new behavior].’ Most changes fit in one or two sentences. Exceptionally complex changes can take up to two short paragraphs. Test results, review details, screenshots, work-item links, and deployment status belong in their separate records.";
+
+fn pr_description(report: &Value) -> Result<()> {
+    let description = report["pr_description"]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .context("Candidate PR description is missing")?;
+    let paragraphs = description
+        .trim()
+        .lines()
+        .map(|line| !line.trim().is_empty())
+        .scan(false, |previous, nonempty| {
+            let start = nonempty && !*previous;
+            *previous = nonempty;
+            Some(start)
+        })
+        .filter(|start| *start)
+        .count();
+    ensure!(
+        paragraphs <= 2,
+        "Candidate PR description exceeds two paragraphs"
+    );
+    Ok(())
+}
+
 fn candidate(report: &Value) -> Result<()> {
     for field in ["commit", "base"] {
         let sha = report[field]
@@ -845,6 +870,8 @@ fn correction(
     input["continuation"] = json!({"expected_version":version,"expected_coder":coder,"reason":"Authenticated exact-commit review findings return to the same coder"});
     input["context"]["review_findings"] = findings;
     input["assignment"]["task"]["review_findings"] = input["context"]["review_findings"].clone();
+    input["assignment"]["task"]["candidate_contract"]["pr_description"] =
+        json!(PR_DESCRIPTION_GUIDANCE);
     input["assignment"]["assignment_revision"] =
         json!(format!("workflow-correction-{}", version + 1));
     let result = transport::continue_assignment(s, cfg, api, &input)?;
@@ -1336,6 +1363,8 @@ fn advance(
             assigned["work_item"] = json!({"id":a.item,"revision":a.data["packet"]["revision"],"source_digest":a.digest});
             assigned["delivery"] = json!({"push":false,"create_or_update_pr":false,"merge":false,"deploy":false,"autocomplete":false});
             assigned["task"] = json!({"request":a.data["interpretation"]["intended_outcome"],"acceptance_criteria":a.data["interpretation"]["scenarios"],"preservation_targets":a.data["interpretation"]["preservation_targets"],"known_holds":[],"workflow":"Normal full local repository/SQL/application/authenticated-browser reproduction, implementation and validation. This assignment is the implementation stage. The service requests exact-commit context and independent technical reviews after a candidate handoff, returns findings to this same coder, and publishes a ready candidate as a full non-draft PR. No investigation-only restriction is introduced.","candidate_contract":{"protocol":"boxen.work-report.v1","commit":"full exact SHA","base":"current target base SHA","validation":{"local_runtime_exercised":true,"acceptance":[{"id":"scenario-id","status":"observed_pass","evidence":"retained real app observation reference"}]},"cleanup":{"no_owned_runtime_resources":true}},"cleanup":"Owned application processes, allocated synthetic database and temporary source configuration are cleaned after verified local work. The service-owned persistent browser/profile remains available for subsequent jobs. A candidate report distinguishes source checks, real observations, review-pending state and remaining required implementation work."});
+            assigned["task"]["candidate_contract"]["pr_description"] =
+                json!(PR_DESCRIPTION_GUIDANCE);
             if settings.project["visual_evidence_required"] == true {
                 assigned["task"]["candidate_contract"]["visual_evidence"] = json!({
                     "screenshots":[{"file":"JPEG/PNG filename directly in the assignment evidence directory","sha256":"full lowercase SHA-256","caption":"what this screenshot demonstrates at the candidate commit"}],
@@ -1473,7 +1502,7 @@ fn advance(
                 );
             }
 
-            if let Err(error) = candidate(&report) {
+            if let Err(error) = candidate(&report).and_then(|_| pr_description(&report)) {
                 return correction(
                     s,
                     cfg,
@@ -1618,6 +1647,15 @@ fn advance(
         "publish_ready" => {
             ensure!(settings.publication, "Automatic PR publication is disabled");
             ensure!(fresh(s, a)?, "Source changed before publication");
+            if let Err(error) = pr_description(&a.data["candidate"]) {
+                return correction(
+                    s,
+                    cfg,
+                    api,
+                    a,
+                    json!({"condition":"pr_description","detail":error.to_string(),"meaning":"A corrected report can describe the same candidate without repeating validation"}),
+                );
+            }
             let inspection=driver.call("inspect_candidate",&json!({"assignment":assignment(s,a)?["assignment"],"candidate":a.data["candidate"]}))?;
             if inspection["ready"] != true {
                 return correction(
@@ -1657,6 +1695,15 @@ fn advance(
                 );
             }
             ensure!(fresh(s, a)?, "Source changed before PR creation");
+            if let Err(error) = pr_description(&a.data["candidate"]) {
+                return correction(
+                    s,
+                    cfg,
+                    api,
+                    a,
+                    json!({"condition":"pr_description","detail":error.to_string(),"meaning":"A corrected report can describe the same candidate without repeating validation"}),
+                );
+            }
             // Intent is committed BEFORE creation. A crash returns to read-only reconciliation.
             save(s, a, "pr_creating")?;
             let result=driver.call("create_pr",&json!({"assignment":assignment(s,a)?["assignment"],"candidate":a.data["candidate"],"interpretation":a.data["interpretation"],"context_review":a.data["context_review"],"technical_review":a.data["technical_review"]}))?;

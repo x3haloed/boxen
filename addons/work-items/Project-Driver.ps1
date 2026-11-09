@@ -292,9 +292,8 @@ try {
             Repo-Identity
             $publicationBranch=Publication-Branch $a
             if($publicationBranch -cne $a.branch){throw 'Existing active PR must be reconciled instead of creating a duplicate'}
-            $scenarios=($request.interpretation.scenarios | ForEach-Object {'- '+$_.action+': '+$_.expected_result}) -join "`n"
-            $checks=($request.candidate.validation.acceptance | ForEach-Object {'- '+$_.id+': '+$_.status}) -join "`n"
-            $description=$request.interpretation.intended_outcome+"`n`nVerified scenarios:`n"+$scenarios+"`n`nValidation:`n"+$checks+"`n`n"+$request.candidate.summary+"`n`nExact-commit context and independent technical reviews passed. Real local application/database/browser validation is reported in the candidate evidence. Unverified gaps: "+($request.candidate.validation.unverified_gaps | ConvertTo-Json -Compress -Depth 8)+"`n`nAB#"+$a.work_item.id
+            $description=([string]$request.candidate.pr_description).Trim()
+            if(!$description){throw 'Candidate PR description is missing'}
             $title=([string]$request.interpretation.intended_outcome) -replace '[\r\n]+',' '
             if($title.Length -gt 180){$title=$title.Substring(0,180)}
             $pr=Azure @('repos','pr','create','--repository',$project.repository_id,'--project',$project.azure_project,'--source-branch',$a.branch,'--target-branch',$a.target_ref,'--title',$title,'--description',$description,'--draft','false','--auto-complete','false','--bypass-policy','false','--transition-work-items','false','--work-items',([string]$a.work_item.id),'--detect','false')

@@ -152,6 +152,12 @@ normal summary/evidence/remaining/cleanup fields, and
 These are attributed worker observations; the independent reviews assess their
 substance. Allocation inspection explicitly does not claim runtime verification.
 
+`pr_description` is the coder's reviewer-facing account of the problem and the
+new behavior. Most changes take one or two sentences. Exceptionally complex
+changes can take up to two short paragraphs. The project driver uses this field
+as the description of a new PR. The work-item link, tests, reviews and screenshots
+have separate records.
+
 ## Configuration
 
 A private configuration supplies `enabled`, `allow_new_copies`, `publication`,

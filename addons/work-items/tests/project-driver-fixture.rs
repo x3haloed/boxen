@@ -1,9 +1,22 @@
 //! Offline project-driver fixture; no Azure or SQL server is contacted.
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, process::Command};
 fn main() {
     let args: Vec<_> = env::args().collect();
     let root = PathBuf::from(env::var_os("BOXEN_PROJECT_FIXTURE").expect("fixture root"));
-    if env::current_exe().unwrap().file_stem().unwrap() == "sqlcmd" {
+    let executable = env::current_exe().unwrap();
+    let name = executable.file_stem().unwrap();
+    if name == "git" {
+        if args[3..] == ["remote", "get-url", "origin"] {
+            println!("{}", env::var("BOXEN_PROJECT_REMOTE").unwrap());
+            return;
+        }
+        let status = Command::new(env::var_os("BOXEN_PROJECT_GIT").unwrap())
+            .args(&args[1..])
+            .status()
+            .unwrap();
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    if name == "sqlcmd" {
         println!("absent");
         return;
     }
@@ -26,7 +39,11 @@ fn main() {
         assert_eq!(value("--draft"), "false");
         assert_eq!(value("--auto-complete"), "false");
         assert_eq!(value("--bypass-policy"), "false");
-        assert!(value("--description").contains('\n'));
+        assert_eq!(
+            value("--description"),
+            "The `example` form lost the selected tab. I fixed it by restoring the tab from the URL.\n\nThe new URL also preserves the tab when refreshed."
+        );
+        assert_eq!(value("--work-items"), "1");
         fs::write(root.join("created"), "one").unwrap();
         println!("{{\"pullRequestId\":23}}");
     } else if contains("work-item") {

@@ -1200,7 +1200,7 @@ impl Boxen for WorkflowApi {
                         [mid],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )?;
-                    let report = json!({"protocol":"boxen.work-report.v1","job_id":job,"assignment_version":version,"outcome":"completed","summary":"Synthetic boundary result, not actual application evidence","commit":if version==1{"1111111111111111111111111111111111111111"}else{"3333333333333333333333333333333333333333"},"base":"2222222222222222222222222222222222222222","evidence":["synthetic fixture"],"remaining":[],"validation":{"local_runtime_exercised":true,"acceptance":[{"id":"s1","status":"observed_pass","evidence":"Synthetic protocol fixture"}]},"cleanup":{"no_owned_runtime_resources":true}});
+                    let report = json!({"protocol":"boxen.work-report.v1","job_id":job,"assignment_version":version,"outcome":"completed","summary":"Synthetic boundary result, not actual application evidence","pr_description":"The form lost the selected tab. I fixed it by restoring the tab from the URL.","commit":if version==1{"1111111111111111111111111111111111111111"}else{"3333333333333333333333333333333333333333"},"base":"2222222222222222222222222222222222222222","evidence":["synthetic fixture"],"remaining":[],"validation":{"local_runtime_exercised":true,"acceptance":[{"id":"s1","status":"observed_pass","evidence":"Synthetic protocol fixture"}]},"cleanup":{"no_owned_runtime_resources":true}});
                     // The existing supervision suite separately verifies authenticated report acceptance.
                     c.execute("UPDATE supervision SET report=?3,phase='report_received' WHERE job=?1 AND version=?2",params![job,version,report.to_string()])?;
                 }

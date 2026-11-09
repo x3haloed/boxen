@@ -10,9 +10,11 @@ with tempfile.TemporaryDirectory(prefix='boxen-project-driver-')as temporary:
  def git(*parts,cwd=repo):return run(['git','-C',str(cwd),*parts])
  run(['git','init','--bare',str(bare)]);git('init','-b','main');(repo/'source.txt').write_text('base\n');git('add','source.txt');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','base');git('remote','add','origin',str(bare));git('push','origin','main')
  fixture=bins/'azure.exe';run(['rustc','--edition','2024',str(pathlib.Path(__file__).with_name('project-driver-fixture.rs')),'-o',str(fixture)]);shutil.copy2(fixture,bins/'sqlcmd.exe')
- env={**os.environ,'PATH':str(bins)+os.pathsep+os.environ['PATH'],'BOXEN_PROJECT_FIXTURE':str(root),'BOXEN_PROJECT_REMOTE':git('remote','get-url','origin')}
+ git_fixture=bins/'git.exe';shutil.copy2(fixture,git_fixture)
+ env={**os.environ,'PATH':str(bins)+os.pathsep+os.environ['PATH'],'BOXEN_PROJECT_FIXTURE':str(root),'BOXEN_PROJECT_REMOTE':'https://dev.azure.com/example/Example/_git/Fixture','BOXEN_PROJECT_GIT':shutil.which('git')}
  pack=root/'pack';(pack/'scripts').mkdir(parents=True);(pack/'scripts/Inspect-Assignment.ps1').write_text('param($AssignmentPath,$PackRoot)\n\'{"assignment_inputs_valid":true}\'\n')
  project={'repository_root':str(repo),'remote_url':env['BOXEN_PROJECT_REMOTE'],'target_ref':'main','repository_id':'22222222-2222-4222-8222-222222222222','azure_project':'Example','azure_organization':'https://dev.azure.com/example','azure_python':str(fixture),'workspace_root':str(root/'project workspace'),'evidence_root':str(root/'evidence'),'database_prefix':'Synthetic','database_server':'fixture','frontend_port':49001,'backend_port':49002,'browser_context':str(root/'browser'),'tenant_id_base':90000,'ef_tool':str(fixture),'powershell_executable':str(args.pwsh),'login_registration_reference':'Synthetic normal login route','external_dependencies':[],'runtime_process_names':['dotnet','node','WebApp']}
+ project['git_executable']=str(git_fixture)
  count=0
  def call(operation,request):
   global count
@@ -23,7 +25,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-project-driver-')as temporary:
  a=call('plan',{'job_id':'a'*64,'attempt':'b'*64,'item':1,'version':1,'previous':None})['assignment'];a.update(job_id='a'*64,work_item={'id':1})
  call('prepare',{'assignment':a,'pack_root':str(pack)});call('prepare',{'assignment':a,'pack_root':str(pack)})
  work=pathlib.Path(a['worktree']);(work/'source.txt').write_text('candidate\n');git('add','source.txt',cwd=work);git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','candidate',cwd=work)
- candidate={'commit':git('rev-parse','HEAD',cwd=work),'base':a['base_commit'],'summary':'Synthetic candidate','validation':{'acceptance':[{'id':'s1','status':'observed_pass'}],'unverified_gaps':[]}}
+ candidate={'commit':git('rev-parse','HEAD',cwd=work),'base':a['base_commit'],'summary':'Synthetic candidate','pr_description':'The `example` form lost the selected tab. I fixed it by restoring the tab from the URL.\n\nThe new URL also preserves the tab when refreshed.','validation':{'acceptance':[{'id':'s1','status':'observed_pass'}],'unverified_gaps':[]}}
  env['BOXEN_PROJECT_BRANCH']=a['branch'];env['BOXEN_PROJECT_COMMIT']=candidate['commit']
  call('verify_cleanup',{'assignment':a,'require_database_removed':True});assert call('inspect_candidate',{'assignment':a,'candidate':candidate})['ready']
  (work/'source.txt').write_text('dirty');assert not call('inspect_candidate',{'assignment':a,'candidate':candidate})['ready'];git('restore','source.txt',cwd=work)
