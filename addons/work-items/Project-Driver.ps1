@@ -40,6 +40,127 @@ function Assigned {
     if($a.repository_root -cne $project.repository_root -or $a.target_ref -cne $project.target_ref){throw 'Assignment project binding differs'}
     return $a
 }
+function Visual-Evidence($assignment) {
+    $visual=$request.candidate.visual_evidence
+    $reason=([string]$visual.not_applicable_reason).Trim()
+    $screens=@($visual.screenshots | Where-Object {$_})
+    if($reason -and !$screens.Count -and $reason.Length -le 1000){
+        return @{not_applicable_reason=$reason;screenshots=@()}
+    }
+    if($reason -or $screens.Count -lt 1 -or $screens.Count -gt 8){
+        throw 'Provide a minimal set of screenshots or a specific reason why visual evidence does not apply'
+    }
+    $directory=Get-Item -LiteralPath $assignment.evidence_dir -Force
+    if(!$directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)){
+        throw 'Screenshot evidence directory must be a regular directory'
+    }
+    $seen=@{}
+    $files=@(foreach($screen in $screens){
+        $name=[string]$screen.file
+        $sha=[string]$screen.sha256
+        $caption=([string]$screen.caption).Trim()
+        if($name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,110}\.(png|jpe?g)$' -or
+           $sha -cnotmatch '^[0-9a-f]{64}$' -or !$caption -or $caption.Length -gt 500 -or $seen[$sha]){
+            throw 'Screenshots need unique SHA-256 hashes, simple JPEG/PNG filenames and concise captions'
+        }
+        $file=Get-Item -LiteralPath (Join-Path $directory.FullName $name) -Force
+        if($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+           $file.Length -lt 8 -or $file.Length -gt 5MB -or
+           (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sha){
+            throw 'Screenshot must be a regular evidence file of at most 5 MiB with the reported SHA-256'
+        }
+        $stream=$file.OpenRead()
+        try {
+            $header=[byte[]]::new(8)
+            $stream.ReadExactly($header)
+        } finally {$stream.Dispose()}
+        $signature=[Convert]::ToHexString($header)
+        if(($file.Extension -ieq '.png' -and $signature -cne '89504E470D0A1A0A') -or
+           ($file.Extension -ine '.png' -and !$signature.StartsWith('FFD8FF'))){
+            throw 'Screenshot content does not match its JPEG/PNG extension'
+        }
+        $seen[$sha]=$true
+        @{path=$file.FullName;sha256=$sha;caption=$caption;extension=$file.Extension.ToLowerInvariant()}
+    })
+    return @{not_applicable_reason='';screenshots=$files}
+}
+function Attach-VisualEvidence($visual) {
+    if(!$project.azure_python){throw 'PR visual evidence requires the configured Azure CLI Python runtime'}
+    $extension=& $project.azure_python -I -B -X utf8 -m azure.cli extension show --name azure-devops --query path --output tsv
+    if($LASTEXITCODE -ne 0 -or !$extension){throw 'Azure DevOps CLI extension is unavailable'}
+    $spec=@{organization=$project.azure_organization;project=$project.azure_project;repository=$project.repository_id;pr=$request.id;commit=$request.candidate.commit;visual=$visual}
+    $specPath=$ReplyPath+'.visual.json'
+    $spec | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $specPath -Encoding utf8
+    $code=@'
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from azext_devops.dev.common.services import get_git_client
+from azext_devops.devops_sdk.v5_0.git.models import Comment, GitPullRequestCommentThread
+
+spec = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8-sig"))
+git = get_git_client(spec["organization"])
+repo, pr, project = spec["repository"], int(spec["pr"]), spec["project"]
+commit = spec["commit"]
+visual = spec["visual"]
+attachments = {a.display_name: a for a in git.get_attachments(repo, pr, project=project)}
+lines = [f"### Visual evidence for `{commit[:12]}`"]
+names = []
+for screenshot in visual["screenshots"]:
+    data = Path(screenshot["path"]).read_bytes()
+    sha = screenshot["sha256"]
+    if len(data) > 5 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != sha:
+        raise ValueError("Screenshot changed after validation")
+    name = f"visual-{commit[:12]}-{sha[:24]}{screenshot['extension']}"
+    if name not in attachments:
+        git._send(http_method="POST", location_id="965d9361-878b-413b-a494-45d5b5fd8ab7",
+                  version="7.1", route_values={"project": project, "repositoryId": repo,
+                  "pullRequestId": str(pr), "fileName": name}, content=data,
+                  media_type="application/octet-stream")
+        attachments = {a.display_name: a for a in git.get_attachments(repo, pr, project=project)}
+    attachment = attachments.get(name)
+    if not attachment or attachment.content_hash.lower() != hashlib.sha1(data).hexdigest():
+        raise ValueError("PR screenshot attachment readback differs")
+    lines.extend([screenshot["caption"], f"![Validation screenshot]({attachment.url})"])
+    names.append(name)
+if visual["not_applicable_reason"]:
+    lines.append("Screenshots are not applicable. " + visual["not_applicable_reason"])
+content = "\n\n".join(lines)
+
+def matching_threads():
+    return [t for t in git.get_threads(repo, pr, project=project)
+            if any(not c.is_deleted and c.content == content for c in t.comments or [])]
+
+matches = matching_threads()
+if not matches:
+    # Persist intent before posting. A lost response can be reconciled by exact
+    # comment readback without posting a second comment during a retry.
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    intent = Path(sys.argv[2]).with_name(f"visual-pr-{pr}-{digest}.intent")
+    try:
+        with intent.open("x", encoding="utf-8") as receipt:
+            receipt.write(content)
+            receipt.flush()
+            os.fsync(receipt.fileno())
+    except FileExistsError as error:
+        raise ValueError("PR evidence comment outcome is uncertain") from error
+    git.create_thread(GitPullRequestCommentThread(comments=[
+        Comment(parent_comment_id=0, content=content, comment_type="text")],
+        status="closed"), repo, pr, project=project)
+    matches = matching_threads()
+if len(matches) != 1:
+    raise ValueError("PR visual evidence comment readback is missing or ambiguous")
+print(json.dumps({"ok": True, "verified": True, "thread_id": matches[0].id,
+                  "attachments": names, "not_applicable": bool(visual["not_applicable_reason"])}))
+'@
+    $reply=$code | & $project.azure_python -I -B -X utf8 - $extension $specPath
+    if($LASTEXITCODE -ne 0){throw 'PR visual evidence could not be confirmed; retry begins with attachment and comment readback'}
+    return (($reply -join "`n") | ConvertFrom-Json -AsHashtable)
+}
 function Inspect-Candidate {
     $a=Assigned
     $target=Source-Identity
@@ -49,6 +170,10 @@ function Inspect-Candidate {
     if((Invoke-Git $a.worktree @('branch','--show-current')) -cne $a.branch){throw 'Candidate checkout is on another branch'}
     if(Invoke-Git $a.worktree @('status','--porcelain')){return @{ok=$true;ready=$false;reason='source_hygiene';target_commit=$target}}
     Invoke-Git $a.worktree @('merge-base','--is-ancestor',$candidate.base,$candidate.commit) | Out-Null
+    if($candidate.base -ceq $target -and $project.visual_evidence_required -eq $true){
+        try { Visual-Evidence $a | Out-Null }
+        catch {return @{ok=$true;ready=$false;reason='visual_evidence';detail=$_.Exception.Message;target_commit=$target}}
+    }
     return @{ok=$true;ready=($candidate.base -ceq $target);reason='target_moved';target_commit=$target;commit=$candidate.commit}
 }
 function Repo-Identity {
@@ -200,13 +325,21 @@ try {
             $comment=Azure @('devops','invoke','--area','wit','--resource','comments','--api-version','7.1-preview','--route-parameters',('project='+$project.azure_project),('workItemId='+$request.item),'--http-method','POST','--in-file',$bodyPath)
             @{ok=$true;comment_id=$comment.id;comment_version=$comment.version;service_authored=$true}
         }
-        'verify_pr' {
+        {$_ -in 'verify_pr','attach_pr_evidence'} {
             $a=Assigned;Repo-Identity
             $publicationBranch=Publication-Branch $a
             $pr=Azure @('repos','pr','show','--id',([string]$request.id))
             $items=@(Azure @('repos','pr','work-item','list','--id',([string]$request.id)))
             if($pr.repository.id -cne $project.repository_id -or $pr.sourceRefName -cne ('refs/heads/'+$publicationBranch) -or $pr.targetRefName -cne ('refs/heads/'+$a.target_ref)){throw 'PR identity/source/target readback differs'}
             if(!($items | Where-Object {[string]$_.id -eq [string]$a.work_item.id})){throw 'PR work-item link is absent'}
+            if($inputRecord.operation -eq 'attach_pr_evidence'){
+                if($project.visual_evidence_required -ne $true -or $pr.status -ne 'active' -or
+                   $pr.isDraft -or $pr.autoCompleteSetBy -or $pr.lastMergeSourceCommit.commitId -cne $request.candidate.commit){
+                    throw 'Active reviewed PR identity is required before attaching visual evidence'
+                }
+                Attach-VisualEvidence (Visual-Evidence $a)
+                break
+            }
             @{ok=$true;id=$pr.pullRequestId;url=($project.azure_organization.TrimEnd('/')+'/'+$project.azure_project+'/_git/'+$project.repository_id+'/pullrequest/'+$pr.pullRequestId);is_draft=$pr.isDraft;active=($pr.status -eq 'active');completed=($pr.status -eq 'completed');commit=$pr.lastMergeSourceCommit.commitId;work_item_id=$a.work_item.id;autocomplete=[bool]$pr.autoCompleteSetBy}
         }
         default {throw 'Project operation is unsupported'}

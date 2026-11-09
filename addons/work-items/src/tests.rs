@@ -1014,6 +1014,12 @@ impl workflow::Driver for WorkflowDriver {
                 };
                 json!({"ok":true,"id":23})
             }
+            "attach_pr_evidence" => {
+                assert!(self.pr);
+                assert_eq!(request["candidate"]["commit"], self.commit);
+                assert_eq!(request["id"], 23);
+                json!({"ok":true,"verified":true,"thread_id":5})
+            }
             "verify_pr" => {
                 json!({"ok":true,"id":23,"url":"https://example.invalid/pr/23","is_draft":false,"active":true,"commit":self.commit,"work_item_id":1,"autocomplete":false})
             }
@@ -1460,6 +1466,7 @@ fn automatic_loop_returns_findings_to_same_coder_and_publishes_exact_full_pr() {
     let (f, api, mut settings, mut driver) = workflow_fixture(true);
     settings.project["browser_workflow"] =
         json!("Assigned browser profile with native computer access");
+    settings.project["visual_evidence_required"] = json!(true);
     for _ in 0..35 {
         workflow_step(&f, &api, &settings, &mut driver);
     }
@@ -1494,6 +1501,12 @@ fn automatic_loop_returns_findings_to_same_coder_and_publishes_exact_full_pr() {
         "One coder and one distinct technical reviewer"
     );
     assert_eq!(driver.calls.iter().filter(|v| *v == "create_pr").count(), 1);
+    let evidence_call = driver
+        .calls
+        .iter()
+        .position(|v| v == "attach_pr_evidence")
+        .unwrap();
+    assert_eq!(driver.calls[evidence_call - 1], "verify_pr");
     assert_eq!(driver.commit, "3333333333333333333333333333333333333333");
     let reopened = Store::open(f.s.path.clone()).unwrap();
     workflow::tick(&reopened, &f.cfg, &api, &settings, &mut driver).unwrap();

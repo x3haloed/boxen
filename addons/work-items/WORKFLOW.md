@@ -174,12 +174,27 @@ local environment values belong in private configuration, not this public repo.
 
 `Project-Driver.ps1` is the Windows PowerShell 7 adapter. Its `plan`, `prepare`,
 `verify_cleanup`, `inspect_candidate`, `push`, `find_pr`, `create_pr`, `verify_pr`,
+`attach_pr_evidence`,
 `find_question` and `post_question` operations use structured request/reply files.
 The Rust service verifies the configured script hash and bounds execution/output;
 its owned process tree is stopped on deadline. Driver replies and exact request
 files are retained under the service home. The driver never force-pushes, resets
 source, kills application processes, copies credentials or deletes a database.
 Application setup/cleanup remains assigned coder work; the driver checks the result.
+
+With `project.visual_evidence_required = true`, the candidate report includes
+`visual_evidence.screenshots` (the minimum useful JPEG/PNG files, with filename,
+SHA-256 and caption), or `visual_evidence.not_applicable_reason` explaining why
+the change has no useful visual proof. Screenshots belong directly in the
+assignment evidence directory. The reviewers assess the evidence against the
+candidate commit and check that it excludes account details and real user data.
+The driver validates the files before push, attaches them to the reviewed PR,
+and confirms the attachment hashes and the captioned PR comment. An exception
+is recorded in the PR comment instead. Publication retains this readback before
+releasing capacity. A retry checks the existing PR attachments and comment.
+If a comment write has an uncertain outcome and readback cannot find it, the
+driver reports a blocker rather than repeating the write. This adapter uses the
+configured Azure CLI Python runtime and its installed Azure DevOps extension.
 
 `status` includes workflow attempts. `workflow` advances one explicit operator tick
 and returns JSONL transitions followed by a snapshot; it is not a read-only status

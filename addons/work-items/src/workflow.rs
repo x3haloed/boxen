@@ -1336,6 +1336,12 @@ fn advance(
             assigned["work_item"] = json!({"id":a.item,"revision":a.data["packet"]["revision"],"source_digest":a.digest});
             assigned["delivery"] = json!({"push":false,"create_or_update_pr":false,"merge":false,"deploy":false,"autocomplete":false});
             assigned["task"] = json!({"request":a.data["interpretation"]["intended_outcome"],"acceptance_criteria":a.data["interpretation"]["scenarios"],"preservation_targets":a.data["interpretation"]["preservation_targets"],"known_holds":[],"workflow":"Normal full local repository/SQL/application/authenticated-browser reproduction, implementation and validation. This assignment is the implementation stage. The service requests exact-commit context and independent technical reviews after a candidate handoff, returns findings to this same coder, and publishes a ready candidate as a full non-draft PR. No investigation-only restriction is introduced.","candidate_contract":{"protocol":"boxen.work-report.v1","commit":"full exact SHA","base":"current target base SHA","validation":{"local_runtime_exercised":true,"acceptance":[{"id":"scenario-id","status":"observed_pass","evidence":"retained real app observation reference"}]},"cleanup":{"no_owned_runtime_resources":true}},"cleanup":"Owned application processes, allocated synthetic database and temporary source configuration are cleaned after verified local work. The service-owned persistent browser/profile remains available for subsequent jobs. A candidate report distinguishes source checks, real observations, review-pending state and remaining required implementation work."});
+            if settings.project["visual_evidence_required"] == true {
+                assigned["task"]["candidate_contract"]["visual_evidence"] = json!({
+                    "screenshots":[{"file":"JPEG/PNG filename directly in the assignment evidence directory","sha256":"full lowercase SHA-256","caption":"what this screenshot demonstrates at the candidate commit"}],
+                    "not_applicable_reason":"Specific explanation when screenshots would not demonstrate the change. Exactly one form applies. Include only the minimum screenshots needed, using synthetic data and framing that excludes account details, secrets and unrelated content."
+                });
+            }
             assigned["task"]["operator_feedback"] = a.data["operator_feedback"].clone();
             if let Some(browser) = settings.project["browser_workflow"].as_str() {
                 assigned["task"]["browser_workflow"] = json!(browser);
@@ -1484,7 +1490,7 @@ fn advance(
                     cfg,
                     api,
                     a,
-                    json!({"condition":inspection["reason"],"target_commit":inspection["target_commit"],"meaning":"Current target integration and refreshed checks/reviews precede publication"}),
+                    json!({"condition":inspection["reason"],"detail":inspection["detail"],"target_commit":inspection["target_commit"],"meaning":"Current target integration and refreshed checks/reviews precede publication"}),
                 );
             }
             a.data["candidate"] = report;
@@ -1506,6 +1512,12 @@ fn advance(
                 let body = json!({"protocol":"boxen.review-request.v1","role":role,"review_round":a.data["assignment_version"],"reviewed_commit":a.data["candidate"]["commit"],"base_commit":a.data["candidate"]["base"],"interpretation":a.data["interpretation"],"candidate":a.data["candidate"],"project_pack_root":cfg.pack_root,"assignment":assignment(s,a)?["assignment"],
                     "contract":{"protocol":"boxen.review.v1","role":role,"reviewed_commit":a.data["candidate"]["commit"],"base_commit":a.data["candidate"]["base"],"decision":"pass|changes_required|blocked","findings":[{"id":"stable-finding","blocking":false,"evidence":"source/check reference","requested_change":"specific correction"}]},
                     "meaning":"An explicit JSON response to the authenticated reply_to, with matching request_id, attempt_id, work_item_id, source_digest, role, reviewed_commit, base_commit and envelope in_reply_to, records this review. Pass covers this exact commit and role only. Context review assesses intent/preservation; technical review independently inspects the actual diff and failure paths. Private narration is not a decision; review does not authorize source edits, merge or deployment."});
+                let mut body = body;
+                if settings.project["visual_evidence_required"] == true {
+                    body["visual_evidence_review"] = json!(
+                        "Read the candidate's proposed PR screenshots from the assigned evidence directory. Review whether they demonstrate the changed behavior with minimal frames, match this commit, and exclude credentials, account details and non-synthetic data. If screenshots do not apply, review the specific reason. Missing, inappropriate or insufficient evidence is a blocking finding."
+                    );
+                }
                 let mid = enqueue(
                     s,
                     cfg,
@@ -1611,7 +1623,7 @@ fn advance(
                     cfg,
                     api,
                     a,
-                    json!({"condition":inspection["reason"],"target_commit":inspection["target_commit"]}),
+                    json!({"condition":inspection["reason"],"detail":inspection["detail"],"target_commit":inspection["target_commit"]}),
                 );
             }
             a.data["publication_grant"] = json!({"authority":settings.authority,"draft":false,"merge":false,"deploy":false,"autocomplete":false});
@@ -1659,6 +1671,22 @@ fn advance(
                     && receipt["autocomplete"] == false,
                 "PR readback does not match approved candidate/full PR contract"
             );
+            let mut receipt = receipt;
+            if settings.project["visual_evidence_required"] == true {
+                ensure!(
+                    settings.publication,
+                    "Automatic PR evidence publication is disabled"
+                );
+                let evidence = driver.call(
+                    "attach_pr_evidence",
+                    &json!({"assignment":assignment(s,a)?["assignment"],"candidate":a.data["candidate"],"id":a.data["pr_id"]}),
+                )?;
+                ensure!(
+                    evidence["verified"] == true,
+                    "PR visual evidence readback required"
+                );
+                receipt["visual_evidence"] = evidence;
+            }
             a.data["publication_receipt"] = receipt.clone();
             let latest = s.packet(a.item)?;
             let source_changed_after_publication =

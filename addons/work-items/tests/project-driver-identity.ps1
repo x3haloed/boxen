@@ -60,3 +60,33 @@ $script:activePullRequests=@(@{pullRequestId=42},@{pullRequestId=43});$denied=$f
 try {Publication-Branch $assignment | Out-Null} catch {$denied=$true}
 if(!$denied){throw 'Ambiguous active PRs were accepted'}
 Write-Output 'PASS active prior PR reuse and owner/repository/source/target/work-item/draft/autocomplete guards'
+
+$visualFunction=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Visual-Evidence'},$true)
+. ([scriptblock]::Create($visualFunction.Extent.Text))
+$directory=[IO.Directory]::CreateTempSubdirectory('boxen-visual-')
+$image=Join-Path $directory.FullName 'result.png'
+try {
+    [IO.File]::WriteAllBytes($image,[Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1ZkAAAAASUVORK5CYII='))
+    $assignment=@{evidence_dir=$directory.FullName}
+    $screen=@{file='result.png';caption='The resulting status is displayed';sha256=(Get-FileHash -LiteralPath $image).Hash.ToLowerInvariant()}
+    $request=@{candidate=@{visual_evidence=@{screenshots=@($screen)}}}
+    if((Visual-Evidence $assignment).screenshots.Count -ne 1){throw 'Valid screenshot was not retained'}
+    $request.candidate.visual_evidence=@{not_applicable_reason='This change affects only background retry accounting.'}
+    if(!(Visual-Evidence $assignment).not_applicable_reason){throw 'Valid exception was not retained'}
+    foreach($invalid in @(
+        @{}, @{not_applicable_reason=' '},
+        @{screenshots=@($screen);not_applicable_reason='Conflicting evidence forms'},
+        @{screenshots=@($screen,$screen)},
+        @{screenshots=@(@{file='../result.png';caption=$screen.caption;sha256=$screen.sha256})},
+        @{screenshots=@(@{file='result.png';caption=$screen.caption;sha256=('0'*64)})}
+    )) {
+        $request.candidate.visual_evidence=$invalid
+        $rejected=$false
+        try {Visual-Evidence $assignment | Out-Null} catch {$rejected=$true}
+        if(!$rejected){throw 'Invalid visual evidence was accepted'}
+    }
+} finally {
+    if(Test-Path -LiteralPath $image){Remove-Item -LiteralPath $image}
+    Remove-Item -LiteralPath $directory.FullName
+}
+Write-Output 'PASS screenshot evidence and exception requirements, hashes, duplicates and path bounds'
