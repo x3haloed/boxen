@@ -2,6 +2,9 @@
 extern crate cosmo_compat as _;
 
 mod agent_tools;
+#[path = "../shared/browser_assignment.rs"]
+mod browser_assignment;
+mod browser_tools;
 mod chat;
 mod codex;
 #[path = "../shared/codex_executable.rs"]

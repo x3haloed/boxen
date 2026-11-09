@@ -276,6 +276,7 @@ fn matches(
         || !p["additionalPermissions"].is_null()
         || !p["networkApprovalContext"].is_null()
         || a["runtime"]["required"] != true
+        || !a["runtime"]["managed_browser"].is_null()
     {
         return Ok(false);
     }

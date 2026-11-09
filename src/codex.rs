@@ -355,11 +355,29 @@ pub fn execute(
 ) -> Result<()> {
     let residents = jobs.residents.clone();
     let record = run.snapshot().record;
+    let browser = crate::browser_tools::for_run(&jobs, &record).inspect_err(|error| {
+        run.diagnostic(
+            Level::Error,
+            "browser_assignment.rejected",
+            || json!({"detail":error.to_string()}),
+            || Value::Null,
+        );
+    })?;
     let promoted = record
         .resident
         .as_ref()
         .is_some_and(|r| r.promotion.is_some());
     let mut trigger_context = record.trigger_context() + &record.observation_context();
+    if let Some(browser) = &browser {
+        run.append("browser_assignment_attached", browser.identity())?;
+        run.diagnostic(
+            Level::Info,
+            "browser_assignment.attached",
+            || browser.identity(),
+            || Value::Null,
+        );
+        trigger_context.push_str("\nThe boxen_browser MCP connection operates the reserved local browser. It provides navigation, input, screenshots and native DevTools commands and events. The browser starts on first use. Screenshot paths identify files in the current assignment's evidence directory.");
+    }
     if (history.native_import.is_some() || promoted)
         && let Some(recovery) = &record.recovery
     {
@@ -456,6 +474,9 @@ pub fn execute(
         params["config"] = json!({"mcp_servers.boxen_resident":bridge.config()});
         run.append("resident_bridge_approval_policy", json!({"server":"boxen_resident","default_tools_approval_mode":"approve","scope":"activation"}))?;
         run.diagnostic(Level::Info, "backend.resident_bridge_approval_policy", || json!({"server":"boxen_resident","default_tools_approval_mode":"approve","scope":"activation"}), || Value::Null);
+    }
+    if let Some(browser) = &browser {
+        params["config"]["mcp_servers.boxen_browser"] = browser.config();
     }
     if !spec.model.is_empty() {
         params["model"] = json!(spec.model);
@@ -565,6 +586,40 @@ pub fn execute(
             "resident_bridge_ready",
             json!({"backend_thread_id":thread,"server":"boxen_resident"}),
         )?;
+    }
+    if let Some(browser) = &browser {
+        let status = rpc.request(
+            "mcpServerStatus/list",
+            json!({"threadId":thread,"serverName":"boxen_browser","detail":"toolsAndAuthOnly"}),
+        )?;
+        let ready = status["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|entry| {
+                entry["name"] == "boxen_browser"
+                    && ["browser_action", "browser_cdp", "browser_events"]
+                        .iter()
+                        .all(|name| entry["tools"].get(*name).is_some())
+            });
+        if !ready {
+            run.diagnostic(
+                Level::Error,
+                "browser_assignment.unavailable",
+                || browser.identity(),
+                || Value::Null,
+            );
+            return Err(
+                "the assigned browser MCP tools were unavailable; no turn was started".into(),
+            );
+        }
+        run.append("browser_assignment_ready", browser.identity())?;
+        run.diagnostic(
+            Level::Info,
+            "browser_assignment.ready",
+            || browser.identity(),
+            || Value::Null,
+        );
     }
     run.append(
         "backend_thread",

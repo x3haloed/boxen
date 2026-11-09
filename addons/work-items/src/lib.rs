@@ -1,5 +1,8 @@
 pub mod ado;
 pub mod approvals;
+#[path = "../../../shared/browser_assignment.rs"]
+mod browser_assignment;
+mod managed_browser;
 pub mod operator;
 pub mod process;
 pub mod supervision;
@@ -319,6 +322,7 @@ impl Store {
             "Context decision needs attributed evidence references"
         );
         let assignment = &input["assignment"];
+        managed_browser::validate_assignment(assignment)?;
         let investigation = input["context"]["decision"] == "investigate";
         if investigation {
             ensure!(

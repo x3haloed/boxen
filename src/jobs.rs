@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -575,6 +575,10 @@ enum ActivationCause {
     Observations,
 }
 impl Jobs {
+    pub(crate) fn runtime_home(&self) -> Option<&Path> {
+        self.directory.parent()
+    }
+
     fn scheduled_thread(&self, owner: &str, id: &str) -> Result<Spec> {
         valid_id(id)?;
         if self.residents.get(owner, id).is_ok() {

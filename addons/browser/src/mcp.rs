@@ -1,12 +1,10 @@
 //! Stdio MCP session. Its trusted launch config identifies one browser profile.
 
-use crate::{Result, automation::Automation};
+use crate::{Result, automation::Automation, browser_assignment::Settings};
 use boxen_browser::{browser::Browser, cdp::Connection};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, Read, Write},
-    path::PathBuf,
     time::Duration,
 };
 
@@ -14,27 +12,9 @@ const MAX_REQUEST: u64 = 1024 * 1024;
 const INLINE_RESULT: usize = 192 * 1024;
 const DEFAULT_VERSION: &str = "2025-11-25";
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Settings {
-    executable: PathBuf,
-    agent_browser: PathBuf,
-    profile: PathBuf,
-    evidence: PathBuf,
-    #[serde(default)]
-    headless: bool,
-}
-
 pub fn serve(settings: Settings, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
-    for path in [
-        &settings.executable,
-        &settings.agent_browser,
-        &settings.profile,
-        &settings.evidence,
-    ] {
-        if !path.is_absolute() {
-            return Err("browser MCP configuration paths must be absolute".into());
-        }
+    if !settings.absolute_paths() {
+        return Err("browser MCP configuration paths must be absolute".into());
     }
     if !settings.executable.is_file() || !settings.agent_browser.is_file() {
         return Err("configured browser and agent-browser executables must exist".into());

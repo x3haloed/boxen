@@ -1,8 +1,8 @@
 # Boxen browser tools
 
 This addon launches and debugs local Chromium browsers. Windows launch is
-implemented for Chrome and Edge. It includes a standalone stdio MCP server.
-Workload registration and assignment lifecycle wiring are separate slices.
+implemented for Chrome and Edge. Boxen can run the stdio MCP server for an
+assignment activation. An operator can also run it as a standalone fixture.
 
 `Browser::launch` takes an absolute executable and a dedicated profile directory.
 The caller chooses headed or headless mode. A profile lock excludes another
@@ -43,6 +43,38 @@ commands. The browser starts on first tool use. EOF triggers cleanup.
 Screenshots and oversized responses are saved under `evidence`. Raw CDP results
 can contain authenticated browser state. Config and evidence stay on the local
 host under the assignment owner's control.
+
+### Work-item assignment
+
+An optional `project.managed_browser` object in the work-item workflow
+configuration enables this path for newly allocated assignments. It accepts
+`server` (the installed Boxen browser addon executable), `agent_browser`,
+`chrome` and optional `edge` slots with `executable` and `profile` fields,
+and optional `headless`. All paths are absolute and host-local. The default is
+`chrome`, intended to point to a pinned Chrome for Testing installation.
+`default: "edge"` selects the configured Edge slot. Chrome and Edge profiles
+are dedicated to their respective installations and persist across assignments.
+An optional `items` list limits the managed browser to specified work-item IDs
+during a pilot. An omitted or empty list applies to all new workflow allocations.
+
+Work-item dispatch retains the chosen browser, profile and evidence paths in
+the assignment. While holding its profile claim, it publishes the immutable
+grant in the daemon's `browser-assignments` registry before submitting the
+assignment mail. Boxen attaches the server when that exact message is in the
+activation batch and its authenticated sender and recipient match the grant.
+A continuation gets a new grant with its new assignment message. Ordinary
+resident mail does not attach the tool. A conflicting grant fails the
+activation before the model turn starts.
+
+The old browser launch path is selected when `project.managed_browser` is
+absent. Existing assignments retain their frozen settings when the operator
+changes this configuration. Capacity release waits for managed browser
+profile shutdown in addition to the existing idle and presentation checks.
+
+The opt-in `scripts/codex-browser-live.py` starts an isolated Boxen daemon
+and uses the installed Codex sign-in. It checks first-use and resumed tool
+delivery, retained PNG evidence and listener cleanup, with an ordinary
+activation between the browser activations.
 
 `tests/mcp-smoke.py` accepts `--boxen-browser`, `--agent-browser`,
 `--executable`, and a fresh `--scratch` directory. It drives a local fixture

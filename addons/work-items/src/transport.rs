@@ -216,6 +216,21 @@ pub fn dispatch(s: &Store, cfg: &Config, api: &impl Boxen, job: &str) -> Result<
         return Ok(());
     }
     let msg: Value = serde_json::from_str(&message)?;
+    if !frozen["assignment"]["runtime"]["managed_browser"].is_null() {
+        let profile = frozen["assignment"]["runtime"]["browser_context"]
+            .as_str()
+            .context("Managed browser profile reservation missing")?;
+        let held: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reservations WHERE job=?1 AND resource=?2)",
+            params![job, format!("browser:{}", profile.to_lowercase())],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            held,
+            "Managed browser profile is not reserved by this assignment"
+        );
+        managed_browser::publish(cfg, &frozen["assignment"], &msg, job, version)?;
+    }
     effect(s, job, version, "mail", "submitting", None)?;
     let accepted =
         match api.call(json!({"op":"mailbox_send","client_id":cfg.client_id,"message":msg})) {
@@ -298,6 +313,13 @@ pub fn continue_assignment(
         presented && complete,
         "Continuation requires prior assignment presentation"
     );
+    let packet: String = c.query_row(
+        "SELECT packet FROM assignments WHERE job=?1 AND version=?2",
+        params![job, version],
+        |r| r.get(0),
+    )?;
+    let packet: Value = serde_json::from_str(&packet)?;
+    let _browser = managed_browser::idle_profile(&packet["assignment"])?;
     s.assign(cfg, input)
 }
 pub fn release(
@@ -398,6 +420,13 @@ pub(crate) fn release_with_basis(
         state != "needs_refresh" || outcome == "paused",
         "Stale assignment can be paused, not certified finished"
     );
+    let packet: String = c.query_row(
+        "SELECT packet FROM assignments WHERE job=?1 AND version=?2",
+        params![job, version],
+        |r| r.get(0),
+    )?;
+    let packet: Value = serde_json::from_str(&packet)?;
+    let _browser = managed_browser::idle_profile(&packet["assignment"])?;
     let mut c = s.connect()?;
     let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let current: (i64, String) =

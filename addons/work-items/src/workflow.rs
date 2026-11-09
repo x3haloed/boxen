@@ -1346,7 +1346,9 @@ fn advance(
             if let Some(browser) = settings.project["browser_workflow"].as_str() {
                 assigned["task"]["browser_workflow"] = json!(browser);
             }
-            if let Some(policy) = approvals::Policy::load(s)?.filter(|p| p.enabled) {
+            if !crate::managed_browser::configure(&mut assigned, &settings.project)?
+                && let Some(policy) = approvals::Policy::load(s)?.filter(|p| p.enabled)
+            {
                 assigned["runtime"]["browser_launch_command"] =
                     json!(approvals::launch_script(&policy, &assigned)?);
                 assigned["task"]["browser_approval"] = json!(

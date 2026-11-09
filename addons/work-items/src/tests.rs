@@ -155,6 +155,66 @@ impl Boxen for Fake {
     }
 }
 #[test]
+fn managed_browser_dispatch_retains_scope_and_cleanup_before_releasing_capacity() {
+    let f = Fixture::new();
+    let mut input = f.input(1);
+    let exe = std::env::current_exe().unwrap();
+    let profile = f.root.join("profile");
+    fs::create_dir_all(&profile).unwrap();
+    input["assignment"]["runtime"] = json!({
+        "required":true,"reservation_id":"fixture","allocation_source":"fixture",
+        "database_server":"local","database_name":"fixture","frontend_port":4500,"backend_port":4501
+    });
+    let mut project = json!({"managed_browser":{
+        "server":exe,"agent_browser":exe,"chrome":{"executable":exe,"profile":profile},
+        "edge":{"executable":exe,"profile":f.root.join("edge-profile")},"items":[2]
+    }});
+    assert!(!managed_browser::configure(&mut input["assignment"], &project).unwrap());
+    assert!(input["assignment"]["runtime"]["managed_browser"].is_null());
+    project["managed_browser"]["items"] = json!([1]);
+    let mut edge = input["assignment"].clone();
+    project["managed_browser"]["default"] = json!("edge");
+    assert!(managed_browser::configure(&mut edge, &project).unwrap());
+    assert_eq!(edge["runtime"]["managed_browser"]["engine"], "edge");
+    assert_eq!(
+        edge["runtime"]["browser_context"],
+        json!(f.root.join("edge-profile"))
+    );
+    project["managed_browser"]
+        .as_object_mut()
+        .unwrap()
+        .remove("default");
+    assert!(managed_browser::configure(&mut input["assignment"], &project).unwrap());
+    assert_eq!(
+        input["assignment"]["runtime"]["managed_browser"]["engine"],
+        "chrome"
+    );
+    let result = f.s.assign(&f.cfg, &input).unwrap();
+    let job = f.s.reserve(1).unwrap().unwrap();
+    let api = Fake::new(&f.cfg);
+    *api.lose_response.lock().unwrap() = true;
+    assert!(dispatch(&f.s, &f.cfg, &api, &job).is_err());
+    let message_id = api.mail.lock().unwrap().keys().next().unwrap().clone();
+    let path = browser_assignment::grant_path(&f.cfg.boxen_home, &message_id);
+    let bytes = fs::read(path).unwrap();
+    let grant: browser_assignment::Grant = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(grant.message, message_id);
+    assert_eq!(grant.resident, result["coder_id"].as_str().unwrap());
+    assert_eq!(grant.settings.profile, profile);
+    dispatch(&f.s, &f.cfg, &api, &job).unwrap();
+    assert_eq!(api.mail.lock().unwrap().len(), 1);
+    let lock = fs::File::create(profile.join(".boxen-browser.lock")).unwrap();
+    fs2::FileExt::try_lock_exclusive(&lock).unwrap();
+    let error = release(&f.s, &api, &job, "paused", true, "fixture").unwrap_err();
+    assert!(error.to_string().contains("still shutting down"));
+    drop(lock);
+    assert_eq!(
+        release(&f.s, &api, &job, "paused", true, "fixture").unwrap()["resources_released"],
+        true
+    );
+}
+
+#[test]
 fn operator_request_is_exact_and_same_item_cannot_spawn_twice() {
     let f = Fixture::new();
     let input = f.input(1);
