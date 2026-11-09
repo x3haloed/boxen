@@ -17,6 +17,29 @@ The process adapter lives in `src/browser/windows.rs`. Future host adapters
 implement process-tree ownership, debugger listener verification, and bounded
 shutdown for their host. The CDP command and event interfaces are host-neutral.
 
+### macOS and Linux handoff
+
+The launcher contract is in `src/browser.rs`. Each host needs an adapter that
+starts the selected browser, detects premature exit, proves that the loopback
+listener in the profile's `DevToolsActivePort` belongs to the launched process,
+and waits for or terminates its owned process tree. Keep the profile lock until
+shutdown finishes. Launching into an already-running browser or attaching to an
+unrelated listener would violate the assignment's ownership contract.
+
+The host work includes selecting the correct Chrome for Testing package for its
+architecture, finding the executable inside a macOS application bundle or
+Linux package, and running headed mode in the operator's desktop session for
+initial sign-in. The same profile path is reused for later runs on that host.
+The assignment registry, MCP transport, agent-browser adapter, and CDP
+connection are shared. Browser binaries and profiles live outside the daemon's
+portable executable.
+
+The local MCP and real Codex smoke scripts below cover the shared behavior.
+Host acceptance also needs to exercise profile reuse after a graceful restart,
+contention on the same profile, and process-tree cleanup when the browser owner
+exits abruptly. The current managed lifecycle test is Windows-gated. The
+standalone MCP fixture is portable once the host launcher is in place.
+
 A connection accepts a loopback port and browser debugger path from the
 browser owner. It keeps target session IDs valid across commands and retains
 unsolicited events such as breakpoint hits. Event cursors expose loss from
