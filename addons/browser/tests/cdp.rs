@@ -87,22 +87,86 @@ fn real_browser_breakpoint_and_step() {
     let mut lines = endpoint.lines();
     let port = lines.next().unwrap().parse().unwrap();
     let mut client = Connection::connect(port, lines.next().unwrap()).unwrap();
-    let target = call(
+    verify_breakpoint(&mut client);
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a configured Chrome or Edge executable and a disposable profile directory"]
+fn managed_browser_reserves_reuses_and_releases_profile() {
+    use boxen_browser::browser::Browser;
+    use std::path::PathBuf;
+    let executable = PathBuf::from(std::env::var_os("BOXEN_BROWSER_EXECUTABLE").unwrap());
+    let profile = PathBuf::from(std::env::var_os("BOXEN_BROWSER_TEST_PROFILE").unwrap());
+    assert!(!profile.exists(), "a fresh disposable profile is required");
+    let browser = Browser::launch(&executable, &profile, true).unwrap();
+    let conflicting = Browser::launch(&executable, &profile, true);
+    assert!(
+        conflicting
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("reservation")
+    );
+    let endpoint = browser.endpoint().clone();
+    let mut client = endpoint.connect().unwrap();
+    let version = call(&mut client, "Browser.getVersion", json!({}), None);
+    eprintln!("Browser under test: {}", version["product"]);
+    verify_breakpoint(&mut client);
+    call(
         &mut client,
+        "Storage.setCookies",
+        json!({"cookies":[{
+            "name":"profile-probe", "value":"retained", "domain":"fixture.invalid", "path":"/", "secure":true,
+            "expires": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600
+        }]}),
+        None,
+    );
+    assert!(
+        has_profile_cookie(&mut client),
+        "the first browser did not accept the fixture cookie"
+    );
+    drop(client);
+    browser.close().unwrap();
+    assert!(endpoint.connect().is_err());
+    let browser = Browser::launch(&executable, &profile, true).unwrap();
+    let endpoint = browser.endpoint().clone();
+    let mut client = endpoint.connect().unwrap();
+    assert!(
+        has_profile_cookie(&mut client),
+        "the restarted browser did not retain the fixture cookie"
+    );
+    drop(client);
+    drop(browser);
+    assert!(endpoint.connect().is_err());
+}
+
+#[cfg(windows)]
+fn has_profile_cookie(client: &mut Connection) -> bool {
+    call(client, "Storage.getCookies", json!({}), None)["cookies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|cookie| cookie["name"] == "profile-probe" && cookie["value"] == "retained")
+}
+
+fn verify_breakpoint(client: &mut Connection) {
+    let target = call(
+        client,
         "Target.createTarget",
         json!({"url":"about:blank"}),
         None,
     );
     let session = call(
-        &mut client,
+        client,
         "Target.attachToTarget",
         json!({"targetId":target["targetId"],"flatten":true}),
         None,
     );
     let session = session["sessionId"].as_str().unwrap();
-    call(&mut client, "Debugger.enable", json!({}), Some(session));
+    call(client, "Debugger.enable", json!({}), Some(session));
     let breakpoint = call(
-        &mut client,
+        client,
         "Debugger.setBreakpointByUrl",
         json!({
             "url":"boxen-browser-fixture.js","lineNumber":2,"condition":"n === 41"
@@ -110,7 +174,7 @@ fn real_browser_breakpoint_and_step() {
         Some(session),
     );
     call(
-        &mut client,
+        client,
         "Runtime.evaluate",
         json!({"expression":
             "setTimeout(() => {\nconst n = 41;\nwindow.answer = n + 1;\nwindow.finished = true;\n}, 150);\n//# sourceURL=boxen-browser-fixture.js"
@@ -118,10 +182,10 @@ fn real_browser_breakpoint_and_step() {
         Some(session),
     );
     let mut cursor = 0;
-    let hit = paused(&mut client, &mut cursor, session);
+    let hit = paused(client, &mut cursor, session);
     assert_eq!(hit["hitBreakpoints"][0], breakpoint["breakpointId"]);
     let local = call(
-        &mut client,
+        client,
         "Debugger.evaluateOnCallFrame",
         json!({
             "callFrameId":hit["callFrames"][0]["callFrameId"],"expression":"n","returnByValue":true
@@ -129,12 +193,12 @@ fn real_browser_breakpoint_and_step() {
         Some(session),
     );
     assert_eq!(local["result"]["value"], 41);
-    call(&mut client, "Debugger.stepOver", json!({}), Some(session));
-    let stepped = paused(&mut client, &mut cursor, session);
+    call(client, "Debugger.stepOver", json!({}), Some(session));
+    let stepped = paused(client, &mut cursor, session);
     assert_eq!(stepped["callFrames"][0]["location"]["lineNumber"], 3);
-    call(&mut client, "Debugger.resume", json!({}), Some(session));
+    call(client, "Debugger.resume", json!({}), Some(session));
     let result = call(
-        &mut client,
+        client,
         "Runtime.evaluate",
         json!({
             "expression":"[window.answer, window.finished]","returnByValue":true
@@ -143,7 +207,7 @@ fn real_browser_breakpoint_and_step() {
     );
     assert_eq!(result["result"]["value"], json!([42, true]));
     call(
-        &mut client,
+        client,
         "Target.closeTarget",
         json!({"targetId":target["targetId"]}),
         None,

@@ -1,5 +1,6 @@
 //! Stateful Chrome DevTools Protocol transport for an already-owned browser.
 
+use crate::Result;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -13,8 +14,6 @@ const MAX_MESSAGE: usize = 32 * 1024 * 1024;
 const MAX_EVENTS: usize = 1024;
 const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// A browser-level CDP connection retains target sessions and queued events
 /// across calls. It is scoped to the loopback endpoint supplied by the owner.
