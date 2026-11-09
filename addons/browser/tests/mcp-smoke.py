@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import http.server
 import json
+import os
 from pathlib import Path
 import re
 import socket
@@ -154,12 +155,13 @@ def main():
     settings = args.scratch / "config.json"
     settings.write_text(json.dumps({"executable": str(args.executable), "agent_browser": str(args.agent_browser),
                                     "evidence": str(evidence), "profile": str(profile), "headless": True}), encoding="utf-8")
+    command = [args.boxen_browser, "mcp", settings]
     with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as site:
         worker = threading.Thread(target=site.serve_forever, daemon=True)
         worker.start()
         origin = f"http://127.0.0.1:{site.server_port}"
         try:
-            with subprocess.Popen([args.boxen_browser, "mcp", settings], stdin=subprocess.PIPE,
+            with subprocess.Popen(command, stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, text=True, encoding="utf-8") as proc:
                 try:
                     mcp = Mcp(proc)
@@ -167,20 +169,57 @@ def main():
                     exercise(mcp, origin, evidence)
                     print(mcp.cdp("Browser.getVersion")["product"], "passed the local MCP smoke")
                 finally:
-                    with contextlib.suppress(BrokenPipeError):
-                        proc.stdin.close()
-                    try:
-                        code = proc.wait(timeout=40)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        raise
-                assert code == 0, code
-                port = int((profile / "DevToolsActivePort").read_text().splitlines()[0])
-                with socket.socket() as probe:
-                    probe.settimeout(2)
-                    assert probe.connect_ex(("127.0.0.1", port)) != 0, "MCP shutdown left a debugger listener"
+                    close_mcp(proc)
+                wait_listener_closed(debug_port(profile))
         finally:
             site.shutdown()
+    if os.name == "nt":
+        # No MCP EOF or Browser.close is possible in this case. Closing the
+        # owner's Job Object must stop Chromium and release the profile lock.
+        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              text=True, encoding="utf-8") as proc:
+            try:
+                Mcp(proc).cdp("Browser.getVersion")
+                port = debug_port(profile)
+            finally:
+                proc.kill()
+                proc.wait(timeout=10)
+            wait_listener_closed(port)
+        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              text=True, encoding="utf-8") as proc:
+            try:
+                Mcp(proc).cdp("Browser.getVersion")
+                port = debug_port(profile)
+            finally:
+                close_mcp(proc)
+            wait_listener_closed(port)
+        print("Abrupt browser owner exit closed the listener and released the profile")
+
+
+def debug_port(profile):
+    return int((profile / "DevToolsActivePort").read_text().splitlines()[0])
+
+
+def close_mcp(proc):
+    with contextlib.suppress(BrokenPipeError):
+        proc.stdin.close()
+    try:
+        code = proc.wait(timeout=40)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise
+    assert code == 0, code
+
+
+def wait_listener_closed(port):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with socket.socket() as probe:
+            probe.settimeout(1)
+            if probe.connect_ex(("127.0.0.1", port)) != 0:
+                return
+        time.sleep(.1)
+    raise AssertionError("MCP shutdown left a debugger listener")
 
 
 if __name__ == "__main__":

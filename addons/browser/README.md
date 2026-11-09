@@ -104,7 +104,8 @@ activation between the browser activations.
 through the MCP protocol and checks navigation, Tab, literal input, a breakpoint
 resolved from a TypeScript source map, paused-frame inspection, stepping,
 resuming, a PNG artifact, and debugger endpoint closure. No application or
-cloud service is required.
+cloud service is required. On Windows it also kills the MCP owner and verifies
+that the debugger listener closes and a new owner can reuse the profile.
 
 ## Transport and lifecycle tests
 
