@@ -495,21 +495,26 @@ fn large_source_retained_in_immutable_file_without_silent_mail_truncation() {
     let raw = json!({"id":1,"rev":1,"fields":{"description":"e".repeat(100000)}}).to_string();
     c.execute("UPDATE ado_items SET raw=?1 WHERE id=1", [raw])
         .unwrap();
-    let r = f.s.assign(&f.cfg, &f.input(1)).unwrap();
+    let mut input = f.input(1);
+    let findings = json!({"technical":{"findings":[{"requested_change":"Review the full finding ".repeat(1400)}]}});
+    input["context"]["review_findings"] = findings.clone();
+    input["assignment"]["task"]["review_findings"] = findings.clone();
+    let r = f.s.assign(&f.cfg, &input).unwrap();
     let job = r["job_id"].as_str().unwrap();
     f.s.reserve(1).unwrap();
     let api = Fake::new(&f.cfg);
     dispatch(&f.s, &f.cfg, &api, job).unwrap();
     let text = fs::read_to_string(f.root.join("evidence").join(job).join("1/packet.json")).unwrap();
     assert!(text.len() > 100000);
+    let packet: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(packet["context"]["review_findings"], findings);
+    assert_eq!(packet["assignment"]["task"]["review_findings"], findings);
     let mail = api.mail.lock().unwrap();
-    assert!(
-        mail.values().next().unwrap()["body"]
-            .as_str()
-            .unwrap()
-            .len()
-            < 32768
-    );
+    let body = mail.values().next().unwrap()["body"].as_str().unwrap();
+    assert!(body.len() < 32768);
+    let envelope: Value = serde_json::from_str(body.lines().last().unwrap()).unwrap();
+    assert_eq!(envelope["packet_sha256"], hash(&text));
+    assert!(envelope.get("assignment").is_none());
 }
 
 #[test]

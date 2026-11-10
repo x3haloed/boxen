@@ -580,7 +580,7 @@ impl Store {
                 json!({"item":item,"version":version,"override":input["eligibility_override"]}),
             )?;
         }
-        let bundle = json!({"assignment":assignment,"context":input["context"],"legacy_reconciliation":input["legacy_reconciliation"],"replacement":input["replacement"],"continuation":continuation,"eligibility_override":input["eligibility_override"],"source_packet":packet});
+        let bundle = json!({"assignment":assignment,"context":input["context"],"legacy_reconciliation":input["legacy_reconciliation"],"replacement":input["replacement"],"continuation":continuation,"eligibility_override":input["eligibility_override"],"source_packet":packet}).to_string();
         let packet_path = self
             .path
             .parent()
@@ -589,12 +589,22 @@ impl Store {
             .join(&job)
             .join(version.to_string())
             .join("packet.json");
-        let mut body = format!(
-            "[Work-item service — accepted assignment record; source content retains its original authors]\nJob {job}, version {version}. This service records an explicit operator request or configured human-authorized workflow decision, as attributed in context; it is not a new human-authored message. The JSON below identifies the frozen assignment and full source/evidence file on this executing host. That file's SHA-256 verifies its exact retained bytes. Local investigation/editing/checks are scoped by the assignment. This implementation assignment grants no direct publication. A configured automatic workflow can request separate exact-commit reviews and publish a ready candidate through its retained publication stage. Source observations can become stale after acceptance; workflow freshness is separate from implementation success. Runtime claims coordinate this service's assignments, not arbitrary processes on the host. Explicit mailbox replies go to the authenticated reply_to address. Private narration is not a handoff.\n{}",
-            json!({"assignment":assignment,"context":input["context"],"packet_path":packet_path,"packet_sha256":hash(&bundle.to_string()),"source_digest":input["source_digest"]})
+        let header = format!(
+            "[Work-item service — accepted assignment record; source content retains its original authors]\nJob {job}, version {version}. This service records an explicit operator request or configured human-authorized workflow decision, as attributed in context; it is not a new human-authored message. The JSON below identifies the frozen assignment and full source/evidence file on this executing host. That file's SHA-256 verifies its exact retained bytes. Local investigation/editing/checks are scoped by the assignment. This implementation assignment grants no direct publication. A configured automatic workflow can request separate exact-commit reviews and publish a ready candidate through its retained publication stage. Source observations can become stale after acceptance; workflow freshness is separate from implementation success. Runtime claims coordinate this service's assignments, not arbitrary processes on the host. Explicit mailbox replies go to the authenticated reply_to address. Private narration is not a handoff.\n"
         );
-        if cfg.supervision.is_some() {
-            body.push_str(&supervision::contract(&job, version, &mid));
+        let contract = cfg
+            .supervision
+            .as_ref()
+            .map_or_else(String::new, |_| supervision::contract(&job, version, &mid));
+        let packet_reference = json!({"packet_path":packet_path,"packet_sha256":hash(&bundle),"source_digest":input["source_digest"]});
+        let mut envelope = packet_reference.clone();
+        envelope["assignment"] = assignment.clone();
+        envelope["context"] = input["context"].clone();
+        let mut body = format!("{header}{envelope}{contract}");
+        if body.len() > 32768 {
+            body = format!(
+                "{header}The verified packet contains the complete assignment and context, including any review findings. Reading those fields establishes the scope before work begins.\n{packet_reference}{contract}"
+            );
         }
         ensure!(
             body.len() <= 32768,
@@ -614,7 +624,7 @@ impl Store {
                 version,
                 input["source_digest"].as_str(),
                 encoded,
-                bundle.to_string(),
+                bundle,
                 instantiate.to_string(),
                 message.to_string(),
                 json!(claims).to_string(),
