@@ -1544,6 +1544,8 @@ fn automatic_loop_returns_findings_to_same_coder_and_publishes_exact_full_pr() {
     let (f, api, mut settings, mut driver) = workflow_fixture(true);
     settings.project["browser_workflow"] =
         json!("Assigned browser profile with native computer access");
+    settings.project["browser_sign_in"] =
+        json!("Use the browser autofill signal before escalating");
     settings.project["devops_writing"] =
         json!("Consult the shared writing skill before drafting PR text");
     settings.project["visual_evidence_required"] = json!(true);
@@ -1560,15 +1562,16 @@ fn automatic_loop_returns_findings_to_same_coder_and_publishes_exact_full_pr() {
             })
             .unwrap();
     assert_eq!((version, held), (2, 0));
-    let retained: Vec<(String, String)> = f.s.connect().unwrap().prepare(
-        "SELECT json_extract(input,'$.assignment.task.browser_workflow'),json_extract(input,'$.assignment.task.devops_writing') FROM assignments ORDER BY version"
-    ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    let retained: Vec<(String, String, String)> = f.s.connect().unwrap().prepare(
+        "SELECT json_extract(input,'$.assignment.task.browser_workflow'),json_extract(input,'$.assignment.task.devops_writing'),json_extract(input,'$.assignment.task.browser_sign_in') FROM assignments ORDER BY version"
+    ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
     assert_eq!(
         retained,
         vec![
             (
                 "Assigned browser profile with native computer access".into(),
                 "Consult the shared writing skill before drafting PR text".into(),
+                "Use the browser autofill signal before escalating".into(),
             );
             2
         ]

@@ -1385,6 +1385,9 @@ fn advance(
             if let Some(browser) = settings.project["browser_workflow"].as_str() {
                 assigned["task"]["browser_workflow"] = json!(browser);
             }
+            if let Some(sign_in) = settings.project["browser_sign_in"].as_str() {
+                assigned["task"]["browser_sign_in"] = json!(sign_in);
+            }
             if !crate::managed_browser::configure(&mut assigned, &settings.project)?
                 && let Some(policy) = approvals::Policy::load(s)?.filter(|p| p.enabled)
             {

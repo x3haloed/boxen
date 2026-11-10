@@ -174,6 +174,8 @@ configured decision-author identity IDs. Optional `project.browser_workflow` tex
 is frozen into each new assignment's `task.browser_workflow`; this supports a
 project-approved native browser fallback when the connector host is unavailable.
 It does not repair the connector or grant additional browser/account access.
+Optional `project.browser_sign_in` text is frozen separately into
+`task.browser_sign_in`, so it applies alongside the selected browser workflow.
 Optional `project.devops_writing` text is frozen into `task.devops_writing` so
 coders receive project-specific guidance when drafting content for Azure DevOps.
 Credentials stay in their normal CLI/OS
