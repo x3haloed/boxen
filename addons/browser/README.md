@@ -1,44 +1,47 @@
 # Boxen browser tools
 
-This addon launches and debugs local Chromium browsers. Windows launch is
-implemented for Chrome and Edge. Boxen can run the stdio MCP server for an
-assignment activation. An operator can also run it as a standalone fixture.
+Boxen can attach this stdio MCP addon to a work-item activation or run it as a
+standalone fixture. Chrome runs on macOS and Windows, and Edge runs on
+Windows. Safari 27 and later use Apple's native Safari MCP server on macOS.
 
-`Browser::launch` takes an absolute executable and a dedicated profile directory.
-The caller chooses headed or headless mode. A profile lock excludes another
-managed launch using the same directory. Windows starts the browser suspended,
-places it in a kill-on-close Job Object, then resumes it. The launcher checks
-that the resulting loopback debugger socket belongs to that browser process
-before publishing its endpoint. `Browser::close` allows Chromium to flush the
-profile and waits for its process tree. The Job Object also covers unexpected
-owner exit. The profile directory remains for later assignments.
+### Chrome and Edge
 
-The process adapter lives in `src/browser/windows.rs`. Future host adapters
-implement process-tree ownership, debugger listener verification, and bounded
-shutdown for their host. The CDP command and event interfaces are host-neutral.
+A profile lock excludes a second managed launch using the same directory. The
+launcher checks that the loopback debugger socket in `DevToolsActivePort`
+belongs to the process it launched before exposing CDP. The native owner asks
+Chromium to flush the profile on shutdown. The profile persists for later
+assignments.
 
-### macOS and Linux handoff
+Windows starts the browser suspended and owns its processes with a kill-on-close
+Job Object. On macOS, a separate native owner starts Chrome in its own process
+group and checks the listener with macOS's `lsof`. The owner holds the profile
+lock until Chrome shuts down. Closing or killing the MCP process closes the
+owner's control pipe, which triggers Chrome shutdown and bounded group cleanup.
 
-The launcher contract is in `src/browser.rs`. Each host needs an adapter that
-starts the selected browser, detects premature exit, proves that the loopback
-listener in the profile's `DevToolsActivePort` belongs to the launched process,
-and waits for or terminates its owned process tree. Keep the profile lock until
-shutdown finishes. Launching into an already-running browser or attaching to an
-unrelated listener would violate the assignment's ownership contract.
+Use the executable inside the installed application bundle on macOS, for example
+`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`. Headed mode
+supports initial sign-in from the logged-in desktop session. The same
+dedicated profile path is reused for later launches. A pinned Chrome for
+Testing bundle can also provide the executable. A Linux launcher remains
+future work.
 
-The host work includes selecting the correct Chrome for Testing package for its
-architecture, finding the executable inside a macOS application bundle or
-Linux package, and running headed mode in the operator's desktop session for
-initial sign-in. The same profile path is reused for later runs on that host.
-The assignment registry, MCP transport, agent-browser adapter, and CDP
-connection are shared. Browser binaries and profiles live outside the daemon's
-portable executable.
+### Safari
 
-The local MCP and real Codex smoke scripts below cover the shared behavior.
-Host acceptance also needs to exercise profile reuse after a graceful restart,
-contention on the same profile, and process-tree cleanup when the browser owner
-exits abruptly. The current managed lifecycle test is Windows-gated. The
-standalone MCP fixture is portable once the host launcher is in place.
+On macOS, `executable` points to `/usr/bin/safaridriver`, and
+`backend: "safari"` selects its native `--mcp` mode. Safari Settings >
+Developer > Allow remote automation and external agents enables the local
+driver. Safari can require the operator to authenticate this change. MCP discovery
+lists the tools before a Safari window opens. Navigation is the first check
+that the host can create an automation session.
+
+Safari's own tools provide navigation, page content, interactions, JavaScript,
+console and network inspection, and screenshots. Boxen retains Safari
+screenshots as PNGs in the assigned evidence directory. Safari owns the
+isolated automation window and its temporary session. The configured
+`profile` directory is a Boxen reservation for this Safari slot. Safari is
+headed and starts each automation session without persisted cookies or sign-in.
+Chromium's raw CDP commands and breakpoint events are specific to Chrome and
+Edge. See [WebKit's Safari MCP documentation](https://webkit.org/blog/18136/introducing-the-safari-mcp-server-for-web-developers/).
 
 A connection accepts a loopback port and browser debugger path from the
 browser owner. It keeps target session IDs valid across commands and retains
@@ -49,10 +52,12 @@ outcome and is never replayed automatically.
 ## Stdio MCP
 
 `boxen-browser mcp ABSOLUTE_CONFIG_PATH` accepts a host-provided JSON file with
-`executable`, `agent_browser`, `profile`, `evidence` and optional `headless`
-(default false). The four paths are absolute. Each server process owns one
-browser session and uses the same endpoint for automation and native debugger
-commands. The browser starts on first tool use. EOF triggers cleanup.
+absolute `executable`, `profile`, and `evidence` paths. Chromium also
+requires an absolute `agent_browser` executable and accepts `headless`
+(default false). Safari uses `backend: "safari"` and omits `agent_browser`.
+The browser starts on first tool use. EOF triggers cleanup.
+
+Chromium exposes these tools over one browser endpoint:
 
 - `browser_action` provides navigation, accessibility snapshots, input,
   Back/Forward, reload, and PNG capture. It calls a local agent-browser binary
@@ -71,12 +76,12 @@ host under the assignment owner's control.
 
 An optional `project.managed_browser` object in the work-item workflow
 configuration enables this path for newly allocated assignments. It accepts
-`server` (the installed Boxen browser addon executable), `agent_browser`,
-`chrome` and optional `edge` slots with `executable` and `profile` fields,
-and optional `headless`. All paths are absolute and host-local. The default is
-`chrome`, intended to point to a pinned Chrome for Testing installation.
-`default: "edge"` selects the configured Edge slot. Chrome and Edge profiles
-are dedicated to their respective installations and persist across assignments.
+`server` (the native Boxen browser addon executable), slots named `chrome`,
+`edge` or `safari` with `executable` and `profile` fields, and optional
+`headless`. All paths are absolute and host-local. The default is `chrome`.
+`default: "edge"` or `default: "safari"` selects the corresponding slot.
+`agent_browser` is required for Chrome and Edge. Safari uses a dedicated
+reservation directory and requires headed mode.
 An optional `items` list limits the managed browser to specified work-item IDs
 during a pilot. An omitted or empty list applies to all new workflow allocations.
 
@@ -96,16 +101,21 @@ profile shutdown in addition to the existing idle and presentation checks.
 
 The opt-in `scripts/codex-browser-live.py` starts an isolated Boxen daemon
 and uses the installed Codex sign-in. It checks first-use and resumed tool
-delivery, retained PNG evidence and listener cleanup, with an ordinary
-activation between the browser activations.
+delivery and retained PNG evidence, with an ordinary activation between the
+browser activations. For Chromium it also checks listener cleanup. Pass
+`--safari --executable /usr/bin/safaridriver` for the Safari path.
 
 `tests/mcp-smoke.py` accepts `--boxen-browser`, `--agent-browser`,
 `--executable`, and a fresh `--scratch` directory. It drives a local fixture
 through the MCP protocol and checks navigation, Tab, literal input, a breakpoint
 resolved from a TypeScript source map, paused-frame inspection, stepping,
-resuming, a PNG artifact, and debugger endpoint closure. No application or
-cloud service is required. On Windows it also kills the MCP owner and verifies
-that the debugger listener closes and a new owner can reuse the profile.
+resuming, a PNG artifact, and debugger endpoint closure. The Chromium test also checks
+contention, cookie persistence and debugger cleanup after killing the MCP
+process. Pass `--headed` to exercise the logged-in desktop session.
+For Safari, replace `--agent-browser` with `--safari` and pass
+`--executable /usr/bin/safaridriver`. Its smoke checks navigation, page
+inspection, input, console and network inspection, and PNG evidence.
+No application sign-in or cloud service is required.
 
 ## Transport and lifecycle tests
 

@@ -1,6 +1,6 @@
 use crate::{
     Result,
-    browser_assignment::{self, Grant},
+    browser_assignment::{self, Backend, Grant},
     jobs::{Jobs, Record},
     mailbox::Address,
 };
@@ -23,8 +23,32 @@ impl Attachment {
             "default_tools_approval_mode":"approve"})
     }
 
+    pub fn tools(&self) -> &[&str] {
+        match self.grant.settings.backend {
+            Backend::Chromium => &["browser_action", "browser_cdp", "browser_events"],
+            Backend::Safari => &[
+                "navigate_to_url",
+                "get_page_content",
+                "page_interactions",
+                "screenshot",
+            ],
+        }
+    }
+
+    pub fn context(&self) -> &str {
+        match self.grant.settings.backend {
+            Backend::Chromium => {
+                "The boxen_browser MCP connection operates the reserved local browser. It provides navigation, input, screenshots and native DevTools commands and events. The browser starts on first use. Screenshot paths identify files in the current assignment's evidence directory."
+            }
+            Backend::Safari => {
+                "The boxen_browser MCP connection operates an isolated Safari automation window. It provides navigation, page inspection, input, console and network inspection, and screenshots. Screenshot paths identify files in the current assignment's evidence directory. The automation session starts without saved sign-in state."
+            }
+        }
+    }
+
     pub fn identity(&self) -> Value {
-        json!({"job":self.grant.job,"version":self.grant.version,"message":self.grant.message})
+        json!({"job":self.grant.job,"version":self.grant.version,"message":self.grant.message,
+            "backend":self.grant.settings.backend})
     }
 }
 
@@ -84,7 +108,7 @@ fn find(
         if grant.version == 0
             || !grant.server.is_absolute()
             || !grant.server.is_file()
-            || !grant.settings.absolute_paths()
+            || !grant.settings.valid_configuration()
         {
             return Err("browser assignment record has invalid runtime paths or version".into());
         }
@@ -119,7 +143,8 @@ mod tests {
             server: std::env::current_exe().unwrap(),
             settings: Settings {
                 executable: root.join("browser"),
-                agent_browser: root.join("helper"),
+                agent_browser: Some(root.join("helper")),
+                backend: Backend::Chromium,
                 profile: root.join("profile"),
                 evidence: root.join("evidence"),
                 headless: true,

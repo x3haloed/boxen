@@ -1,23 +1,28 @@
 //! Stdio MCP session. Its trusted launch config identifies one browser profile.
 
+#[cfg(target_os = "macos")]
+use crate::chrome_owner::Browser;
 use crate::{Result, automation::Automation, browser_assignment::Settings};
-use boxen_browser::{browser::Browser, cdp::Connection};
+#[cfg(not(target_os = "macos"))]
+use boxen_browser::browser::Browser;
+use boxen_browser::cdp::Connection;
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, Read, Write},
     time::Duration,
 };
 
-const MAX_REQUEST: u64 = 1024 * 1024;
+pub(crate) const MAX_REQUEST: u64 = 1024 * 1024;
 const INLINE_RESULT: usize = 192 * 1024;
 const DEFAULT_VERSION: &str = "2025-11-25";
 
 pub fn serve(settings: Settings, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
-    if !settings.absolute_paths() {
-        return Err("browser MCP configuration paths must be absolute".into());
-    }
-    if !settings.executable.is_file() || !settings.agent_browser.is_file() {
-        return Err("configured browser and agent-browser executables must exist".into());
+    if !settings
+        .agent_browser
+        .as_ref()
+        .is_some_and(|path| path.is_file())
+    {
+        return Err("the configured Chromium agent-browser executable must exist".into());
     }
     let mut server = Server {
         settings,
@@ -169,7 +174,7 @@ impl Server {
             )?;
             let cdp = browser.endpoint().connect()?;
             let automation = Automation::new(
-                self.settings.agent_browser.clone(),
+                self.settings.agent_browser.clone().unwrap(),
                 browser.endpoint().clone(),
             )?;
             self.session = Some(Session {

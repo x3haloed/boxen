@@ -1,6 +1,6 @@
 use crate::{
     Config,
-    browser_assignment::{self, Grant, Settings},
+    browser_assignment::{self, Backend, Grant, Settings},
     id, key,
 };
 use anyhow::{Context, Result, ensure};
@@ -18,6 +18,7 @@ enum Engine {
     #[default]
     Chrome,
     Edge,
+    Safari,
 }
 
 #[derive(Deserialize)]
@@ -31,15 +32,16 @@ struct Slot {
 #[serde(deny_unknown_fields)]
 struct Policy {
     server: PathBuf,
-    agent_browser: PathBuf,
+    agent_browser: Option<PathBuf>,
     #[serde(default)]
     default: Engine,
     #[serde(default)]
     headless: bool,
     #[serde(default)]
     items: Vec<i64>,
-    chrome: Slot,
+    chrome: Option<Slot>,
     edge: Option<Slot>,
+    safari: Option<Slot>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -70,12 +72,24 @@ pub fn configure(assignment: &mut Value, project: &Value) -> Result<bool> {
         return Ok(false);
     }
     let slot = match policy.default {
-        Engine::Chrome => policy.chrome,
+        Engine::Chrome => policy
+            .chrome
+            .context("The configured Chrome slot is missing")?,
         Engine::Edge => policy.edge.context("The configured Edge slot is missing")?,
+        Engine::Safari => policy
+            .safari
+            .context("The configured Safari slot is missing")?,
+    };
+    let backend = match policy.default {
+        Engine::Chrome | Engine::Edge => Backend::Chromium,
+        Engine::Safari => Backend::Safari,
     };
     let settings = Settings {
         executable: slot.executable,
-        agent_browser: policy.agent_browser,
+        agent_browser: policy
+            .agent_browser
+            .filter(|_| backend == Backend::Chromium),
+        backend,
         profile: slot.profile,
         evidence: PathBuf::from(
             assignment["evidence_dir"]
@@ -92,19 +106,32 @@ pub fn configure(assignment: &mut Value, project: &Value) -> Result<bool> {
     validate(&frozen)?;
     assignment["runtime"]["browser_context"] = json!(frozen.settings.profile);
     assignment["runtime"]["managed_browser"] = serde_json::to_value(frozen)?;
-    assignment["task"]["browser_workflow"] = json!(
-        "The assignment activation exposes boxen_browser MCP. Its browser_action tool opens the local app for the allocated frontend port and synthetic tenant, inspects the page, operates controls, and retains PNG evidence in the assigned directory. Browser_cdp and browser_events expose native DevTools commands and asynchronous events. The browser starts on first use and Boxen owns its process. The assigned profile persists after the activation. A missing tool or browser sign-in is a runtime blocker rather than observed application acceptance."
-    );
+    assignment["task"]["browser_workflow"] = json!(match backend {
+        Backend::Safari =>
+            "The assignment activation exposes Safari tools through boxen_browser MCP. Navigation, page inspection, interactions, console and network inspection run in an isolated Safari automation window. Screenshot PNGs are retained in the assigned evidence directory. Safari automation sessions start without saved sign-in state.",
+        Backend::Chromium =>
+            "The assignment activation exposes boxen_browser MCP. Its browser_action tool opens the local app for the allocated frontend port and synthetic tenant, inspects the page, operates controls, and retains PNG evidence in the assigned directory. Browser_cdp and browser_events expose native DevTools commands and asynchronous events. The browser starts on first use and Boxen owns its process. The assigned profile persists after the activation. A missing tool or browser sign-in is a runtime blocker rather than observed application acceptance.",
+    });
+    if backend == Backend::Safari {
+        assignment["task"]["cleanup"] = json!(
+            "Owned application processes, the allocated synthetic database and temporary source configuration are cleaned after verified local work. The isolated Safari automation session ends with the activation. A candidate report distinguishes source checks, real observations, review-pending state and remaining required implementation work."
+        );
+    }
     Ok(true)
 }
 
 fn validate(frozen: &Frozen) -> Result<()> {
     ensure!(
         frozen.server.is_absolute()
-            && frozen.settings.absolute_paths()
+            && frozen.settings.valid_configuration()
             && frozen.server.is_file()
             && frozen.settings.executable.is_file()
-            && frozen.settings.agent_browser.is_file(),
+            && frozen
+                .settings
+                .agent_browser
+                .as_ref()
+                .is_none_or(|path| path.is_file())
+            && (frozen.settings.backend != Backend::Safari || cfg!(target_os = "macos")),
         "Managed browser requires absolute paths and installed executables"
     );
     Ok(())

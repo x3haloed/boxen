@@ -180,6 +180,24 @@ fn managed_browser_dispatch_retains_scope_and_cleanup_before_releasing_capacity(
         edge["runtime"]["browser_context"],
         json!(f.root.join("edge-profile"))
     );
+    #[cfg(target_os = "macos")]
+    {
+        let mut safari = input["assignment"].clone();
+        let safari_project = json!({"managed_browser":{
+            "server":exe,"default":"safari",
+            "safari":{"executable":exe,"profile":f.root.join("safari-slot")}
+        }});
+        assert!(managed_browser::configure(&mut safari, &safari_project).unwrap());
+        let frozen = &safari["runtime"]["managed_browser"];
+        assert_eq!(frozen["engine"], "safari");
+        assert_eq!(frozen["settings"]["backend"], "safari");
+        assert!(frozen["settings"].get("agent_browser").is_none());
+        assert_eq!(
+            safari["runtime"]["browser_context"],
+            json!(f.root.join("safari-slot"))
+        );
+        managed_browser::validate_assignment(&safari).unwrap();
+    }
     project["managed_browser"]
         .as_object_mut()
         .unwrap()

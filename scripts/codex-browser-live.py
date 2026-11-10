@@ -17,10 +17,14 @@ import urllib.request
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ["boxen", "browser-server", "agent-browser", "executable", "scratch"]:
+    for name in ["boxen", "browser-server", "executable", "scratch"]:
         parser.add_argument("--" + name, required=True, type=lambda p: Path(p).resolve())
+    parser.add_argument("--agent-browser", type=lambda p: Path(p).resolve())
+    parser.add_argument("--safari", action="store_true")
     parser.add_argument("--codex", default="auto")
     args = parser.parse_args()
+    if not args.safari and args.agent_browser is None:
+        parser.error("Chromium requires --agent-browser")
     args.scratch.mkdir()
     home = args.scratch / "boxen"
     fixture = Path(__file__).resolve().parent.parent / "addons/browser/tests/mcp-smoke.py"
@@ -71,15 +75,18 @@ def run(args, home, url):
                 message = secrets.token_hex(32)
                 evidence = args.scratch / f"evidence-{version}"
                 if scoped:
+                    engine = ({"backend": "safari"} if args.safari else
+                              {"agent_browser": str(args.agent_browser), "headless": True})
                     grant = {"message": message, "resident": resident, "sender_machine": machine,
                              "sender_id": sender, "job": job, "version": version,
                              "server": str(args.browser_server),
-                             "settings": {"executable": str(args.executable), "agent_browser": str(args.agent_browser),
-                                          "profile": str(args.scratch / "profile"), "evidence": str(evidence),
-                                          "headless": True}}
+                             "settings": {"executable": str(args.executable), "profile": str(args.scratch / "profile"),
+                                          "evidence": str(evidence), **engine}}
                     (registry / f"{message}.json").write_text(json.dumps(grant), encoding="utf-8")
-                prompt = (f"Use the boxen_browser MCP browser_action tool to open {url}, then use "
-                          "browser_action screenshot and report its path. This is a local disposable fixture. "
+                navigate, screenshot = (("navigate_to_url", "screenshot") if args.safari else
+                                        ("browser_action open", "browser_action screenshot"))
+                prompt = (f"Use the boxen_browser MCP {navigate} tool to open {url}, then use "
+                          f"{screenshot} and report its path. This is a local disposable fixture. "
                           "No shell or other browser tools are needed." if scoped else
                           "Finish with a private line saying NO BROWSER REQUEST. This activation needs no tools.")
                 api({"op": "mailbox_send", "client_id": sender, "message": {"id": message,
@@ -104,17 +111,18 @@ def run(args, home, url):
                     assert ready[0]["data"]["version"] == version
                     shots = list(evidence.glob("*.png"))
                     assert len(shots) == 1 and shots[0].read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
-                    endpoint = args.scratch / "profile/DevToolsActivePort"
-                    port = int(endpoint.read_text().splitlines()[0])
-                    deadline = time.monotonic() + 20
-                    while time.monotonic() < deadline:
-                        with socket.socket() as probe:
-                            probe.settimeout(1)
-                            if probe.connect_ex(("127.0.0.1", port)) != 0:
-                                break
-                        time.sleep(.2)
-                    else:
-                        raise AssertionError("the activation left a browser debugger listener")
+                    if not args.safari:
+                        endpoint = args.scratch / "profile/DevToolsActivePort"
+                        port = int(endpoint.read_text().splitlines()[0])
+                        deadline = time.monotonic() + 20
+                        while time.monotonic() < deadline:
+                            with socket.socket() as probe:
+                                probe.settimeout(1)
+                                if probe.connect_ex(("127.0.0.1", port)) != 0:
+                                    break
+                            time.sleep(.2)
+                        else:
+                            raise AssertionError("the activation left a browser debugger listener")
                 else:
                     assert not evidence.exists()
                 print(f"Activation {version} completed (assigned browser {scoped})", flush=True)

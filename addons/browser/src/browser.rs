@@ -1,12 +1,19 @@
 //! Chromium launch contract shared by the platform process implementations.
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(target_os = "macos")]
+use macos::Process;
+#[cfg(windows)]
+use windows::Process;
+
 use crate::{Result, cdp::Connection};
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use serde_json::json;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use std::{
     ffi::OsString,
     fs::{self, OpenOptions},
@@ -15,20 +22,20 @@ use std::{
 };
 use std::{fs::File, path::Path};
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const START_TIMEOUT: Duration = Duration::from_secs(20);
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Browser {
     // The process must stop before the profile lock is released.
-    #[cfg(windows)]
-    process: windows::Process,
+    #[cfg(any(windows, target_os = "macos"))]
+    process: Process,
     _profile_lock: File,
     endpoint: Endpoint,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Endpoint {
     port: u16,
     path: String,
@@ -48,12 +55,12 @@ impl Browser {
     /// Launches a browser using an absolute executable and a dedicated profile.
     /// The endpoint is published only after the platform proves listener ownership.
     pub fn launch(executable: &Path, profile: &Path, headless: bool) -> Result<Self> {
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = (executable, profile, headless);
             Err("managed browser launch is not implemented on this platform".into())
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         {
             if !executable.is_absolute() || !profile.is_absolute() || !executable.is_file() {
                 return Err("browser launch requires an existing absolute executable and an absolute profile directory".into());
@@ -61,7 +68,10 @@ impl Browser {
             fs::create_dir_all(profile)?;
             // Lock the actual profile path while passing Chromium a normal DOS path
             // where possible. Its profile storage can reject verbatim Windows paths.
+            #[cfg(windows)]
             let profile = dunce::canonicalize(profile)?;
+            #[cfg(target_os = "macos")]
+            let profile = fs::canonicalize(profile)?;
             let profile_lock = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -71,7 +81,8 @@ impl Browser {
             fs2::FileExt::try_lock_exclusive(&profile_lock).map_err(|error| {
                 format!("browser profile reservation could not be acquired: {error}")
             })?;
-            let process = windows::Process::spawn(executable, &arguments(&profile, headless))?;
+            #[allow(unused_mut)]
+            let mut process = Process::spawn(executable, &arguments(&profile, headless))?;
             let deadline = Instant::now() + START_TIMEOUT;
             loop {
                 if process.exited()? {
@@ -101,8 +112,8 @@ impl Browser {
 
     /// Closes through Chromium before releasing the profile so storage can flush.
     /// The platform process guard still terminates the process tree on failure.
-    pub fn close(self) -> Result<()> {
-        #[cfg(windows)]
+    pub fn close(#[allow(unused_mut)] mut self) -> Result<()> {
+        #[cfg(any(windows, target_os = "macos"))]
         {
             if self.process.exited()? {
                 return Err("browser exited before graceful profile shutdown was requested".into());
@@ -116,14 +127,14 @@ impl Browser {
                 return Ok(());
             }
             response?;
-            Err("browser did not exit after Browser.close; the process tree was terminated".into())
+            Err("browser did not exit after Browser.close; the process guard attempted forced shutdown".into())
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         Err("managed browser shutdown is not implemented on this platform".into())
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn arguments(profile: &Path, headless: bool) -> Vec<OsString> {
     let mut profile_arg = OsString::from("--user-data-dir=");
     profile_arg.push(profile);
@@ -135,6 +146,8 @@ fn arguments(profile: &Path, headless: bool) -> Vec<OsString> {
         "--no-default-browser-check".into(),
         "--disable-background-mode".into(),
     ];
+    #[cfg(target_os = "macos")]
+    args.push("--disable-breakpad".into());
     if headless {
         args.push("--headless=new".into());
     }
@@ -142,7 +155,7 @@ fn arguments(profile: &Path, headless: bool) -> Vec<OsString> {
     args
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn read_endpoint(profile: &Path) -> Option<Endpoint> {
     use std::io::Read;
     let mut input = String::new();

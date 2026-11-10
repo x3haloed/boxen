@@ -376,7 +376,8 @@ pub fn execute(
             || browser.identity(),
             || Value::Null,
         );
-        trigger_context.push_str("\nThe boxen_browser MCP connection operates the reserved local browser. It provides navigation, input, screenshots and native DevTools commands and events. The browser starts on first use. Screenshot paths identify files in the current assignment's evidence directory.");
+        trigger_context.push('\n');
+        trigger_context.push_str(browser.context());
     }
     if (history.native_import.is_some() || promoted)
         && let Some(recovery) = &record.recovery
@@ -598,7 +599,8 @@ pub fn execute(
             .flatten()
             .any(|entry| {
                 entry["name"] == "boxen_browser"
-                    && ["browser_action", "browser_cdp", "browser_events"]
+                    && browser
+                        .tools()
                         .iter()
                         .all(|name| entry["tools"].get(*name).is_some())
             });
