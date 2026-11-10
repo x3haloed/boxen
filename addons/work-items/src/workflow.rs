@@ -3,15 +3,8 @@
 use crate::{transport::Boxen, *};
 use std::path::PathBuf;
 
-pub(crate) fn existing_question_comment<'a>(
-    question: &Value,
-    entities: &'a Value,
-) -> Result<Option<(i64, &'a Value)>> {
-    let reference = &question["existing_comment_id"];
-    if reference.is_null() {
-        return Ok(None);
-    }
-    let existing = reference
+fn positive_ado_number(reference: &Value) -> Option<i64> {
+    reference
         .as_i64()
         .or_else(|| {
             reference
@@ -20,7 +13,18 @@ pub(crate) fn existing_question_comment<'a>(
                 .and_then(|s| s.parse::<i64>().ok())
         })
         .filter(|id| *id > 0)
-        .context("Existing question comment ID is invalid")?;
+}
+
+pub(crate) fn existing_question_comment<'a>(
+    question: &Value,
+    entities: &'a Value,
+) -> Result<Option<(i64, &'a Value)>> {
+    let reference = &question["existing_comment_id"];
+    if reference.is_null() {
+        return Ok(None);
+    }
+    let existing =
+        positive_ado_number(reference).context("Existing question comment ID is invalid")?;
     let original = entities
         .as_array()
         .context("Source comments unavailable")?
@@ -1226,13 +1230,17 @@ fn advance(
                                 .as_array()
                                 .context("Answer authority role is not configured")?;
                             let original = if reference["kind"] == "ado_comment" {
+                                let comment_id = positive_ado_number(&reference["comment_id"])
+                                    .context("Answer comment ID is invalid")?;
+                                let version = positive_ado_number(&reference["version"])
+                                    .context("Answer comment version is invalid")?;
                                 let original = a.data["packet"]["evidence"]["entities"]
                                     .as_array()
                                     .context("Source entities missing")?
                                     .iter()
                                     .find(|v| {
-                                        v["id"] == reference["comment_id"]
-                                            && v["version"] == reference["version"]
+                                        v["id"] == comment_id
+                                            && v["version"] == version
                                             && v["isDeleted"] != true
                                     })
                                     .context(
@@ -1242,7 +1250,7 @@ fn advance(
                                     allowed.contains(&original["createdBy"]["id"]),
                                     "Answer author is not configured for this decision role"
                                 );
-                                let posted:bool=s.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM workflow_questions WHERE json_extract(receipt,'$.comment_id')=?1 AND json_extract(receipt,'$.comment_version')=?2 AND json_extract(receipt,'$.service_authored')=1)",params![original["id"].as_i64().unwrap_or(-1),original["version"].as_i64().unwrap_or(-1)],|r|r.get(0))?;
+                                let posted:bool=s.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM workflow_questions WHERE json_extract(receipt,'$.comment_id')=?1 AND json_extract(receipt,'$.comment_version')=?2 AND json_extract(receipt,'$.service_authored')=1)",params![comment_id,version],|r|r.get(0))?;
                                 ensure!(
                                     !posted,
                                     "A service-authored question is not an authority answer"
@@ -1265,14 +1273,13 @@ fn advance(
                                     ),
                                     "Answer revision does not change a requirement field"
                                 );
+                                let revision = positive_ado_number(&reference["revision"])
+                                    .context("Answer revision is invalid")?;
                                 let original = a.data["packet"]["evidence"]["revisions"]
                                     .as_array()
                                     .context("Source revisions missing")?
                                     .iter()
-                                    .find(|v| {
-                                        v["rev"] == reference["revision"]
-                                            && !v["fields"][field].is_null()
-                                    })
+                                    .find(|v| v["rev"] == revision && !v["fields"][field].is_null())
                                     .context("Answer revision/field not found")?;
                                 ensure!(
                                     allowed.contains(&original["revisedBy"]["id"]),

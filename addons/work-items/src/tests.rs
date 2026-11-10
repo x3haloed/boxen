@@ -1674,6 +1674,58 @@ fn forged_and_superseded_review_replies_cannot_advance_publication() {
     );
 }
 #[test]
+fn authoritative_comment_accepts_string_ids_and_checks_frozen_version_and_author() {
+    for (version, author, error) in [
+        ("1", "product", None),
+        (
+            "2",
+            "product",
+            Some("Answer comment/version is not in the frozen source"),
+        ),
+        (
+            "1",
+            "other",
+            Some("Answer author is not configured for this decision role"),
+        ),
+    ] {
+        let (f, mut api, mut settings, mut driver) = workflow_fixture(false);
+        api.auto_answer = false;
+        settings.project["decision_authorities"] = json!({"product_owner":["product"]});
+        let source = ado::config(&f.s).unwrap().source();
+        let comment =
+            json!({"id":42,"version":1,"createdBy":{"id":author},"text":"Use the selected form"});
+        f.s.connect()
+            .unwrap()
+            .execute(
+                "INSERT INTO ado_entities VALUES(?1,1,'comment','42',?2)",
+                params![source, comment.to_string()],
+            )
+            .unwrap();
+        workflow_step(&f, &api, &settings, &mut driver);
+        let request = api
+            .mail
+            .lock()
+            .unwrap()
+            .values()
+            .find(|m| m["subject"].as_str().unwrap().contains("interpretation"))
+            .unwrap()
+            .clone();
+        api.answer(&request,json!({"protocol":"boxen.interpretation.v1","decision":"ready","intended_outcome":"Use the selected form","scenarios":[{"id":"s1"}],"questions":[],"holds":[],"existing_work":{"unresolved_ownership":false},"evidence_refs":["fixture"],"authoritative_answers":[{"kind":"ado_comment","comment_id":"42","version":version,"authority_role":"product_owner"}]}),request["to"].clone());
+        workflow_step(&f, &api, &settings, &mut driver);
+        let snapshot = workflow::snapshot(&f.s).unwrap();
+        let attempt = &snapshot["attempts"][0];
+        assert_eq!(attempt["error"].as_str(), error, "{attempt}");
+        assert_eq!(
+            attempt["stage"],
+            if error.is_none() {
+                "ready"
+            } else {
+                "interpreting"
+            }
+        );
+    }
+}
+#[test]
 fn no_copy_grant_cannot_instantiate_a_worker() {
     let (f, api, mut settings, mut driver) = workflow_fixture(false);
     settings.allow_new_copies = false;
