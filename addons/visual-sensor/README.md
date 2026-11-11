@@ -1,6 +1,6 @@
 # Visual sensor
 
-A standalone macOS screen sensor. It samples the primary display with ScreenCaptureKit, runs Apple's fast Vision OCR on profile-defined regions, and emits versioned JSON Lines. It can run on a different machine from the agent. The executable needs macOS 14 or later, an active graphical session, and Screen Recording permission. Building requires the macOS Swift toolchain. The initial implementation was exercised on Apple silicon.
+A standalone macOS screen sensor. It samples the primary display or an application window with ScreenCaptureKit, runs Apple's Vision OCR on profile-defined regions, and emits versioned JSON Lines. It can run on a different machine from the agent. The executable needs macOS 14 or later, an active graphical session, and Screen Recording permission. Building requires the macOS Swift toolchain. The initial implementation was exercised on Apple silicon.
 
 ## Run locally
 
@@ -28,9 +28,22 @@ visual-sensor replay PROFILE first.png second.png
 
 Replay runs the same OCR and tracker over a known sequence without requiring screen permission. Its frame numbers and timestamps identify the replay.
 
+## World of Warcraft
+
+```sh
+work/visual-sensor/visual-sensor capture-window addons/visual-sensor/wow.json 24 \
+  com.blizzard.worldofwarcraft
+```
+
+`capture-window PROFILE FRAME_COUNT BUNDLE_ID [ARCHIVE_ROOT]` selects the largest on-screen standard window for the bundle ID when it starts. It captures that window independently of other apps and does not send game inputs.
+
+The WoW profile samples the quest objective tracker, minimap zone label and numeric coordinates, and target name. It is calibrated for the tested windowed HUD layout, with the quest tracker on the right and the target frame at the upper left. UI scale, window shape, addon placement, or game language can require region or pattern changes. Coordinates require a visible numeric coordinate readout. Objective readings include only OCR rows with an explicit fraction and label. Missing rows, hidden targets, and completed quests can all affect what the HUD shows. A row disappearing does not establish its outcome, and a full counter describes that objective alone.
+
 ## Profiles and observations
 
-A profile specifies a target interval in milliseconds and up to eight named regions. Region coordinates are normalized to the captured image, with the origin at the upper left. A field without a pattern returns its OCR text. A field with a regular expression returns the first capture group, or the whole match if there are no groups. A quest counter can match `Checkpoint\s+(\d+/\d+)` and require two consecutive confirmations. Profiles are local operator configuration.
+A profile specifies a target interval in milliseconds and up to eight named regions. Region coordinates are normalized to the captured image, with the origin at the upper left. A field without a pattern returns its OCR text. A field with a regular expression returns the first capture group, or the whole match if there are no groups. Setting `matchAll` joins the matching values with newlines. A quest counter can match `Checkpoint\s+(\d+/\d+)` and require two consecutive confirmations. Profiles are local operator configuration.
+
+OCR defaults to the fast recognizer and original crop size. `ocrScale` can upscale small HUD text by an integer factor up to four, bounded by the capture size limit. `accurateOCR` selects Vision's more expensive recognizer for a field. The WoW profile uses both settings because the fast pass made digit and label errors on the sampled HUD.
 
 Each `boxen.visual.v1` record carries a session ID, increasing frame number, capture time in Unix milliseconds, image dimensions, timing, a current field snapshot, and any newly confirmed changes. An unchanged region reuses the OCR result if its rendered pixel bytes match. Each sample still counts toward confirmation because it is a fresh capture. A pending or unreadable field keeps its last confirmed value and evidence frame, with its status marked `confirming` or `unreadable`. A reader can distinguish the latest attempt from the last confirmed observation. The first confirmed value is an acquisition, represented by a change with no previous value.
 

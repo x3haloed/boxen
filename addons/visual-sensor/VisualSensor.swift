@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Darwin
 import Foundation
@@ -35,6 +36,9 @@ struct FieldConfig: Decodable {
     let region: Region
     let pattern: String?
     let confirmations: Int?
+    let ocrScale: Int?
+    let accurateOCR: Bool?
+    let matchAll: Bool?
 }
 
 struct Profile: Decodable {
@@ -92,6 +96,7 @@ struct Field {
     init(_ config: FieldConfig) throws {
         guard config.region.isValid, !config.id.isEmpty, config.id.utf8.count <= 64,
               (1...20).contains(config.confirmations ?? 1),
+              (1...4).contains(config.ocrScale ?? 1),
               (config.pattern?.utf8.count ?? 0) <= 512 else {
             throw SensorError("Invalid field ID, region, pattern size, or confirmation count.")
         }
@@ -148,20 +153,38 @@ struct Field {
 
     private func recognize(_ crop: CGImage) throws -> Reading? {
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .fast
+        request.recognitionLevel = config.accurateOCR == true ? .accurate : .fast
         request.usesLanguageCorrection = false
-        try VNImageRequestHandler(cgImage: crop).perform([request])
+        try VNImageRequestHandler(cgImage: ocrImage(crop)).perform([request])
         let lines = (request.results ?? []).prefix(64).compactMap { $0.topCandidates(1).first }
         let text = String(lines.map(\.string).joined(separator: "\n").prefix(2048))
         guard !text.isEmpty, let confidence = lines.map(\.confidence).min() else { return nil }
 
         guard let pattern else { return Reading(value: text, confidence: confidence) }
-        guard let match = pattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else {
-            return nil
+        let textRange = NSRange(text.startIndex..., in: text)
+        let matches = config.matchAll == true
+            ? pattern.matches(in: text, range: textRange)
+            : [pattern.firstMatch(in: text, range: textRange)].compactMap { $0 }
+        let values = matches.compactMap { match -> String? in
+            let matchRange = match.range(at: match.numberOfRanges > 1 ? 1 : 0)
+            guard let range = Range(matchRange, in: text), !range.isEmpty else { return nil }
+            return String(text[range])
         }
-        let matchRange = match.range(at: match.numberOfRanges > 1 ? 1 : 0)
-        guard let range = Range(matchRange, in: text), !range.isEmpty else { return nil }
-        return Reading(value: String(text[range]), confidence: confidence)
+        guard !values.isEmpty else { return nil }
+        return Reading(value: values.joined(separator: "\n"), confidence: confidence)
+    }
+
+    private func ocrImage(_ image: CGImage) -> CGImage {
+        let scale = min(config.ocrScale ?? 1, 1920 / max(image.width, image.height))
+        guard scale > 1 else { return image }
+        let width = image.width * scale
+        let height = image.height * scale
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return image }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage() ?? image
     }
 
     // Compare the exact rendered RGBA bytes. One changed pixel invalidates the OCR cache.
@@ -265,11 +288,11 @@ func elapsedMs(since start: UInt64) -> Double {
     Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
 }
 
-func captureConfiguration(_ display: SCDisplay) -> SCStreamConfiguration {
+func captureConfiguration(width: Double, height: Double) -> SCStreamConfiguration {
     let configuration = SCStreamConfiguration()
-    let scale = min(1, 1920 / Double(max(display.width, display.height)))
-    configuration.width = max(1, Int(Double(display.width) * scale))
-    configuration.height = max(1, Int(Double(display.height) * scale))
+    let scale = min(1, 1920 / max(width, height))
+    configuration.width = max(1, Int(width * scale))
+    configuration.height = max(1, Int(height * scale))
     configuration.showsCursor = false
     return configuration
 }
@@ -286,17 +309,42 @@ struct VisualSensor {
         }
     }
 
+    @MainActor
     private static func run(_ args: [String]) async throws {
         switch args.first {
-        case "capture" where (3...4).contains(args.count):
+        case "capture" where (3...4).contains(args.count),
+             "capture-window" where (4...5).contains(args.count):
             guard let count = Int(args[2]), count >= 0 else { throw SensorError("Invalid frame count.") }
-            var sensor = try Sensor(profile: loadProfile(args[1]), archivePath: args.count == 4 ? args[3] : nil)
+            let windowBundle = args[0] == "capture-window" ? args[3] : nil
+            let archiveIndex = windowBundle == nil ? 3 : 4
+            let profile = try loadProfile(args[1])
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) else {
-                throw SensorError("The primary display is unavailable.")
+            let filter: SCContentFilter
+            let configuration: SCStreamConfiguration
+            if let windowBundle {
+                let windows = content.windows.filter {
+                    $0.owningApplication?.bundleIdentifier == windowBundle &&
+                        $0.windowLayer == 0 && $0.frame.width > 0 && $0.frame.height > 0
+                }
+                guard let window = windows.max(by: {
+                    $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height
+                }) else {
+                    throw SensorError("No on-screen window matched the application bundle ID.")
+                }
+                // The standalone CLI needs a WindowServer connection before creating a window filter.
+                _ = NSApplication.shared
+                filter = SCContentFilter(desktopIndependentWindow: window)
+                configuration = captureConfiguration(width: window.frame.width * Double(filter.pointPixelScale),
+                                                     height: window.frame.height * Double(filter.pointPixelScale))
+                configuration.ignoreShadowsSingleWindow = true
+            } else {
+                guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) else {
+                    throw SensorError("The primary display is unavailable.")
+                }
+                filter = SCContentFilter(display: display, excludingWindows: [])
+                configuration = captureConfiguration(width: Double(display.width), height: Double(display.height))
             }
-            let filter = SCContentFilter(display: display, excludingWindows: [])
-            let configuration = captureConfiguration(display)
+            var sensor = try Sensor(profile: profile, archivePath: args.count > archiveIndex ? args[archiveIndex] : nil)
             var frame = 1
             while count == 0 || frame <= count {
                 let start = DispatchTime.now().uptimeNanoseconds
@@ -342,6 +390,7 @@ struct VisualSensor {
             throw SensorError("""
                 Usage:
                   visual-sensor capture PROFILE FRAME_COUNT [ARCHIVE_ROOT]
+                  visual-sensor capture-window PROFILE FRAME_COUNT BUNDLE_ID [ARCHIVE_ROOT]
                   visual-sensor replay PROFILE IMAGE [IMAGE ...]
                   visual-sensor inspect ARCHIVE_ROOT SESSION FRAME OUTPUT.png [PROFILE FIELD]
                 A frame count of 0 runs until stopped.
