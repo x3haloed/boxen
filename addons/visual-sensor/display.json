@@ -1,0 +1,11 @@
+{
+  "id": "display-preview",
+  "intervalMs": 750,
+  "fields": [
+    {
+      "id": "visible-text",
+      "region": {"x": 0, "y": 0, "width": 1, "height": 0.5},
+      "confirmations": 2
+    }
+  ]
+}
