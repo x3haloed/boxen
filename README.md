@@ -21,6 +21,8 @@ a command palette, and anonymous conversations with VS Code-style preview and
 pinned tabs. It attaches to a running daemon and streams retained/live activity.
 See [desktop setup, controls and current scope](docs/desktop.md).
 
+For an existing local installation, see [building and replacing Boxen on each OS](docs/local-upgrades.md).
+
 ## Try the LAN prototype
 
 ```sh
