@@ -12,6 +12,8 @@ The first native desktop slice uses one interchangeable docking tree for side pa
 
 Commit and push coherent, verified implementation slices as part of the development workflow.
 
+Planned daemon upgrades apply automatically at a quiet point when the local host has no runs in flight. The [installation and upgrade assessment](research/installation-and-upgrades.md) records the platform packaging options, GitHub Releases delta plan, and the tradeoffs for updating the desktop while its window is open.
+
 ## Daemon diagnostics
 
 Instrument the daemon throughout development, as required by [AGENTS.md](../AGENTS.md). Structured diagnostic logging is off by default, with runtime enable/disable, authenticated remote shell subscriptions, file sinks, and producer-side filters. Keep the disabled path cheap and log fields lazy. Bound consumer queues and report loss rather than blocking workloads behind log I/O. Diagnostic controls must not require a restart or affect authoritative workload journals. See [logging](logging.md) for the implemented contract.
