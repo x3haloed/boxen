@@ -20,7 +20,7 @@ open work/Boxen.app
 On other platforms the script builds `desktop/target/release/boxen-desktop`
 (`.exe` on Windows). It requires the platform's native graphics/windowing build
 dependencies. Native macOS ARM64 and Windows x86_64 desktop execution have been
-exercised; Linux desktop execution is not yet verified. Windows checks include
+exercised. The Linux menu was exercised in an X11 session under Xvfb. Windows checks include
 the real-daemon client/correspondence tests and opening the native workspace and
 resident-recipient composer. This is not a notarized release
 or installer. The GUI has its own Cargo manifest/lockfile and never enters the
@@ -34,12 +34,17 @@ query strings, and the client rejects non-loopback origins.
 
 The Threads pane includes this machine and already-paired peers discovered
 from the daemon. `lan-peer.json`, when present, supplies the development peer's
-address; otherwise **Commands → Machine connections** sets its address. The
-optional `--peer PUBLIC_KEY --address HOST:PORT` overrides one peer's address.
+address. You can also set it with **Machine connections** in the command palette.
+The optional `--peer PUBLIC_KEY --address HOST:PORT` overrides one peer's address.
 A peer address locates an already-pinned identity; it grants no new trust.
 
 ## First interactions
 
+- On macOS, Boxen uses the system menu bar. Windows uses a native menu bar in
+  the Boxen window. Linux uses an in-window menu on both X11 and Wayland.
+  **File** contains **New Thread…** and **Reconnect Daemon**, which is enabled
+  when the desktop has yet to connect. **View** contains **Show Work** and
+  **Command Palette…**.
 - The thread list contains anonymous conversations only, grouped by canonical
   Boxen thread ID. An identity attachment in any run excludes the whole thread.
 - Machines appear as collapsible groups inside the Threads pane. The small funnel
@@ -59,13 +64,14 @@ A peer address locates an already-pinned identity; it grants no new trust.
   dividers resize. Right-clicking a tab provides explicit split commands and
   **Eject** for a floating panel. Floating panels currently remain inside the
   application window, rather than becoming separate OS windows.
-- **⌘/Ctrl + Shift + P**, **⌘/Ctrl + P**, **F1**, or **Commands…** opens the palette.
+- **⌘/Ctrl + Shift + P**, **⌘/Ctrl + P**, **F1**, or **View → Command Palette…** opens the palette.
   Typing filters commands and threads; arrows select, Enter opens, Escape closes.
   **Show thread list** restores a closed list; **Reset docking layout** restores
   the sidebar while preserving open conversations and drafts.
-- **New thread** starts an anonymous request on the machine selected in its
-  dialog, with an explicit destination-local working directory and runtime. The conversation
-  composer sends a follow-up, or steering while a run is active. **⌘/Ctrl + Enter**
+- **File → New Thread…** opens the dialog for starting an anonymous request.
+  The dialog lets you select the execution machine, its working directory, and
+  the runtime. The conversation composer sends a follow-up, or steering while
+  a run is active. **⌘/Ctrl + Enter**
   submits; cancellation is a separate control.
 
 The presentation is deliberately simple: selectable text, exposed thinking,

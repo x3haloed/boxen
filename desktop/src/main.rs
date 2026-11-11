@@ -3,6 +3,7 @@ mod agents;
 mod client;
 mod correspondence;
 mod field;
+mod menu;
 mod model;
 mod work;
 mod workspace;
@@ -76,6 +77,8 @@ enum Action {
 }
 struct Desktop {
     data: Data,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    native_menu: Option<menu::NativeMenu>,
     client: Option<Client>,
     bus: Bus,
     home: PathBuf,
@@ -147,6 +150,14 @@ impl Desktop {
         }
         let bus = Bus::new(cc.egui_ctx.clone());
         let mut app = Self {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            native_menu: match menu::NativeMenu::install(cc) {
+                Ok(menu) => Some(menu),
+                Err(err) => {
+                    eprintln!("Could not install native menus: {err}");
+                    None
+                }
+            },
             data: Data {
                 work: work::State::new(&home, &origin),
                 local_key: String::new(),
@@ -189,6 +200,21 @@ impl Desktop {
         };
         app.connect();
         app
+    }
+    fn menu_command(&mut self, command: menu::Command) {
+        match command {
+            menu::Command::NewThread => self.new_thread = true,
+            menu::Command::Reconnect if !self.ready => self.connect(),
+            menu::Command::Reconnect => {}
+            menu::Command::ShowWork => self.data.saved.workspace.show_work(),
+            menu::Command::Palette => self.open_palette(),
+        }
+    }
+    fn open_palette(&mut self) {
+        self.palette = true;
+        self.palette_fresh = true;
+        self.query.clear();
+        self.choice = 0;
     }
     fn connect(&mut self) {
         self.ready = false;
@@ -1474,6 +1500,14 @@ impl TabViewer for Viewer<'_> {
 }
 impl eframe::App for Desktop {
     fn logic(&mut self, _: &egui::Context, _: &mut eframe::Frame) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        while let Some(command) = self
+            .native_menu
+            .as_ref()
+            .and_then(menu::NativeMenu::next_command)
+        {
+            self.menu_command(command);
+        }
         let visible = self
             .data
             .saved
@@ -1489,6 +1523,10 @@ impl eframe::App for Desktop {
             self.persist();
         }
         self.updates();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(menu) = &self.native_menu {
+            menu.set_ready(self.ready);
+        }
         self.poll();
         self.observe();
     }
@@ -1501,30 +1539,19 @@ impl eframe::App for Desktop {
             ) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::P)
                 || i.consume_key(egui::Modifiers::NONE, egui::Key::F1)
         }) {
-            self.palette = !self.palette;
-            self.palette_fresh = true;
-            self.query.clear();
-            self.choice = 0;
+            if self.palette {
+                self.palette = false;
+            } else {
+                self.open_palette();
+            }
         }
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Boxen").strong());
-                if ui.button("Work").clicked() {
-                    self.data.saved.workspace.show_work();
-                }
-                if !self.ready && ui.button("Reconnect daemon").clicked() {
-                    self.connect();
-                }
-                if ui.button("New thread").clicked() {
-                    self.new_thread = true;
-                }
-                if ui.button("Commands…").clicked() {
-                    self.palette = true;
-                    self.palette_fresh = true;
-                    self.query.clear();
-                }
-            });
-        });
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let show_in_window_menu = self.native_menu.is_none();
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let show_in_window_menu = true;
+        if show_in_window_menu && let Some(command) = menu::in_window(ui, self.ready) {
+            self.menu_command(command);
+        }
         egui::Panel::bottom("statusbar").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if self.data.notice.is_empty() {
