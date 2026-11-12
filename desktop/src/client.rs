@@ -470,11 +470,17 @@ mod tests {
             1
         );
         let next = crate::new_id();
-        client.followup(dest, id, next.clone(), "Follow-up".into(), bus.publisher());
-        let Update::Followup(_, Ok(pending)) =
-            bus.rx.recv_timeout(Duration::from_secs(10)).unwrap()
-        else {
-            panic!("Catalog entry could not prepare a follow-up");
+        let followup = Bus::new(egui::Context::default());
+        client.followup(
+            dest,
+            id,
+            next.clone(),
+            "Follow-up".into(),
+            followup.publisher(),
+        );
+        let pending = match followup.rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            Update::Followup(_, result) => result.unwrap(),
+            _ => panic!("Catalog entry could not prepare a follow-up"),
         };
         let mut expected = first["record"]["spec"].clone();
         expected["id"] = json!(next);
