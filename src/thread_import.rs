@@ -147,6 +147,7 @@ impl Jobs {
                 .saturating_add(1),
         );
         let record = Record {
+            automatic_cwd: false,
             transcript_import: None,
             runtime_policy: Default::default(),
             imported: Some(Provenance {

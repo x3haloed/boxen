@@ -111,6 +111,7 @@ mod tests {
         let id = state::random_hex().unwrap();
         state::private_dir(&path.join(&id)).unwrap();
         let record = Record {
+            automatic_cwd: false,
             runtime_policy: Default::default(),
             imported: None,
             transcript_import: None,
@@ -197,7 +198,9 @@ pub struct Spec {
     pub id: String,
     pub thread_id: String,
     pub backend: String,
+    #[serde(default)]
     pub cwd: String,
+    #[serde(default)]
     pub model: String,
     pub prompt: String,
 }
@@ -212,6 +215,8 @@ pub struct Event {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Record {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automatic_cwd: bool,
     #[serde(default)]
     pub runtime_policy: crate::runtime_policy::Policy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2122,7 +2127,7 @@ impl Jobs {
     fn start_locked(
         self: &Arc<Self>,
         owner: &str,
-        spec: Spec,
+        mut spec: Spec,
         activation: Option<Activation>,
         scheduled: Option<crate::scheduler::Origin>,
     ) -> Result<Snapshot> {
@@ -2139,7 +2144,11 @@ impl Jobs {
         let mut runs = self.runs.lock().unwrap();
         if let Some(existing) = runs.get(&spec.id) {
             let snapshot = existing.snapshot();
-            if snapshot.record.owner == owner && snapshot.record.spec == spec {
+            let mut accepted_input = snapshot.record.spec.clone();
+            if snapshot.record.automatic_cwd {
+                accepted_input.cwd.clear();
+            }
+            if snapshot.record.owner == owner && accepted_input == spec {
                 logging::record(
                     Level::Info,
                     Target::Workload,
@@ -2158,6 +2167,7 @@ impl Jobs {
         let resident =
             self.residents
                 .context(owner, &spec.thread_id, spec.resident_id.as_deref())?;
+        let automatic_cwd = resident.is_none() && spec.cwd.is_empty();
         if let Some(r) = &resident
             && (spec.cwd != r.cwd || spec.model != r.model || spec.backend != r.backend)
         {
@@ -2182,8 +2192,20 @@ impl Jobs {
         {
             return Err("prompt must contain 1–262144 bytes".into());
         }
-        if !std::path::Path::new(&spec.cwd).is_absolute()
-            || !std::path::Path::new(&spec.cwd).is_dir()
+        let automatic_path = if automatic_cwd {
+            let root = self.directory.parent().ok_or("run directory has no home")?;
+            let path = root.canonicalize()?.join("threads").join(&spec.thread_id);
+            spec.cwd = path
+                .to_str()
+                .ok_or("automatic working directory requires a UTF-8 path")?
+                .into();
+            Some(path)
+        } else {
+            None
+        };
+        if !automatic_cwd
+            && (!std::path::Path::new(&spec.cwd).is_absolute()
+                || !std::path::Path::new(&spec.cwd).is_dir())
         {
             return Err(
                 "working directory must exist on the executing machine and be absolute".into(),
@@ -2236,9 +2258,18 @@ impl Jobs {
         let runtime_policy = crate::runtime_policy::Policy::load(
             self.directory.parent().ok_or("run directory has no home")?,
         )?;
+        if let Some(path) = automatic_path {
+            for dir in [path.parent().expect("thread has a parent"), path.as_path()] {
+                if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+                    return Err("automatic working directory cannot be a symbolic link".into());
+                }
+                state::private_dir(dir)?;
+            }
+        }
         let path = self.directory.join(&spec.id);
         state::private_dir(&path)?;
         let record = Record {
+            automatic_cwd,
             runtime_policy,
             imported: None,
             transcript_import: None,
@@ -2296,7 +2327,7 @@ impl Jobs {
             Target::Workload,
             "submission.accepted",
             Context::run(&spec.id, &spec.thread_id, owner),
-            || json!({"backend":spec.backend,"cwd":spec.cwd,"runtime_policy":snapshot.record.runtime_policy}),
+            || json!({"backend":spec.backend,"cwd":spec.cwd,"automatic_cwd":automatic_cwd,"runtime_policy":snapshot.record.runtime_policy}),
             || Value::Null,
         );
         let binary = self.codex_path.clone();

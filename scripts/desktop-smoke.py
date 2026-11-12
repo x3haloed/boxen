@@ -13,6 +13,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -52,7 +53,27 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
             return json.load(urllib.request.urlopen(req,timeout=12))
         for prompt in ['Alpha conversation','Bravo conversation','Charlie conversation']:
             ident=secrets.token_hex(32)
-            operation({'op':'start','spec':{'id':ident,'thread_id':ident,'backend':'codex','cwd':temporary,'model':'fixture','prompt':prompt}})
+            spec={'id':ident,'thread_id':ident,'backend':'codex','model':'fixture','prompt':prompt}
+            if prompt != 'Alpha conversation':
+                spec['cwd']=temporary
+            accepted=operation({'op':'start','spec':spec})
+            if 'cwd' not in spec:
+                expected=homes[1].resolve()/'threads'/ident
+                assert accepted['record']['automatic_cwd'] and expected.is_dir()
+                assert pathlib.Path(accepted['record']['spec']['cwd'])==expected
+                assert not (homes[0]/'threads'/ident).exists()
+                deadline=time.monotonic()+10
+                while (snapshot:=operation({'op':'get','id':ident}))['status']!='completed':
+                    assert snapshot['status'] in {'starting','running','waiting'} and time.monotonic()<deadline, snapshot['status']
+                    time.sleep(.05)
+                retry=operation({'op':'start','spec':spec})
+                assert retry['record']==accepted['record'] and retry['status']=='completed'
+                try:
+                    operation({'op':'start','spec':dict(spec,cwd=str(expected))})
+                except urllib.error.HTTPError as error:
+                    assert 'different input' in error.read().decode()
+                else:
+                    raise AssertionError('An explicit directory changed the accepted request')
         resident=secrets.token_hex(32)
         operation({'op':'resident_create','spec':{'id':resident,'name':'Not an anonymous thread','cwd':temporary,'auto_activate':False}})
         operation({'op':'resident_activate','id':resident,'activation_id':secrets.token_hex(32)})

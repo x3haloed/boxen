@@ -119,6 +119,7 @@ impl Jobs {
                 imported_at: at,
             };
             let record = Record {
+                automatic_cwd: false,
                 runtime_policy: Default::default(),
                 imported: None,
                 transcript_import: Some(provenance.clone()),

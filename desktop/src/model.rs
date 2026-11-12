@@ -18,6 +18,7 @@ pub enum Pane {
     Message(ThreadKey),
     Compose(String),
     Welcome,
+    NewConversation,
     Thread(ThreadKey),
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -42,7 +42,7 @@ A peer address locates an already-pinned identity; it grants no new trust.
 
 - On macOS, Boxen uses the system menu bar. Windows uses a native menu bar in
   the Boxen window. Linux uses an in-window menu on both X11 and Wayland.
-  **File** contains **New Thread…** and **Reconnect Daemon**, which is enabled
+  **File** contains **New Conversation** and **Reconnect Daemon**, which is enabled
   when the desktop has yet to connect. **View** contains **Show Work** and
   **Command Palette…**.
 - The thread list contains anonymous conversations only, grouped by canonical
@@ -68,9 +68,11 @@ A peer address locates an already-pinned identity; it grants no new trust.
   Typing filters commands and threads; arrows select, Enter opens, Escape closes.
   **Show thread list** restores a closed list; **Reset docking layout** restores
   the sidebar while preserving open conversations and drafts.
-- **File → New Thread…** opens the dialog for starting an anonymous request.
-  The dialog lets you select the execution machine, its working directory, and
-  the runtime. The conversation composer sends a follow-up, or steering while
+- **New Conversation** in Threads or File opens a composer in the workspace.
+  Send uses this machine, the default Codex model, and a working area under
+  the executing daemon's data directory at `threads/<thread-id>`. **Run settings**
+  lets you choose the machine, directory, runtime, and model before sending.
+  The conversation composer sends a follow-up, or steering while
   a run is active. **⌘/Ctrl + Enter**
   submits; cancellation is a separate control.
 

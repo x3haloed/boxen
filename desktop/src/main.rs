@@ -7,6 +7,7 @@ mod correspondence;
 mod field;
 mod menu;
 mod model;
+mod new_conversation;
 mod thread_view;
 mod work;
 mod workspace;
@@ -32,10 +33,10 @@ use workspace::Workspace;
 struct Saved {
     workspace: Workspace,
     destinations: Vec<Destination>,
-    selected: usize,
     hidden_machines: HashSet<String>,
     drafts: Vec<(ThreadKey, String)>,
     new_thread_text: String,
+    new_thread_settings: new_conversation::Settings,
     new_thread_files: Vec<attachments::FileRef>,
     thread_files: Vec<(ThreadKey, Vec<attachments::FileRef>)>,
     activity_views: HashSet<ThreadKey>,
@@ -65,6 +66,7 @@ struct Data {
     active_steering: HashSet<ThreadKey>,
     preparing_followups: HashMap<String, ThreadKey>,
     local_key: String,
+    editing_run_settings: Option<new_conversation::Settings>,
     mail: correspondence::Mailbox,
     agents: agents::State,
     activity: HashMap<ThreadKey, activity::Window>,
@@ -79,6 +81,8 @@ struct Data {
     sending: HashSet<String>,
 }
 enum Action {
+    NewConversation,
+    StartConversation,
     Work(work::Action),
     File(attachments::FileAction),
     Respond(ThreadKey, String, Value, Value),
@@ -108,10 +112,6 @@ struct Desktop {
     query: String,
     choice: usize,
     connection: bool,
-    new_thread: bool,
-    cwd: String,
-    backend: String,
-    model: String,
     last_save: Instant,
     next_watch: u64,
     next_discovery: Instant,
@@ -194,10 +194,6 @@ impl Desktop {
             query: String::new(),
             choice: 0,
             connection: false,
-            new_thread: false,
-            cwd: String::new(),
-            backend: "codex".into(),
-            model: String::new(),
             last_save: Instant::now(),
             next_watch: 0,
             next_discovery: Instant::now() + Duration::from_secs(10),
@@ -210,7 +206,7 @@ impl Desktop {
     }
     fn menu_command(&mut self, command: menu::Command) {
         match command {
-            menu::Command::NewThread => self.new_thread = true,
+            menu::Command::NewThread => self.action(Action::NewConversation),
             menu::Command::Reconnect if !self.ready => self.connect(),
             menu::Command::Reconnect => {}
             menu::Command::ShowWork => self.data.saved.workspace.show_work(),
@@ -301,11 +297,6 @@ impl Desktop {
             });
         }
         self.data.saved.destinations = discovered;
-        self.data.saved.selected = self
-            .data
-            .saved
-            .selected
-            .min(self.data.saved.destinations.len().saturating_sub(1));
         if !self.ready {
             self.data.notice.clear();
         }
@@ -738,6 +729,12 @@ impl Desktop {
     }
     fn action(&mut self, action: Action) {
         match action {
+            Action::NewConversation => self
+                .data
+                .saved
+                .workspace
+                .open_editor(Pane::NewConversation, true),
+            Action::StartConversation => self.start_conversation(),
             Action::Work(action) => match action {
                 work::Action::Submit => {
                     if self.data.work.prepare(&mut self.data.saved.work) && self.persist() {
@@ -842,7 +839,7 @@ impl Desktop {
             return;
         }
         let mut commands: Vec<(String, Option<ThreadKey>)> = vec![
-            ("New thread…".into(), None),
+            ("New Conversation".into(), None),
             ("Show thread list".into(), None),
             ("Reset docking layout".into(), None),
             ("Machine connections…".into(), None),
@@ -933,7 +930,7 @@ impl Desktop {
                     5 => self.mail_action(correspondence::MailAction::New),
                     6 => self.data.saved.workspace.show_agents(),
                     7 => self.data.saved.workspace.show_work(),
-                    0 => self.new_thread = true,
+                    0 => self.action(Action::NewConversation),
                     1 => self.data.saved.workspace.show_list(),
                     2 => {
                         let panes: Vec<_> = self
@@ -946,6 +943,7 @@ impl Desktop {
                                 matches!(
                                     p,
                                     Pane::Thread(_)
+                                        | Pane::NewConversation
                                         | Pane::Chat(_)
                                         | Pane::Activity(_)
                                         | Pane::Message(_)
@@ -1071,6 +1069,7 @@ impl TabViewer for Viewer<'_> {
             }
             Pane::Threads => "Threads".into(),
             Pane::Welcome => "Conversation".into(),
+            Pane::NewConversation => "New Conversation".into(),
             Pane::Thread(key) => {
                 let title = find_thread(self.data, key)
                     .map(|t| t.title.clone())
@@ -1096,6 +1095,7 @@ impl TabViewer for Viewer<'_> {
             Pane::Correspondence => egui::Id::new("correspondence"),
             Pane::Threads => egui::Id::new("threads"),
             Pane::Welcome => egui::Id::new("welcome"),
+            Pane::NewConversation => egui::Id::new("new-conversation"),
         }
     }
     fn scroll_bars(&self, _: &Pane) -> [bool; 2] {
@@ -1171,7 +1171,11 @@ impl TabViewer for Viewer<'_> {
                     ui.label("⌘/Ctrl + Shift + P opens the command palette.");
                 });
             }
+            Pane::NewConversation => new_conversation::panel(ui, self.data, self.actions),
             Pane::Threads => {
+                if ui.button("New Conversation").clicked() {
+                    self.actions.push(Action::NewConversation);
+                }
                 ui.horizontal(|ui| {
                     let search_width =
                         (ui.available_width() - 28. - ui.spacing().item_spacing.x).max(24.);
@@ -1399,96 +1403,6 @@ impl eframe::App for Desktop {
                     stop.store(true, Ordering::Relaxed);
                 }
                 self.persist();
-            }
-        }
-        if self.new_thread {
-            let mut open = true;
-            let mut submit = false;
-            let mut prompt = std::mem::take(&mut self.data.saved.new_thread_text);
-            let mut files = std::mem::take(&mut self.data.saved.new_thread_files);
-            let mut file_actions = Vec::new();
-            egui::Window::new("New thread")
-                .open(&mut open)
-                .collapsible(false)
-                .default_width(520.)
-                .show(&ctx, |ui| {
-                    ui.label("Execution machine");
-                    egui::ComboBox::from_id_salt("new-machine")
-                        .selected_text(
-                            self.data
-                                .saved
-                                .destinations
-                                .get(self.data.saved.selected)
-                                .map(|d| d.label.as_str())
-                                .unwrap_or("None"),
-                        )
-                        .show_ui(ui, |ui| {
-                            for (i, d) in self.data.saved.destinations.iter().enumerate() {
-                                ui.selectable_value(&mut self.data.saved.selected, i, &d.label);
-                            }
-                        });
-                    ui.label("Working directory on that machine");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.cwd)
-                            .hint_text("/absolute/path")
-                            .desired_width(f32::INFINITY),
-                    );
-                    egui::ComboBox::from_label("Runtime")
-                        .selected_text(&self.backend)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.backend, "codex".into(), "Codex");
-                            ui.selectable_value(
-                                &mut self.backend,
-                                "openrouter".into(),
-                                "OpenRouter",
-                            );
-                        });
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.model)
-                            .hint_text("Model (blank uses daemon default)")
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.small("Execution uses the daemon’s current Full access policy.");
-                    submit = conversation::composer(
-                        ui,
-                        &mut self.data,
-                        conversation::Composer {
-                            text: &mut prompt,
-                            files: &mut files,
-                            target: attachments::Target::NewThread,
-                            label: "Start thread",
-                            limit: 256 * 1024,
-                            blocked: self.cwd.is_empty() || self.client.is_none(),
-                        },
-                        &mut file_actions,
-                    )
-                    .send;
-                });
-            self.new_thread = open;
-            self.data.saved.new_thread_text = prompt;
-            self.data.saved.new_thread_files = files;
-            for action in file_actions {
-                self.action(action);
-            }
-            if submit
-                && let Some(dest) = self
-                    .data
-                    .saved
-                    .destinations
-                    .get(self.data.saved.selected)
-                    .cloned()
-            {
-                let id = new_id();
-                let key = ThreadKey {
-                    peer: dest.key.clone(),
-                    id: id.clone(),
-                };
-                let prompt = std::mem::take(&mut self.data.saved.new_thread_text);
-                let attachments = std::mem::take(&mut self.data.saved.new_thread_files);
-                self.submit(Pending{destination:dest,spec:json!({"id":id,"thread_id":key.id,"backend":self.backend,"cwd":self.cwd,"model":self.model,"prompt":prompt,"attachments":attachments})});
-                self.data.saved.workspace.open(key.clone(), true);
-                self.data.selected_thread = Some(key);
-                self.new_thread = false;
             }
         }
         self.command_palette(&ctx);
