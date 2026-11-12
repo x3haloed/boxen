@@ -6,8 +6,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 
-from build_environment import environment
+from build_environment import build_executable, environment
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,29 +25,26 @@ def destinations(platform):
     return directory / 'boxen.com', directory / 'boxen-desktop'
 
 
-def build(platform, output, daemon_name, desktop_name):
-    env = environment(ROOT)
+def build(platform, output, desktop_name):
     if platform == 'linux':
         subprocess.run(['bash', 'scripts/build-ape.sh'], cwd=ROOT,
-                       env={**env, 'CARGO_TARGET_DIR': str(ROOT / 'target')}, check=True)
+                       env={**environment(ROOT), 'CARGO_TARGET_DIR': str(ROOT / 'target')}, check=True)
         daemon = ROOT / 'target/cosmo/release/boxen.com'
         subprocess.run(['bash', str(daemon), 'platform-check'], check=True, timeout=10)
     else:
-        target = ROOT / 'target'
-        subprocess.run(['cargo', 'build', '--locked', '--release', '--target-dir', str(target)],
-                       cwd=ROOT, env=env, check=True)
-        daemon = target / 'release' / daemon_name
+        daemon = build_executable(ROOT, ROOT, 'boxen', cwd=ROOT)
         subprocess.run([str(daemon), 'platform-check'], check=True, timeout=10)
 
     command = [sys.executable, str(ROOT / 'scripts/build-desktop.py')]
     if platform == 'darwin':
         desktop = output / desktop_name
-        command.extend(['--bundle', str(desktop)])
-    else:
-        desktop = ROOT / 'desktop/target/release' / desktop_name
-    subprocess.run(command, cwd=ROOT, check=True)
-    if platform == 'darwin':
+        subprocess.run(command + ['--bundle', str(desktop)], cwd=ROOT, check=True)
         subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(desktop)], check=True)
+    else:
+        desktop = Path(subprocess.check_output(
+            command, cwd=ROOT, encoding='utf-8',
+            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+        ).rstrip('\r\n'))
     return daemon, desktop
 
 
@@ -58,6 +56,11 @@ class Replacement:
             self.stage = Path(subprocess.check_output(
                 ['sudo', '/usr/bin/mktemp', '-d', str(destination.parent / '.boxen-upgrade.XXXXXXXX')],
                 text=True).strip())
+        elif sys.platform == 'win32':
+            # mkdtemp uses mode 0700, which gives the directory a private ACL on
+            # modern Python. A same-volume rename retains the staged file's ACL.
+            self.stage = destination.parent / f'.boxen-upgrade.{uuid.uuid4().hex}'
+            self.stage.mkdir()
         else:
             self.stage = Path(tempfile.mkdtemp(prefix='.boxen-upgrade.', dir=destination.parent))
         self.next = self.stage / destination.name
@@ -157,7 +160,7 @@ def main():
         lock.mkdir()
     try:
         with tempfile.TemporaryDirectory(prefix='boxen-build-') as directory:
-            sources = build(platform, Path(directory), *(target.name for target in targets))
+            sources = build(platform, Path(directory), targets[1].name)
             replace_all(sources, targets, elevated)
     finally:
         if elevated:

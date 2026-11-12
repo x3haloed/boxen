@@ -7,13 +7,13 @@ Use the script for the host OS from the checkout you want to install. It builds 
 | OS | Daemon payload | Desktop payload | Command from the repository root |
 | --- | --- | --- | --- |
 | macOS | `/usr/local/libexec/boxen/boxen` | `/Applications/Boxen.app` | `./scripts/upgrade-macos.sh` |
-| Windows | `%ProgramFiles%\Boxen\boxen.exe` | `%ProgramFiles%\Boxen\boxen-desktop.exe` | `powershell -File .\scripts\upgrade-windows.ps1` |
+| Windows | `%ProgramFiles%\Boxen\boxen.exe` | `%ProgramFiles%\Boxen\boxen-desktop.exe` | `python .\scripts\upgrade_local.py win32` |
 | Linux | `~/.local/bin/boxen.com` | `~/.local/bin/boxen-desktop` | `./scripts/upgrade-linux.sh` |
 
 Create the install directories and point the existing daemon service and desktop shortcut at these locations once. Keep the service's existing account, arguments and data directory.
 
 - On macOS, create the daemon directory with `sudo install -d -o root -g wheel -m 0755 /usr/local/libexec/boxen`. The daemon is native and the desktop is a locally ad-hoc-signed bundle. Run the upgrade as your normal build user. The script uses `sudo` for writes to the install directories.
-- On Windows, use an elevated shell with `python` and the Rust MSVC build toolchain available. If the service uses a wrapper, configure the wrapper to run `boxen.exe` at the listed path.
+- On Windows, use an elevated shell with `python` and the Rust MSVC build toolchain available. `powershell -File .\scripts\upgrade-windows.ps1` runs the same upgrade where PowerShell policy permits unsigned scripts. The new executables inherit permissions from the install directory, which should grant read and execute access to the desktop user and daemon service account. If the service uses a wrapper, configure the wrapper to run `boxen.exe` at the listed path.
 - On Linux, launch the portable daemon through Bash, for example `/bin/bash %h/.local/bin/boxen.com --data-dir %h/.boxen serve` in a user systemd unit, with any existing service-specific arguments restored. Use the account that owns the Linux install.
 
 All three scripts need Python 3 and the repo's Rust build prerequisites. The desktop needs Rust 1.94 or later and the platform graphics and windowing build dependencies. The Linux daemon build uses the existing [APE build script](../scripts/build-ape.sh). Its first run downloads the pinned toolchain. Set `COSMO_HOME` to reuse an existing Linux toolchain cache.

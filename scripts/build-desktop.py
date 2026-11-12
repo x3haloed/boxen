@@ -6,18 +6,14 @@ import plistlib
 import shutil
 import subprocess
 import sys
-from build_environment import environment
+from build_environment import build_executable
 
 root = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 if sys.platform == 'darwin':
     parser.add_argument('--bundle', type=pathlib.Path, default=root / 'work/Boxen.app')
 args = parser.parse_args()
-target = root / 'desktop/target'
-subprocess.run(['cargo', 'build', '--locked', '--release', '--target-dir', str(target),
-                '--manifest-path', str(root / 'desktop/Cargo.toml')],
-               env=environment(root), check=True)
-binary = target / 'release' / ('boxen-desktop.exe' if sys.platform == 'win32' else 'boxen-desktop')
+binary = build_executable(root, root / 'desktop', 'boxen-desktop')
 if sys.platform == 'darwin':
     app = args.bundle
     contents = app / 'Contents'
