@@ -39,6 +39,7 @@ struct Saved {
     new_thread_settings: new_conversation::Settings,
     new_thread_files: Vec<attachments::FileRef>,
     thread_files: Vec<(ThreadKey, Vec<attachments::FileRef>)>,
+    thread_settings: Vec<(ThreadKey, thread_view::RunSettings)>,
     activity_views: HashSet<ThreadKey>,
     draft_runs: Vec<(ThreadKey, String)>,
     steering: Vec<thread_view::Steering>,
@@ -67,6 +68,7 @@ struct Data {
     preparing_followups: HashMap<String, ThreadKey>,
     local_key: String,
     editing_run_settings: Option<new_conversation::Settings>,
+    editing_thread_settings: Option<(ThreadKey, thread_view::RunSettings)>,
     mail: correspondence::Mailbox,
     agents: agents::State,
     activity: HashMap<ThreadKey, activity::Window>,
@@ -506,12 +508,7 @@ impl Desktop {
                                     peer: p.destination.key.clone(),
                                     id: p.spec["thread_id"].as_str().unwrap_or("").into(),
                                 };
-                                self.clear_submitted_draft(
-                                    &key,
-                                    p.spec["prompt"].as_str().unwrap_or(""),
-                                    &attachments::FileRef::parse(&p.spec["attachments"]),
-                                );
-                                self.data.thread_issues.remove(&key);
+                                self.accept_pending(&p);
                                 let list = self.data.catalogs.entry(key.peer.clone()).or_default();
                                 if let Some(t) = list.iter_mut().find(|t| t.key == key) {
                                     if !t.runs.iter().any(|r| r["record"]["spec"]["id"] == id) {
@@ -562,6 +559,12 @@ impl Desktop {
             &attachments::FileRef::parse(&p.spec["attachments"]),
         );
         self.data.thread_issues.remove(&key);
+        if p.after.is_some() {
+            self.data
+                .saved
+                .thread_settings
+                .retain(|(target, _)| target != &key);
+        }
         self.data
             .saved
             .pending

@@ -402,6 +402,7 @@ pub fn execute(
     {
         trigger_context.push_str(&format!("\nRecovery incident: {recovery}\nPrevious tool effects may already have occurred. This new request does not replay those effects."));
     }
+    let execution_context = record.execution_context();
     let resident = record.resident;
     if promoted {
         trigger_context.push_str(&format!("\nResident attachment (Boxen-authored runtime context, separate from the message authors and the saved native instructions):\n{}",residents.instructions(resident.as_ref().unwrap())));
@@ -655,7 +656,7 @@ pub fn execute(
     if !spec.prompt.is_empty() {
         input.push(json!({"type":"text","text":spec.prompt}));
     }
-    input.push(json!({"type":"text","text":format!("Boxen provides the following current-run metadata independently of the request author. {}{}",trigger_context,rpc.jobs.attachments.context(&spec.attachments))}));
+    input.push(json!({"type":"text","text":format!("Boxen provides the following current-run metadata independently of the request author. {}{}{}",trigger_context,execution_context,rpc.jobs.attachments.context(&spec.attachments))}));
     let response = rpc.request(
         "turn/start",
         json!({"threadId":thread,"input":input,"summary":"auto"}),

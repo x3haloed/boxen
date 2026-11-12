@@ -357,10 +357,16 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 );
                 Ok(logger.status())
             }
-            "start" => Ok(serde_json::to_value(jobs.start(
-                owner,
-                serde_json::from_value::<Spec>(request["spec"].clone())?,
-            )?)?),
+            "start" => Ok(serde_json::to_value(
+                jobs.start_after(
+                    owner,
+                    serde_json::from_value::<Spec>(request["spec"].clone())?,
+                    request
+                        .get("after")
+                        .map(|v| v.as_str().ok_or("after must be a run ID"))
+                        .transpose()?,
+                )?,
+            )?),
             "context" => jobs.context_operation(
                 owner,
                 request["thread_id"].as_str().ok_or("thread_id required")?,

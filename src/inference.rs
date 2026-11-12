@@ -582,6 +582,7 @@ pub fn execute(
     let record = run.snapshot().record;
     let trigger_context = record.trigger_context();
     let observation_context = record.observation_context();
+    let execution_context = record.execution_context();
     let resident = record.resident;
     if let Some(recovery) = &record.recovery {
         run.append("recovery_notice", recovery.clone())?;
@@ -620,6 +621,7 @@ pub fn execute(
     system.push_str(&history.transcript_context());
     system.push_str(&history.inference_health_context());
     system.push_str(&trigger_context);
+    system.push_str(&execution_context);
     if let Some(recovery) = &record.recovery {
         system.push_str(&format!("\nRecovery incident: {recovery}"));
     }

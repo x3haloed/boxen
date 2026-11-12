@@ -148,6 +148,8 @@ impl Jobs {
         );
         let record = Record {
             automatic_cwd: false,
+            after: None,
+            execution_change: None,
             transcript_import: None,
             runtime_policy: Default::default(),
             imported: Some(Provenance {

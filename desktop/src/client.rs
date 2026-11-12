@@ -24,6 +24,8 @@ pub struct Client {
 pub struct Pending {
     pub destination: Destination,
     pub spec: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
 }
 pub enum Update {
     Mail(crate::correspondence::MailUpdate),
@@ -200,6 +202,7 @@ impl Client {
         id: String,
         text: String,
         files: Vec<crate::attachments::FileRef>,
+        settings: crate::thread_view::RunSettings,
         publisher: Publisher,
     ) {
         let client = self.clone();
@@ -212,6 +215,14 @@ impl Client {
                     if spec["id"] != previous || !spec["thread_id"].is_string() {
                         return Err("Invalid follow-up source run".into());
                     }
+                    if let Some(cwd) = settings.cwd {
+                        spec["cwd"] = json!(cwd);
+                    } else if snapshot["record"]["automatic_cwd"] == true {
+                        spec["cwd"] = json!("");
+                    }
+                    if let Some(model) = settings.model {
+                        spec["model"] = json!(model);
+                    }
                     spec["id"] = json!(id);
                     spec["prompt"] = json!(text);
                     if files.is_empty() {
@@ -221,7 +232,11 @@ impl Client {
                     } else {
                         spec["attachments"] = json!(files);
                     }
-                    Ok(Pending { destination, spec })
+                    Ok(Pending {
+                        destination,
+                        spec,
+                        after: Some(previous),
+                    })
                 });
             publisher.send(Update::Followup(tag, result));
         });
@@ -315,10 +330,11 @@ impl Client {
             let result = client
                 .copy_files(&pending.destination, &pending.spec["attachments"])
                 .and_then(|_| {
-                    client.operation(
-                        &pending.destination,
-                        json!({"op":"start","spec":pending.spec}),
-                    )
+                    let mut request = json!({"op":"start","spec":pending.spec});
+                    if let Some(after) = pending.after {
+                        request["after"] = json!(after);
+                    }
+                    client.operation(&pending.destination, request)
                 });
             publisher.send(Update::Submitted(id, result));
         });
@@ -521,12 +537,20 @@ mod tests {
         };
         client.status().unwrap();
         client.operation(&client.local(),json!({"op":"attachment","action":"write","file":file,"offset":0,"data":STANDARD.encode(original)})).unwrap();
+        let repo = home.parent().unwrap().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let selected_model = "fixture-second-model";
+        let cwd = repo.to_str().unwrap().to_owned();
         client.followup(
             dest.clone(),
-            id,
+            id.clone(),
             next.clone(),
-            "Follow-up".into(),
+            "WORKSPACE_SETTINGS_FIXTURE".into(),
             vec![file.clone()],
+            crate::thread_view::RunSettings {
+                cwd: Some(cwd.clone()),
+                model: Some(selected_model.into()),
+            },
             followup.publisher(),
         );
         let pending = match followup.rx.recv_timeout(Duration::from_secs(10)).unwrap() {
@@ -535,11 +559,14 @@ mod tests {
         };
         let mut expected = first["record"]["spec"].clone();
         expected["id"] = json!(next);
-        expected["prompt"] = json!("Follow-up");
+        expected["prompt"] = json!("WORKSPACE_SETTINGS_FIXTURE");
+        expected["cwd"] = json!(cwd);
+        expected["model"] = json!(selected_model);
         expected["attachments"] = json!([file]);
         assert_eq!(pending.spec, expected);
         let submitted = Bus::new(egui::Context::default());
-        client.submit(pending, submitted.publisher());
+        assert_eq!(pending.after.as_deref(), Some(id.as_str()));
+        client.submit(pending.clone(), submitted.publisher());
         match submitted.rx.recv_timeout(Duration::from_secs(20)).unwrap() {
             Update::Submitted(id, result) => {
                 assert_eq!(id, next);
@@ -547,6 +574,55 @@ mod tests {
             }
             _ => panic!("Follow-up with the original was not accepted"),
         }
+        let replay = Bus::new(egui::Context::default());
+        client.watch(
+            dest.clone(),
+            next.clone(),
+            0,
+            0,
+            replay.publisher(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut settings_changed = false;
+        let mut confirmed_model = false;
+        loop {
+            match replay.rx.recv_timeout(Duration::from_secs(12)).unwrap() {
+                Update::Batch(_, _, batch) => {
+                    for event in batch["events"].as_array().unwrap() {
+                        settings_changed |= event["kind"] == "execution_settings_changed"
+                            && event["data"]["previous_run_id"] == id;
+                        confirmed_model |= event["kind"] == "backend_thread"
+                            && event["data"]["model"] == selected_model;
+                    }
+                    if batch["done"] == true {
+                        assert_eq!(batch["snapshot"]["status"], "completed");
+                        break;
+                    }
+                }
+                Update::WatchError(_, _, error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        assert!(settings_changed && confirmed_model);
+        let retry = client
+            .operation(&dest, json!({"op":"start","after":id,"spec":pending.spec}))
+            .unwrap();
+        assert_eq!(retry["status"], "completed");
+        let mut stale = pending.spec;
+        stale["id"] = json!(crate::new_id());
+        assert!(
+            client
+                .operation(&dest, json!({"op":"start","after":id,"spec":stale}))
+                .unwrap_err()
+                .contains("no longer the latest")
+        );
+        let runs = client.run_catalog(&dest, &AtomicBool::new(false)).unwrap();
+        let conversations = crate::model::catalog(&dest.key, &runs);
+        let reopened = conversations
+            .iter()
+            .find(|thread| thread.key.id == id)
+            .unwrap();
+        assert_eq!(reopened.runs.len(), 2);
         let retained = client
             .operation(
                 &dest,

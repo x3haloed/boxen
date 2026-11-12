@@ -194,7 +194,7 @@ impl Jobs {
             let mut spec: Spec = prior.record.spec;
             spec.id = id;
             spec.prompt = directions;
-            self.start_locked(owner, spec, None, None)
+            self.start_locked(owner, spec, None, None, None)
         })();
         logging::record(
             if result.is_ok() {

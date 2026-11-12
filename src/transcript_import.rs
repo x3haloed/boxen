@@ -120,6 +120,8 @@ impl Jobs {
             };
             let record = Record {
                 automatic_cwd: false,
+                after: None,
+                execution_change: None,
                 runtime_policy: Default::default(),
                 imported: None,
                 transcript_import: Some(provenance.clone()),

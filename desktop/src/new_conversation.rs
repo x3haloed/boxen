@@ -164,6 +164,10 @@ impl Desktop {
             workspace.open(key.clone(), true);
         }
         self.data.selected_thread = Some(key);
-        self.submit(Pending { destination, spec });
+        self.submit(Pending {
+            destination,
+            spec,
+            after: None,
+        });
     }
 }

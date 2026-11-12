@@ -264,11 +264,20 @@ for line in sys.stdin:
                 assert "retained_runs_directory" in request["params"]["developerInstructions"]
                 assert "total_prior_events" in request["params"]["developerInstructions"]
                 assert "RESIDENT_" in request["params"]["developerInstructions"]
-        result = {"thread": {"id": thread}, "model": "fixture"}
+        session_method = method
+        session_params = request["params"]
+        result = {"thread": {"id": thread}, "model": session_params.get("model", "fixture")}
         if method == 'thread/resume' and (pathlib.Path(request['params']['cwd'])/'fixture-large-resume').exists():
             if not request['params'].get('excludeTurns', False):
                 result['thread']['turns'] = [{'id':'historical-large-turn','text':'x'*(4*1024*1024)}]
     elif method == "turn/start":
+        if request["params"]["input"][0]["text"] == "WORKSPACE_SETTINGS_FIXTURE":
+            assert session_method == "thread/resume"
+            assert session_params["model"] == "fixture-second-model"
+            assert pathlib.Path.cwd() == pathlib.Path(session_params["cwd"]).resolve()
+            metadata = request["params"]["input"][1]["text"]
+            assert "changed this conversation's execution settings" in metadata
+            assert session_params["cwd"] in metadata
         if request["params"]["input"][0]["text"] == "SLOW ATTACHMENT_FIXTURE":
             assert all(item["type"] == "text" for item in request["params"]["input"])
             metadata = request["params"]["input"][1]["text"]

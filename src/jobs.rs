@@ -112,6 +112,8 @@ mod tests {
         state::private_dir(&path.join(&id)).unwrap();
         let record = Record {
             automatic_cwd: false,
+            after: None,
+            execution_change: None,
             runtime_policy: Default::default(),
             imported: None,
             transcript_import: None,
@@ -217,6 +219,10 @@ pub struct Event {
 pub struct Record {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub automatic_cwd: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_change: Option<Value>,
     #[serde(default)]
     pub runtime_policy: crate::runtime_policy::Policy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,6 +244,12 @@ pub struct Record {
     pub created_at: u64,
 }
 impl Record {
+    pub fn execution_context(&self) -> String {
+        self.execution_change.as_ref().map_or_else(String::new, |change| {
+            format!("\nBoxen changed this conversation's execution settings between runs. Shell and relative file paths now use the current working directory. Files in an earlier working directory remain at their recorded location. This metadata is supplied by Boxen. {change}")
+        })
+    }
+
     pub fn observation_context(&self) -> String {
         if self.observations.is_empty() {
             String::new()
@@ -938,7 +950,7 @@ impl Jobs {
                         self.scheduled_thread(&job.owner, id).and_then(|mut spec| {
                             spec.id = run_id.clone();
                             spec.prompt = job.definition.directions.clone();
-                            self.start_locked(&job.owner, spec, None, Some(origin.clone()))
+                            self.start_locked(&job.owner, spec, None, Some(origin.clone()), None)
                         })
                     }
                 };
@@ -1070,7 +1082,7 @@ impl Jobs {
                         let mut spec = self.scheduled_thread(&owner, target)?;
                         spec.id = id;
                         spec.prompt = directions.into();
-                        self.start_locked(&owner, spec, None, None)?
+                        self.start_locked(&owner, spec, None, None, None)?
                     }
                     _ => return Err("observation target is unavailable".into()),
                 };
@@ -1704,7 +1716,7 @@ impl Jobs {
             model: resident.model,
             prompt,
         };
-        let snapshot = self.start_locked(owner, spec, Some(activation), scheduled)?;
+        let snapshot = self.start_locked(owner, spec, Some(activation), scheduled, None)?;
         logging::record(
             Level::Info,
             Target::Workload,
@@ -2121,8 +2133,16 @@ impl Jobs {
         Ok(resident)
     }
     pub fn start(self: &Arc<Self>, owner: &str, spec: Spec) -> Result<Snapshot> {
+        self.start_after(owner, spec, None)
+    }
+    pub fn start_after(
+        self: &Arc<Self>,
+        owner: &str,
+        spec: Spec,
+        after: Option<&str>,
+    ) -> Result<Snapshot> {
         let _transition = self.transitions.lock().unwrap();
-        self.start_locked(owner, spec, None, None)
+        self.start_locked(owner, spec, None, None, after)
     }
     fn start_locked(
         self: &Arc<Self>,
@@ -2130,6 +2150,7 @@ impl Jobs {
         mut spec: Spec,
         activation: Option<Activation>,
         scheduled: Option<crate::scheduler::Origin>,
+        after: Option<&str>,
     ) -> Result<Snapshot> {
         logging::record(
             Level::Info,
@@ -2148,7 +2169,10 @@ impl Jobs {
             if snapshot.record.automatic_cwd {
                 accepted_input.cwd.clear();
             }
-            if snapshot.record.owner == owner && accepted_input == spec {
+            if snapshot.record.owner == owner
+                && accepted_input == spec
+                && snapshot.record.after.as_deref() == after
+            {
                 logging::record(
                     Level::Info,
                     Target::Workload,
@@ -2232,17 +2256,37 @@ impl Jobs {
             if !terminal(&prior.status) {
                 return Err("thread already has an active run; another request is accepted after it ends, and steering is a separate control operation".into());
             }
-            if prior.record.spec.backend != spec.backend
-                || (spec.backend == "openrouter"
-                    && resident.is_none()
-                    && prior.record.spec.model != spec.model)
-            {
-                return Err("this slice pins a thread's runtime and inference model; a new thread can select a different one".into());
-            }
-            if prior.record.spec.cwd != spec.cwd {
-                return Err("follow-up must retain the thread working directory".into());
+        }
+        let head = previous.last();
+        if let Some(after) = after {
+            valid_id(after)?;
+            if resident.is_some() || head.is_none_or(|head| head.record.spec.id != after) {
+                return Err("follow-up source is no longer the latest anonymous run".into());
             }
         }
+        if let Some(head) = head {
+            let old = &head.record.spec;
+            if old.backend != spec.backend {
+                return Err("this conversation's runtime is fixed".into());
+            }
+            if after.is_none() {
+                if spec.backend == "openrouter" && resident.is_none() && old.model != spec.model {
+                    return Err("this slice pins a thread’s inference model unless the latest run ID is supplied".into());
+                }
+                if old.cwd != spec.cwd {
+                    return Err("changing the working directory requires the latest run ID".into());
+                }
+            }
+        }
+        let execution_change = head.filter(|head| {
+            head.record.spec.cwd != spec.cwd || head.record.spec.model != spec.model
+        }).filter(|_| resident.is_none()).map(|head| {
+            json!({
+                "previous_run_id":head.record.spec.id,
+                "previous":{"machine":self.machine_id(),"cwd":head.record.spec.cwd,"model":head.record.spec.model},
+                "current":{"machine":self.machine_id(),"cwd":spec.cwd,"model":spec.model}
+            })
+        });
         let resume = previous.iter().rev().find_map(|s| s.backend_thread.clone());
         let recovery = previous.last().filter(|r|r.status=="interrupted").map(|r|json!({"prior_run_id":r.record.spec.id,"detail":"Previous execution and tool effects are uncertain. This run continues the canonical conversation with a new message. Boxen has not resubmitted the previous prompt or replayed its tool actions; repeating those actions can duplicate effects that already occurred."}));
         let history = History {
@@ -2270,6 +2314,8 @@ impl Jobs {
         state::private_dir(&path)?;
         let record = Record {
             automatic_cwd,
+            after: after.map(str::to_owned),
+            execution_change,
             runtime_policy,
             imported: None,
             transcript_import: None,
@@ -2311,6 +2357,9 @@ impl Jobs {
             changed: Condvar::new(),
         });
         run.status("starting", "Accepted by executing machine")?;
+        if let Some(change) = &run.snapshot().record.execution_change {
+            run.append("execution_settings_changed", change.clone())?;
+        }
         if let Some(origin) = &run.snapshot().record.scheduled {
             run.append("scheduled_event", serde_json::to_value(origin)?)?;
         }

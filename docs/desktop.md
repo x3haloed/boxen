@@ -72,7 +72,8 @@ A peer address locates an already-pinned identity; it grants no new trust.
   Send uses this machine, the default Codex model, and a working area under
   the executing daemon's data directory at `threads/<thread-id>`. **Run settings**
   lets you choose the machine, directory, runtime, and model before sending.
-  The conversation composer sends a follow-up, or steering while
+  On an idle conversation, **Run settings** can change the directory or model
+  for the next send. The conversation composer sends a follow-up, or steering while
   a run is active. **⌘/Ctrl + Enter**
   submits; cancellation is a separate control.
 

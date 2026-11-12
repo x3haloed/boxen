@@ -10,6 +10,76 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct RunSettings {
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+}
+
+fn settings_for(data: &Data, key: &ThreadKey) -> RunSettings {
+    data.saved
+        .thread_settings
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, settings)| settings.clone())
+        .unwrap_or_default()
+}
+
+fn next_run_settings(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, enabled: bool) {
+    if ui
+        .add_enabled(enabled, egui::Button::new("Run settings"))
+        .clicked()
+    {
+        data.editing_thread_settings = Some((key.clone(), settings_for(data, key)));
+    }
+    if data
+        .editing_thread_settings
+        .as_ref()
+        .is_none_or(|(target, _)| target != key)
+    {
+        return;
+    }
+    let Some((_, mut settings)) = data.editing_thread_settings.take() else {
+        return;
+    };
+    let modal =
+        egui::Modal::new(egui::Id::new(("thread-run-settings", key))).show(ui.ctx(), |ui| {
+            ui.heading("Run settings");
+            let mut change_directory = settings.cwd.is_some();
+            ui.checkbox(&mut change_directory, "Choose a working directory");
+            if change_directory {
+                ui.add(
+                    egui::TextEdit::singleline(settings.cwd.get_or_insert_with(String::new))
+                        .hint_text("Automatic working area"),
+                );
+            } else {
+                settings.cwd = None;
+            }
+            let mut change_model = settings.model.is_some();
+            ui.checkbox(&mut change_model, "Choose a model");
+            if change_model {
+                ui.add(
+                    egui::TextEdit::singleline(settings.model.get_or_insert_with(String::new))
+                        .hint_text("Default model"),
+                );
+            } else {
+                settings.model = None;
+            }
+            ui.horizontal(|ui| (ui.button("Cancel").clicked(), ui.button("Done").clicked()))
+                .inner
+        });
+    if modal.inner.1 {
+        data.saved
+            .thread_settings
+            .retain(|(target, _)| target != key);
+        if settings.cwd.is_some() || settings.model.is_some() {
+            data.saved.thread_settings.push((key.clone(), settings));
+        }
+    } else if !modal.inner.0 && !modal.should_close() {
+        data.editing_thread_settings = Some((key.clone(), settings));
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Steering {
     pub key: ThreadKey,
@@ -120,6 +190,7 @@ impl Desktop {
             {
                 return;
             }
+            let settings = settings_for(&self.data, &key);
             if let Some(client) = &self.client {
                 self.data
                     .preparing_followups
@@ -130,6 +201,7 @@ impl Desktop {
                     new_id(),
                     text,
                     files,
+                    settings,
                     self.bus.publisher(),
                 );
             }
@@ -237,6 +309,18 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         .find(|(k, _)| k == key)
         .is_some_and(|(_, id)| Some(id.as_str()) != running.as_deref());
     ui.horizontal_wrapped(|ui| {
+        next_run_settings(
+            ui,
+            data,
+            key,
+            last.is_some()
+                && running.is_none()
+                && pending.is_none()
+                && !data
+                    .preparing_followups
+                    .values()
+                    .any(|target| target == key),
+        );
         if activity {
             ui.weak(&dest.label);
         }

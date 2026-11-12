@@ -284,6 +284,9 @@ impl Transcript {
                 }
                 self.put(format!("event-{seq}"), "Incident", display(data), false);
             }
+            "execution_settings_changed" => {
+                self.put(format!("event-{seq}"), "Run settings changed", display(data), false);
+            }
             "tool_outcome_unknown"
             | "recovery_notice"
             | "backend_session_rebuilt"
