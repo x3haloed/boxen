@@ -470,6 +470,15 @@ impl Desktop {
                         w.retry = Instant::now() + Duration::from_secs(2);
                     }
                 }
+                Update::Followup(previous, result) => {
+                    self.data.sending.remove(&previous);
+                    match result {
+                        Ok(pending) => self.submit(pending),
+                        Err(error) => {
+                            self.data.notice = format!("Could not prepare follow-up: {error}")
+                        }
+                    }
+                }
                 Update::Controlled(id, dest, text, result) => {
                     self.data.sending.remove(&id);
                     match result {
@@ -746,14 +755,11 @@ impl Desktop {
                     "Steering submitted once; an uncertain response is not automatically retried."
                         .into();
             }
-        } else {
-            let mut spec = last["record"]["spec"].clone();
-            spec["id"] = json!(new_id());
-            spec["prompt"] = json!(text);
-            self.submit(Pending {
-                destination: dest,
-                spec,
-            });
+        } else if let Some(previous) = last["record"]["spec"]["id"].as_str()
+            && let Some(client) = &self.client
+            && self.data.sending.insert(previous.to_owned())
+        {
+            client.followup(dest, previous.into(), new_id(), text, self.bus.publisher());
         }
     }
     fn submit(&mut self, pending: Pending) {
@@ -1365,7 +1371,7 @@ impl TabViewer for Viewer<'_> {
                 if let Some(error) = self.data.errors.get(&key.peer) {
                     ui.colored_label(
                         egui::Color32::LIGHT_RED,
-                        format!("Machine unreachable · {error}"),
+                        format!("Run catalog unavailable · {error}"),
                     );
                 }
                 for run in &runs {

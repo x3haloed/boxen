@@ -52,8 +52,9 @@ pub fn catalog(peer: &str, runs: &[Value]) -> Vec<Conversation> {
         if let Some(thread) = out.iter_mut().find(|t| t.key.id == id) {
             thread.runs.push(run.clone());
         } else {
-            let prompt = run["record"]["spec"]["prompt"]
+            let prompt = run["title"]
                 .as_str()
+                .or_else(|| run["record"]["spec"]["prompt"].as_str())
                 .unwrap_or("Untitled thread");
             out.push(Conversation {
                 key: ThreadKey {

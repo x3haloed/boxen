@@ -23,6 +23,7 @@ Operations:
 | Request | Successful response |
 | --- | --- |
 | `{"op":"list"}` | Array of run snapshots in stable acceptance order |
+| `{"op":"list","summary_page":{"after":null}}` | Up to 128 compact run summaries and a `next_after` cursor |
 | `{"op":"get","id":"RUN_ID"}` | One network-operator-accessible run snapshot |
 | `{"op":"start","spec":SPEC}` | Accepted or previously accepted snapshot |
 | `{"op":"thread_import","spec":{"id":"BOXEN_ID","backend_thread_id":"CODEX_UUID"}}` | Read-only history import snapshot; no model execution or resident attachment |
@@ -34,6 +35,8 @@ Operations:
 `start` is for identity-less threads; direct resident starts are rejected. Resident correspondence and independent activation use the [mailbox API](mailboxes.md). `SPEC` contains `id`, `thread_id`, `backend` (`codex` or `openrouter`), `cwd` (absolute destination-local directory), `model` (empty for the configured default), and `prompt`. Generate a lowercase 64-character hex run ID before sending, and preserve it with the exact spec until acceptance is known. For a new conversation use that same ID as `thread_id`; follow-ups use the existing thread ID with a new run ID. Repeating the same ID, owner, and exact spec is idempotent. A different spec under that ID is rejected. Catalog discovery by ID can reconcile a response lost after acceptance. A response timeout is not a rejection and must not trigger a new run ID.
 
 Snapshots contain `record` (`spec`, `owner`, `created_at`), `status`, `backend_thread` (nullable), and `last_seq`. `created_at` is a millisecond acceptance timestamp advanced monotonically if wall-clock time ties or moves backwards. Backend thread IDs are runtime references. For built-in OpenRouter execution the reference is the canonical Boxen thread ID, not an upstream provider session handle. Terminal statuses are `completed`, `failed`, `cancelled`, and `interrupted`; the last denotes uncertain execution, not proof that all external work stopped. Active statuses include `starting`, `running`, and `waiting`.
+
+For catalog refresh, pass each response's `next_after` back as `summary_page.after` until it is null. Each page contains `summaries` ordered by acceptance timestamp and run ID. Summaries include a bounded title, run and thread identifiers, resident attachment and import indicators, status, and event sequence. Use `get` for the exact run specification and `watch` for retained events. Older daemons may return the legacy snapshot array to the initial request.
 
 Control acceptance means delivery to the runtime control queue, not confirmed execution of the action. Observe retained control outcomes and the terminal status. Steering and backend responses are not idempotent submissions; do not blindly resend after losing their response. An uncertain earlier run remains `interrupted`; a new message can continue the same thread. The new run records `recovery_notice`, and Boxen passes the uncertainty to the runtime without replaying the earlier work or requiring an acknowledgment ceremony.
 

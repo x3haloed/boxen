@@ -38,6 +38,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn summary_pages_keep_large_retained_runs_below_the_transport_limit() {
+        let root =
+            std::env::temp_dir().join(format!("boxen-summaries-{}", state::random_hex().unwrap()));
+        let path = root.join("runs");
+        let owner = state::random_hex().unwrap();
+        let prompt = "private prompt body".repeat(4096);
+        for index in 0..130 {
+            let id = format!("{index:064x}");
+            let run = path.join(&id);
+            state::private_dir(&run).unwrap();
+            state::write_new(&run.join("record.json"), &serde_json::to_vec(&json!({
+                "owner": owner,
+                "created_at": 1,
+                "spec": {"id":id,"thread_id":id,"backend":"codex","cwd":"/fixture","model":"fixture","prompt":prompt}
+            })).unwrap()).unwrap();
+            state::write_new(
+                &run.join("events.jsonl"),
+                b"{\"seq\":1,\"at\":1,\"kind\":\"status\",\"data\":{\"status\":\"completed\"}}\n",
+            )
+            .unwrap();
+        }
+        let jobs = Jobs::open(path, "missing-codex".into(), owner.clone()).unwrap();
+        assert!(serde_json::to_vec(&jobs.operator_list()).unwrap().len() > 8 * 1024 * 1024);
+        let first = jobs.operator_summary_page(None).unwrap();
+        assert_eq!(first["summaries"].as_array().unwrap().len(), 128);
+        assert!(first.to_string().len() < 128 * 1024);
+        assert_eq!(
+            first["summaries"][0]["title"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            72
+        );
+        assert!(first["summaries"][0]["record"]["spec"]["prompt"].is_null());
+        let second = jobs
+            .operator_summary_page(serde_json::from_value(first["next_after"].clone()).unwrap())
+            .unwrap();
+        assert_eq!(second["summaries"].as_array().unwrap().len(), 2);
+        assert!(second["next_after"].is_null());
+        let ids: Vec<_> = [first, second]
+            .iter()
+            .flat_map(|page| page["summaries"].as_array().unwrap())
+            .map(|row| row["record"]["spec"]["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            ids,
+            (0..130)
+                .map(|index| format!("{index:064x}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            jobs.operator_run(&ids[0])
+                .unwrap()
+                .snapshot()
+                .record
+                .spec
+                .prompt,
+            prompt
+        );
+        drop(jobs);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn crash_tail_recovery_keeps_sequence_and_single_authority() {
         let root =
             std::env::temp_dir().join(format!("boxen-journal-{}", state::random_hex().unwrap()));
@@ -213,6 +278,13 @@ pub struct Snapshot {
     pub status: String,
     pub backend_thread: Option<String>,
     pub last_seq: u64,
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryCursor {
+    created_at: u64,
+    id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1728,6 +1800,59 @@ impl Jobs {
             .collect();
         records.sort_by_key(|s| (s.record.created_at, s.record.spec.id.clone()));
         records
+    }
+    pub fn operator_summary_page(&self, after: Option<SummaryCursor>) -> Result<Value> {
+        const PAGE_SIZE: usize = 128;
+        if let Some(cursor) = &after {
+            valid_id(&cursor.id)?;
+        }
+        let mut page: Vec<_> = self
+            .runs
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|run| {
+                let inner = run.inner.lock().unwrap();
+                let record = &inner.snapshot.record;
+                let cursor = SummaryCursor {
+                    created_at: record.created_at,
+                    id: record.spec.id.clone(),
+                };
+                (after.as_ref().is_none_or(|after| &cursor > after))
+                    .then(|| (cursor, Arc::clone(run)))
+            })
+            .collect();
+        page.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let has_more = page.len() > PAGE_SIZE;
+        page.truncate(PAGE_SIZE);
+        let summaries: Vec<_> = page
+            .iter()
+            .map(|(_, run)| {
+                let inner = run.inner.lock().unwrap();
+                let snapshot = &inner.snapshot;
+                let record = &snapshot.record;
+                let spec = &record.spec;
+                let resident_id = spec.resident_id.as_deref()
+                    .or_else(|| record.resident.as_ref().map(|resident| resident.id.as_str()));
+                let title: String = spec.prompt.lines().next().unwrap_or("Untitled thread")
+                    .chars().take(72).collect();
+                json!({
+                    "record": {
+                        "spec": {"id":spec.id,"thread_id":spec.thread_id,"backend":spec.backend,
+                                 "resident_id":resident_id},
+                        "created_at": record.created_at,
+                        "mailbox": record.mailbox.as_ref().map(|m| json!({"reason":m.reason.chars().take(128).collect::<String>()})),
+                        "imported": record.imported.as_ref().map(|_| true),
+                        "transcript_import": record.transcript_import.as_ref().map(|_| true)
+                    },
+                    "title": title,
+                    "status": snapshot.status,
+                    "last_seq": snapshot.last_seq
+                })
+            })
+            .collect();
+        let next_after = page.last().filter(|_| has_more).map(|(cursor, _)| cursor);
+        Ok(json!({"summaries":summaries,"next_after":next_after}))
     }
     pub fn operator_run(&self, id: &str) -> Result<Arc<Run>> {
         valid_id(id)?;

@@ -174,7 +174,14 @@ pub fn operation(jobs: &Arc<Jobs>, actor: &str, request: &Value) -> Result<Value
                         .collect::<Vec<_>>()
                 ));
             }
-            "list" => return Ok(json!(jobs.operator_list())),
+            "list" => {
+                if let Some(page) = request.get("summary_page") {
+                    let page = page.as_object().ok_or("summary_page must be an object")?;
+                    let after = page.get("after").cloned().unwrap_or(Value::Null);
+                    return jobs.operator_summary_page(serde_json::from_value(after)?);
+                }
+                return Ok(json!(jobs.operator_list()));
+            }
             "resident_definition"
                 if request["args"]["action"].as_str().unwrap_or("list") == "list" =>
             {

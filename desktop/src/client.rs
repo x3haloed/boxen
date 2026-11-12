@@ -30,6 +30,7 @@ pub enum Update {
     Catalog(Destination, Result<Vec<Value>, String>),
     Batch(String, u64, Value),
     WatchError(String, u64, String),
+    Followup(String, Result<Pending, String>),
     Submitted(String, Result<Value, String>),
     Controlled(String, Destination, String, Result<Value, String>),
 }
@@ -118,9 +119,10 @@ impl Client {
         let client = self.clone();
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                let result = client
-                    .operation(&dest, json!({"op":"list"}))
-                    .and_then(|v| v.as_array().cloned().ok_or("Invalid catalog".into()));
+                let result = client.run_catalog(&dest, &stop);
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
                 if !publisher.send(Update::Catalog(dest.clone(), result)) {
                     break;
                 }
@@ -131,6 +133,61 @@ impl Client {
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }
+        });
+    }
+    fn run_catalog(&self, dest: &Destination, stop: &AtomicBool) -> Result<Vec<Value>, String> {
+        let mut runs = Vec::new();
+        let mut after = Value::Null;
+        while !stop.load(Ordering::Relaxed) {
+            let page = self.operation(dest, json!({"op":"list","summary_page":{"after":after}}))?;
+            // An older daemon treats this as a full list request.
+            if after.is_null()
+                && let Some(legacy) = page.as_array()
+            {
+                return Ok(legacy.clone());
+            }
+            runs.extend(
+                page["summaries"]
+                    .as_array()
+                    .ok_or("Invalid run summaries")?
+                    .iter()
+                    .cloned(),
+            );
+            let next = page.get("next_after").ok_or("Missing run summary cursor")?;
+            if next.is_null() {
+                return Ok(runs);
+            }
+            let cursor =
+                |v: &Value| Some((v["created_at"].as_u64()?, v["id"].as_str()?.to_owned()));
+            if cursor(next).is_none_or(|next| Some(next) <= cursor(&after)) {
+                return Err("Run summary cursor did not advance".into());
+            }
+            after = next.clone();
+        }
+        Err("Run catalog poll stopped".into())
+    }
+    pub fn followup(
+        &self,
+        destination: Destination,
+        previous: String,
+        id: String,
+        text: String,
+        publisher: Publisher,
+    ) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            let result = client
+                .operation(&destination, json!({"op":"get","id":previous}))
+                .and_then(|snapshot| {
+                    let mut spec = snapshot["record"]["spec"].clone();
+                    if spec["id"] != previous || !spec["thread_id"].is_string() {
+                        return Err("Invalid follow-up source run".into());
+                    }
+                    spec["id"] = json!(id);
+                    spec["prompt"] = json!(text);
+                    Ok(Pending { destination, spec })
+                });
+            publisher.send(Update::Followup(previous, result));
         });
     }
     pub fn watch(
@@ -405,15 +462,24 @@ mod tests {
         client
             .operation(&dest, json!({"op":"start","spec":spec}))
             .unwrap();
-        let runs = client.operation(&dest, json!({"op":"list"})).unwrap();
+        let runs = client.run_catalog(&dest, &AtomicBool::new(false)).unwrap();
         assert_eq!(
-            runs.as_array()
-                .unwrap()
-                .iter()
+            runs.iter()
                 .filter(|r| r["record"]["spec"]["id"] == id)
                 .count(),
             1
         );
+        let next = crate::new_id();
+        client.followup(dest, id, next.clone(), "Follow-up".into(), bus.publisher());
+        let Update::Followup(_, Ok(pending)) =
+            bus.rx.recv_timeout(Duration::from_secs(10)).unwrap()
+        else {
+            panic!("Catalog entry could not prepare a follow-up");
+        };
+        let mut expected = first["record"]["spec"].clone();
+        expected["id"] = json!(next);
+        expected["prompt"] = json!("Follow-up");
+        assert_eq!(pending.spec, expected);
         println!(
             "Remote native client: thinking, incremental tool output, detached replay, final response, exact-ID retry passed"
         );

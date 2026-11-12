@@ -189,8 +189,15 @@ impl State {
     }
 }
 fn status(p: &Peer, id: &str) -> (Signal, String, String) {
-    if let Some(error) = p.runs_error.as_ref().or(p.metadata_error.as_ref()) {
+    if let Some(error) = &p.metadata_error {
         return (Signal::Unknown, "Machine unavailable".into(), error.clone());
+    }
+    if let Some(error) = &p.runs_error {
+        return (
+            Signal::Unknown,
+            "Activity unavailable".into(),
+            error.clone(),
+        );
     }
     if !p.loaded {
         return (Signal::Unknown, "Checking status…".into(), String::new());
@@ -346,7 +353,7 @@ pub fn panel(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
                 };
                 let list = groups(p);
                 if list.is_empty() {
-                    if let Some(e) = p.metadata_error.as_ref().or(p.runs_error.as_ref()) {
+                    if let Some(e) = &p.metadata_error {
                         ui.weak(format!("{} · unavailable", destination.label)).on_hover_text(e);
                     }
                     continue;
@@ -449,7 +456,12 @@ mod tests {
         );
         assert_eq!(status(&s.peers["p"], "r").0, Signal::Running);
         s.activity("p", &Err("offline".into()));
-        assert_eq!(status(&s.peers["p"], "r").0, Signal::Unknown);
+        let (signal, label, _) = status(&s.peers["p"], "r");
+        assert_eq!(signal, Signal::Unknown);
+        assert_eq!(label, "Activity unavailable");
+        s.metadata("p", &Err("offline".into()), Ok(json!({})), Ok(json!({})));
+        assert_eq!(status(&s.peers["p"], "r").1, "Machine unavailable");
+        s.metadata("p", &Ok(vec![]), Ok(json!({})), Ok(json!({})));
         s.activity("p", &Ok(vec![run("c", "r", 3, "completed")]));
         assert_eq!(status(&s.peers["p"], "r").0, Signal::Healthy);
     }
