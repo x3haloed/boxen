@@ -1,5 +1,6 @@
 use crate::{
     Result,
+    infrastructure::{self, Attempt},
     jobs::{Control, Jobs, Spec},
     logging::{self, Context, Delivery, Filter, Level, Target},
     state::{self, State},
@@ -182,6 +183,15 @@ impl Session {
     }
 }
 pub fn connect(state: &State, address: &str, expected: &str) -> Result<Session> {
+    connect_for(state, address, expected, None)
+}
+
+fn connect_for(
+    state: &State,
+    address: &str,
+    expected: &str,
+    attempt: Option<&Attempt>,
+) -> Result<Session> {
     let connection_id = next_connection();
     logging::record(
         Level::Debug,
@@ -195,8 +205,24 @@ pub fn connect(state: &State, address: &str, expected: &str) -> Result<Session> 
         || json!({"address":address}),
         || Value::Null,
     );
+    let started = std::time::Instant::now();
     let outcome = connect_inner(state, address, expected, connection_id);
     if let Err(error) = &outcome {
+        if let Some(attempt) = attempt {
+            attempt.record(
+                "connect",
+                "failed",
+                Some(infrastructure::reason(error.as_ref())),
+            );
+        } else {
+            Attempt::new("peer_out", "connect", Some(expected), None, None, None)
+                .since(started)
+                .record(
+                    "connect",
+                    "failed",
+                    Some(infrastructure::reason(error.as_ref())),
+                );
+        }
         logging::record(
             Level::Warn,
             Target::Peer,
@@ -270,11 +296,45 @@ fn connect_inner(
         diagnostics: true,
     })
 }
-pub fn request(state: &State, address: &str, expected: &str, request: Value) -> Result<Value> {
-    let mut session = connect(state, address, expected)?;
-    session.send(&request)?;
-    result(session.receive()?)
+pub fn request(state: &State, address: &str, expected: &str, mut request: Value) -> Result<Value> {
+    let attempt = Attempt::request("peer_out", expected, &request, None);
+    if let Some(id) = attempt.as_ref().and_then(Attempt::id) {
+        request["_boxen_attempt"] = json!(id);
+    }
+    let mut session = connect_for(state, address, expected, attempt.as_ref())?;
+    session.send(&request).inspect_err(|error| {
+        if let Some(attempt) = &attempt {
+            attempt.record(
+                "send",
+                "unknown",
+                Some(infrastructure::reason(error.as_ref())),
+            );
+        }
+    })?;
+    let reply = session.receive().inspect_err(|error| {
+        if let Some(attempt) = &attempt {
+            attempt.record(
+                "reply",
+                "unknown",
+                Some(infrastructure::reason(error.as_ref())),
+            );
+        }
+    })?;
+    let outcome = result(reply);
+    if let Some(attempt) = &attempt {
+        attempt.record(
+            "reply",
+            if outcome.is_ok() {
+                "completed"
+            } else {
+                "rejected"
+            },
+            outcome.as_ref().err().map(|_| "peer_rejected"),
+        );
+    }
+    outcome
 }
+
 pub fn result(reply: Value) -> Result<Value> {
     if let Some(error) = reply.get("error") {
         return Err(Box::new(Rejected(
@@ -596,8 +656,17 @@ fn handle_inner(
         peer: remote.clone(),
         diagnostics: true,
     };
-    let request = session.receive()?;
+    let mut request = session.receive()?;
     state.require_trust(&remote)?;
+    let attempt_id = request
+        .as_object_mut()
+        .and_then(|object| object.remove("_boxen_attempt"));
+    let mut attempt = Attempt::request(
+        "peer_in",
+        &remote,
+        &request,
+        attempt_id.as_ref().and_then(Value::as_str),
+    );
     let outcome = (|| -> Result<()> {
         if request["op"] == "network" {
             session.send(&crate::network::operation(state, &request["args"])?)?;
@@ -656,7 +725,12 @@ fn handle_inner(
             jobs.attachments.require(&message.attachments)?;
             let accepted = jobs.mailboxes.accept_network(&remote, message)?;
             jobs.notify();
-            session.send(&json!({"id":accepted.id,"status":"accepted","accepted_on":state.public_key(),"sequence":accepted.seq}))?;
+            send_operation_reply(
+                &mut session,
+                &mut attempt,
+                &json!({"id":accepted.id,"status":"accepted","accepted_on":state.public_key(),"sequence":accepted.seq}),
+                None,
+            )?;
         } else if request["op"] == "ping" {
             let message = request["message"].as_str().ok_or("message required")?;
             if message.len() > MAX_TEXT {
@@ -683,17 +757,56 @@ fn handle_inner(
                     }
                 }
             } else {
-                session.send(&crate::operator::operation(jobs, &remote, &request)?)?;
+                send_operation_reply(
+                    &mut session,
+                    &mut attempt,
+                    &crate::operator::operation(jobs, &remote, &request)?,
+                    None,
+                )?;
             }
         }
         Ok(())
     })();
     if let Err(error) = outcome {
-        let _ = session.send(&json!({"error":error.to_string()}));
+        let _ = send_operation_reply(
+            &mut session,
+            &mut attempt,
+            &json!({"error":error.to_string()}),
+            Some(infrastructure::reason(error.as_ref())),
+        );
         return Err(error);
     }
     Ok(())
 }
+fn send_operation_reply(
+    session: &mut Session,
+    attempt: &mut Option<Attempt>,
+    value: &Value,
+    rejection: Option<&'static str>,
+) -> Result<()> {
+    let attempt = attempt.take();
+    if let Some(attempt) = &attempt {
+        attempt.record(
+            "dispatch",
+            if rejection.is_some() {
+                "rejected"
+            } else {
+                "completed"
+            },
+            rejection,
+        );
+    }
+    session.send(value).inspect_err(|error| {
+        if let Some(attempt) = &attempt {
+            attempt.record(
+                "reply_send",
+                "failed",
+                Some(infrastructure::reason(error.as_ref())),
+            );
+        }
+    })
+}
+
 pub fn serve(listener: TcpListener, state: Arc<State>, jobs: Arc<Jobs>) {
     let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {

@@ -299,6 +299,11 @@ fn handle(
         return Ok(());
     }
     if request == "POST /api/operation HTTP/1.1" {
+        let attempt = if local {
+            crate::infrastructure::Attempt::request("http_local", peer, operation, None)
+        } else {
+            None
+        };
         let result = if local && operation["op"] == "network" {
             crate::network::operation(state, &operation["args"])
         } else if local {
@@ -306,6 +311,20 @@ fn handle(
         } else {
             protocol::request(state, address, peer, operation.clone())
         };
+        if let Some(attempt) = &attempt {
+            attempt.record(
+                "dispatch",
+                if result.is_ok() {
+                    "completed"
+                } else {
+                    "rejected"
+                },
+                result
+                    .as_ref()
+                    .err()
+                    .map(|error| crate::infrastructure::reason(error.as_ref())),
+            );
+        }
         return match result {
             Ok(reply) => respond(
                 stream,

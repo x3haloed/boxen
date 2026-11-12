@@ -91,6 +91,20 @@ The workload journal stays enabled independently of diagnostic logging. It remai
 
 Diagnostic subscriptions are live-only and have no replay contract. For durable diagnostic retention, configure a file sink or save the CLI stream on the consumer. For authoritative workload replay, use `watch` and its sequence cursor.
 
+## Durable infrastructure history
+
+Each daemon retains metadata for peer connection failures, selected operation attempts and outcomes, and Codex and built-in runtime launches. Tracked operations include workload start and control, resident activation and continuation, thread movement and historical workspace access, and mail. Records contain stable stage, outcome, and reason codes, machine and request correlation, timing, and available runtime and policy versions. Polls, streams, periodic network sync, and bulk transfer chunks stay outside operation tracking. Prompts, paths, credentials, raw errors, and message contents stay outside these records.
+
+The destination records dispatch before attempting its reply. An origin with an unknown reply can match the destination's record by `request_id` when both daemons support the history. A completed dispatch describes the operation's return. For a workload start, the run journal still owns the execution outcome.
+
+Read a daemon's history through the authenticated operator API or an existing paired connection.
+
+```sh
+boxen request HOST:PORT PEER_KEY '{"op":"infrastructure_history","after":0}'
+```
+
+The response contains up to 128 records in sequence order. Pass `next_after` as the next request's `after` when more pages are available. `oldest_seq`, `newest_seq`, and `history_before_cursor_unavailable` describe the retained range. Sequence gaps, invalid rows, write failures, and recovered partial rows indicate missing evidence. Two 4 MiB segments bound retention per daemon. Records are synced to disk at the recording boundary, and a history write failure allows the operation to continue. This history stays enabled across restarts independently of diagnostic logging.
+
 ## Maintaining instrumentation
 
 Use `logging::record` with lazy field/payload closures and the applicable target and context. Runtime code can use `Run::diagnostic` to obtain correlation without cloning run state when logging is off. Never prepare formatted strings or clone payloads before calling the logger.

@@ -98,7 +98,7 @@ HTTP 200 means an operation returned a result or a stream was established. HTTP 
 
 Native clients may also speak the existing peer protocol directly when they have their own paired machine identity. Its `watch` request is `{"op":"watch","id":"RUN_ID","after":0}` and returns the same batches. The CLI is a working client of that interface. Named residents and continuity operations are described in [residents](residents.md); they use the same routing and ownership contract.
 
-Diagnostic subscriptions and file control are separately documented in [logging](logging.md). Workload events remain retained even when diagnostics are off. This slice offers neither offline history replicas nor automatic reconciliation of unknown tool side effects.
+Diagnostic subscriptions, file control, and the authenticated `infrastructure_history` operation are documented in [logging](logging.md). Workload events and bounded infrastructure history remain retained even when diagnostics are off. This slice offers neither offline history replicas nor automatic reconciliation of unknown tool side effects.
 
 ## Built-in inference events
 

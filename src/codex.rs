@@ -437,6 +437,16 @@ pub fn execute(
     } else {
         None
     };
+    let mut launch = crate::infrastructure::Attempt::new(
+        "runtime",
+        "codex_launch",
+        None,
+        Some(&spec.id),
+        Some(&spec.thread_id),
+        None,
+    );
+    launch.runtime(None, &record.runtime_policy);
+    launch.record("launch", "attempted", None);
     let mut child = crate::codex_executable::launch(
         binary, crate::platform::host_os(),
         |selected| {
@@ -447,12 +457,17 @@ pub fn execute(
             command.args(["app-server", "--listen", "stdio://"])
                 .current_dir(&spec.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
         },
-        |selected, retry| run.diagnostic(Level::Info, "process.starting",
-            || json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"rediscovered":retry,"cwd":spec.cwd}), || Value::Null),
+        |selected, retry| {
+            launch.runtime(selected.version.as_deref(), &record.runtime_policy);
+            run.diagnostic(Level::Info, "process.starting",
+                || json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"rediscovered":retry,"cwd":spec.cwd}), || Value::Null);
+        },
     ).map_err(|error| {
+        launch.record("launch", "failed", Some(crate::infrastructure::reason(&error)));
         run.diagnostic(Level::Error, "process.start_failed", ||json!({"detail":error.to_string()}), ||Value::Null);
         format!("Cannot start Codex: {error}")
     })?;
+    launch.record("launch", "completed", None);
     let stdin = child.stdin.take().ok_or("missing app-server stdin")?;
     run.diagnostic(
         Level::Info,

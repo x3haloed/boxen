@@ -227,11 +227,32 @@ fn exchange(
         || json!({"step":step,"model":body["model"],"bytes":payload.len(),"purpose":purpose}),
         || body.clone(),
     );
-    let mut child = self_command()?
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+    let record = run.snapshot().record;
+    let mut launch = crate::infrastructure::Attempt::new(
+        "runtime",
+        "inference_worker_launch",
+        None,
+        Some(&record.spec.id),
+        Some(&record.spec.thread_id),
+        None,
+    );
+    launch.runtime(Some(env!("CARGO_PKG_VERSION")), &record.runtime_policy);
+    launch.record("launch", "attempted", None);
+    let child = (|| -> Result<_> {
+        Ok(self_command()?
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?)
+    })();
+    let mut child = child.inspect_err(|error| {
+        launch.record(
+            "launch",
+            "failed",
+            Some(crate::infrastructure::reason(error.as_ref())),
+        );
+    })?;
+    launch.record("launch", "completed", None);
     let stdout = child
         .stdout
         .take()

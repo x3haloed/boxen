@@ -165,6 +165,7 @@ pub fn operation(jobs: &Arc<Jobs>, actor: &str, request: &Value) -> Result<Value
     let op = request["op"].as_str().unwrap_or("");
     let result = (|| -> Result<Value> {
         match op {
+            "infrastructure_history" => return crate::infrastructure::page(request),
             "thread_move" => return jobs.thread_move(request),
             "thread_move_receive" => return jobs.receive_thread_move(actor, request),
             "thread_placement" => return jobs.thread_placement(request),

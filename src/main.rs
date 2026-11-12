@@ -16,6 +16,7 @@ mod events;
 mod inference;
 #[cfg(feature = "inference-probe")]
 mod inference_probe;
+mod infrastructure;
 mod jobs;
 mod logging;
 mod mailbox;
@@ -212,6 +213,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 inference_config,
             )?;
             network::configure(&state, &name, &advertise)?;
+            infrastructure::install(state.directory(), state.public_key())?;
             network::start(
                 state.clone(),
                 jobs.clone(),
