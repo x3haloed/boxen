@@ -162,6 +162,7 @@ impl Jobs {
             recovery: None,
             mailbox: None,
             spec: Spec {
+                attachments: vec![],
                 context: None,
                 resident_id: None,
                 id: spec.id.clone(),

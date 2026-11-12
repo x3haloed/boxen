@@ -227,6 +227,7 @@ pub fn resident_tool(
                     id: resident.id.clone(),
                 },
                 MailSend {
+                    attachments: vec![],
                     service: None,
                     id,
                     to: input.to,
@@ -253,6 +254,7 @@ pub fn resident_tool(
             Ok(serde_json::to_value(jobs.start(
                 owner,
                 Spec {
+                    attachments: vec![],
                     resident_id: None,
                     context: None,
                     id: input.request_id.clone(),

@@ -128,6 +128,7 @@ impl Jobs {
                 recovery: None,
                 mailbox: None,
                 spec: Spec {
+                    attachments: vec![],
                     context: Some(resident.context.clone()),
                     resident_id: Some(resident.id.clone()),
                     id: request.id.clone(),

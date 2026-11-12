@@ -29,6 +29,7 @@ pub struct Draft {
     pub recipient: Option<ThreadKey>,
     pub subject: String,
     pub body: String,
+    pub files: Vec<crate::attachments::FileRef>,
     pub pending: Option<PendingMail>,
     pub accepted: Option<String>,
     pub last_receipt: Option<Value>,
@@ -271,9 +272,23 @@ impl Client {
             let request = if lookup {
                 json!({"op":"messaging","args":{"action":"status","id":id}})
             } else {
-                pending.request
+                pending.request.clone()
             };
-            let result = client.operation(&pending.destination, request);
+            let result = client
+                .operation(&pending.destination, request)
+                .map(|receipt| {
+                    if lookup && receipt["id"] == id {
+                        // Status has connector-shaped addresses. The exact saved
+                        // envelope still owns reply provenance and file references.
+                        let mut envelope = pending.request["message"].clone();
+                        envelope["accepted_at"] = receipt["accepted_at"].clone();
+                        envelope["accepted_on"] = json!(pending.destination.key);
+                        envelope["delivery"] = receipt["delivery"].clone();
+                        envelope
+                    } else {
+                        receipt
+                    }
+                });
             publisher.send(Update::Mail(MailUpdate::Sent { draft, id, result }));
         });
     }
@@ -396,8 +411,20 @@ impl Desktop {
                         d.id == draft && d.last_receipt.as_ref().is_some_and(|v| v["id"] == id)
                     })
                 {
-                    // A status observation never clears a newer draft or submits mail.
-                    d.last_receipt = Some(value);
+                    // Advance delivery state without replacing the accepted
+                    // envelope or clearing the next draft.
+                    if let Some(message) = &mut d.last_receipt {
+                        message["delivery"] = value["delivery"].clone();
+                        if let Some(target) = &d.recipient {
+                            self.data.mail.outgoing.insert(
+                                ThreadKey {
+                                    peer: target.peer.clone(),
+                                    id,
+                                },
+                                message.clone(),
+                            );
+                        }
+                    }
                 }
             }
             MailUpdate::Sent { draft, id, result } => {
@@ -423,6 +450,7 @@ impl Desktop {
                             d.accepted = Some(id);
                             d.error = None;
                             d.body.clear();
+                            d.files.clear();
                         }
                         Ok(_) => d.error = Some("The daemon returned an unexpected receipt. Delivery remains unconfirmed.".into()),
                         Err(e) => d.error = Some(format!("Delivery unconfirmed: {e}")),
@@ -488,7 +516,7 @@ impl Desktop {
                     return;
                 }
                 if draft.subject.trim().is_empty()
-                    || draft.body.trim().is_empty()
+                    || (draft.body.trim().is_empty() && draft.files.is_empty())
                     || draft.subject.len() > 256
                     || draft.body.len() > 32768
                 {
@@ -500,7 +528,7 @@ impl Desktop {
                         label: "This machine".into(),
                         address: String::new(),
                     },
-                    request: json!({"op":"mailbox_send","client_id":self.data.local_key,"message":{"id":crate::new_id(),"to":{"type":"resident","id":target.id},"subject":draft.subject,"body":draft.body,"in_reply_to":draft.parent.map(|p|p.id)}}),
+                    request: json!({"op":"mailbox_send","client_id":self.data.local_key,"message":{"id":crate::new_id(),"to":{"type":"resident","id":target.id},"subject":draft.subject,"body":draft.body,"attachments":draft.files,"in_reply_to":draft.parent.map(|p|p.id)}}),
                 };
                 let d = self
                     .data
@@ -510,6 +538,27 @@ impl Desktop {
                     .iter_mut()
                     .find(|d| d.id == id)
                     .unwrap();
+                if id.starts_with("chat:") {
+                    let outbox = format!(
+                        "outbox:{}",
+                        pending.request["message"]["id"].as_str().unwrap_or("")
+                    );
+                    let mut retained = d.clone();
+                    retained.id = outbox.clone();
+                    retained.pending = Some(pending);
+                    retained.error = None;
+                    retained.accepted = None;
+                    retained.last_receipt = None;
+                    d.parent = None;
+                    d.body.clear();
+                    d.files.clear();
+                    d.pending = None;
+                    self.data.saved.mail.drafts.push(retained);
+                    if self.persist() {
+                        self.mail_action(MailAction::Retry(outbox));
+                    }
+                    return;
+                }
                 d.pending = Some(pending);
                 d.error = None;
                 d.accepted = None;
@@ -615,6 +664,7 @@ pub fn inbox(ui: &mut egui::Ui, data: &mut Data, actions: &mut Vec<Action>) {
         .iter()
         .filter(|d| {
             !d.id.starts_with("chat:")
+                && !d.id.starts_with("outbox:")
                 && d.parent.is_none()
                 && (d.pending.is_some()
                     || (d.accepted.is_none() && (!d.subject.is_empty() || !d.body.is_empty())))
@@ -923,22 +973,30 @@ pub fn details(ui: &mut egui::Ui, pane: &Pane, data: &mut Data, actions: &mut Ve
 
 /// A read-only timeline over accepted correspondence, with an ordinary mailbox composer.
 pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut Vec<Action>) {
-    let name = crate::activity::title(data, key);
-    ui.heading(&name);
+    use crate::{
+        attachments::{FileRef, Target},
+        conversation as view,
+    };
+    let activity = view::header(ui, data, key);
+    let local = view::local(data);
+    if !data.mail.errors.contains_key(&key.peer)
+        && let Some(run) = data.agents.history(key).and_then(|runs| runs.last())
+        && !crate::model::terminal(run)
+    {
+        ui.weak(if run["status"] == "waiting" {
+            "Waiting for input"
+        } else {
+            "Working"
+        });
+    }
     if let Some(error) = data.mail.errors.get(&key.peer) {
-        ui.colored_label(egui::Color32::YELLOW, error);
+        ui.label(format!("Agent machine unavailable · {error}"));
     }
     if let Some(error) = data.mail.history_errors.get(key) {
-        ui.colored_label(
-            egui::Color32::YELLOW,
-            format!("Sent history unavailable: {error}"),
-        );
+        ui.label(format!("Sent history unavailable · {error}"));
     }
     if let Some(error) = data.mail.human_inbox_errors.get(&key.peer) {
-        ui.colored_label(
-            egui::Color32::YELLOW,
-            format!("Human mailbox history unavailable: {error}"),
-        );
+        ui.label(format!("Mailbox history unavailable · {error}"));
     }
     let draft_id = format!("chat:{}:{}", key.peer, key.id);
     if !data.saved.mail.drafts.iter().any(|d| d.id == draft_id) {
@@ -978,96 +1036,274 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
             .cmp(&b["accepted_at"].as_u64())
             .then_with(|| ia.cmp(ib))
     });
-    let parent = messages
+    let latest_incoming = messages
         .iter()
         .rev()
         .find(|(_, (outgoing, _))| !outgoing)
-        .map(|(id, _)| ThreadKey {
-            peer: key.peer.clone(),
-            id: id.clone(),
-        });
-    egui::ScrollArea::vertical()
-        .id_salt(("chat-history", key))
-        .stick_to_bottom(true)
-        .max_height((ui.available_height() - 150.).max(40.))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if messages.is_empty() {
-                ui.weak("No messages yet.");
-            }
-            for (_, (outgoing, m)) in messages {
-                ui.with_layout(
-                    if outgoing {
-                        egui::Layout::top_down(egui::Align::Max)
-                    } else {
-                        egui::Layout::top_down(egui::Align::Min)
-                    },
-                    |ui| {
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.strong(if outgoing { "You" } else { &name });
-                            let subject = m["subject"].as_str().unwrap_or("");
-                            if !subject.is_empty() && subject != "Conversation" {
-                                ui.weak(subject);
-                            }
-                            ui.add(
-                                egui::Label::new(m["body"].as_str().unwrap_or(""))
-                                    .wrap()
-                                    .selectable(true),
-                            );
-                            if outgoing && m["delivery"]["status"] == "queued" {
-                                ui.small("Queued for delivery");
-                            }
-                        });
-                    },
-                );
-                ui.add_space(6.);
-            }
-        });
-    ui.separator();
-    let draft = data
+        .map(|(id, _)| id.as_str());
+    let target = Target::Mail(draft_id.clone());
+    let index = data
         .saved
         .mail
         .drafts
-        .iter_mut()
-        .find(|d| d.id == draft_id)
+        .iter()
+        .position(|d| d.id == draft_id)
         .unwrap();
-    let pending = draft.pending.is_some();
-    let edited = ui
-        .add_enabled(
-            !pending,
-            egui::TextEdit::multiline(&mut draft.body)
-                .hint_text("Message…")
-                .desired_rows(3)
-                .desired_width(f32::INFINITY),
-        )
-        .changed();
-    if edited {
-        draft.error = None;
+    let mut draft = std::mem::take(&mut data.saved.mail.drafts[index]);
+    let pending: Vec<_> = std::iter::once(&draft)
+        .chain(data.saved.mail.drafts.iter())
+        .filter(|d| d.recipient.as_ref() == Some(key) && d.pending.is_some())
+        .map(|d| {
+            (
+                d.id.clone(),
+                d.error.clone(),
+                data.mail.sending.contains(&d.id),
+            )
+        })
+        .collect();
+    let mut choose_reply = None;
+    let mut switch = None;
+    let mut message_anchor = None;
+    let extra = usize::from(draft.parent.is_some())
+        + usize::from(!pending.is_empty())
+        + usize::from(
+            data.preparing
+                .get(&target)
+                .is_some_and(|p| !p.errors.is_empty()),
+        );
+    if activity {
+        ui.weak("Private execution and delivered messages");
+        crate::activity::earlier(ui, data, key);
+    }
+    let runs = if activity {
+        crate::activity::runs(data, key)
+    } else {
+        vec![]
+    };
+    let attached: Vec<_> = messages
+        .iter()
+        .flat_map(|(id, (_, m))| {
+            FileRef::parse(&m["attachments"])
+                .into_iter()
+                .map(move |f| (id, f))
+        })
+        .collect();
+    if !attached.is_empty() {
+        ui.menu_button(format!("Files ({})", attached.len()), |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(260.)
+                .show(ui, |ui| {
+                    for (id, file) in &attached {
+                        if ui.button(&file.name).on_hover_text(file.info()).clicked() {
+                            message_anchor = Some((*id).clone());
+                            ui.close();
+                        }
+                    }
+                });
+        });
+    }
+    view::history(
+        ui,
+        data,
+        key,
+        activity,
+        view::reserve(&draft.body, &draft.files, extra, ui.available_width()),
+        |ui, data| {
+            let mut runs = runs.iter().peekable();
+            if messages.is_empty() && runs.peek().is_none() {
+                ui.weak(if activity {
+                    "No retained activity yet."
+                } else {
+                    "No messages yet."
+                });
+            }
+            for (id, (outgoing, m)) in &messages {
+                while let Some(run) = runs.peek() {
+                    if run["record"]["created_at"].as_u64() > m["accepted_at"].as_u64() {
+                        break;
+                    }
+                    crate::activity::run(ui, data, key, runs.next().unwrap());
+                }
+                let mut files = FileRef::parse(&m["attachments"]);
+                let owner = if *outgoing && m["accepted_on"] == data.local_key {
+                    &local
+                } else {
+                    // Both the destination resident and the local human inbox
+                    // retain originals; the mailbox projection can come from either.
+                    &view::destination(
+                        data,
+                        if *outgoing {
+                            &key.peer
+                        } else {
+                            m["to"]["machine"].as_str().unwrap_or(&data.local_key)
+                        },
+                    )
+                };
+                let response = ui
+                    .push_id(id, |ui| {
+                        view::bubble(
+                            ui,
+                            *outgoing,
+                            m["body"].as_str().unwrap_or(""),
+                            false,
+                            |ui| {
+                                if let Some(parent) = m["in_reply_to"].as_str() {
+                                    let title = messages
+                                        .iter()
+                                        .find(|(i, _)| i == parent)
+                                        .map(|(_, (_, v))| snippet(v))
+                                        .unwrap_or_else(|| "Earlier message".into());
+                                    if ui.small_button(format!("↳ {title}")).clicked() {
+                                        message_anchor = Some(parent.into());
+                                    }
+                                }
+                                view::chips(
+                                    ui,
+                                    &mut files,
+                                    owner,
+                                    false,
+                                    &mut data.file_previews,
+                                    actions,
+                                );
+                                if !activity
+                                    && latest_incoming == Some(id)
+                                    && ui.small_button("Show in Activity").clicked()
+                                {
+                                    switch = Some(id.clone());
+                                }
+                                if *outgoing && m["delivery"]["status"] == "queued" {
+                                    ui.small("Queued for delivery");
+                                }
+                            },
+                        )
+                    })
+                    .inner;
+                view::record(ui, &mut data.views, key, id, response.rect);
+                response.context_menu(|ui| {
+                    if !outgoing && ui.button("Reply").clicked() {
+                        choose_reply = Some(ThreadKey {
+                            peer: key.peer.clone(),
+                            id: id.clone(),
+                        });
+                        ui.close();
+                    }
+                    if !activity && ui.button("Show in Activity").clicked() {
+                        switch = Some(id.clone());
+                        ui.close();
+                    }
+                });
+                ui.add_space(4.);
+            }
+            for run in runs {
+                crate::activity::run(ui, data, key, run);
+            }
+        },
+    );
+    if let Some(id) = switch {
+        view::switch(data, key, true, Some(id));
+    }
+    if let Some(id) = message_anchor {
+        view::switch(data, key, activity, Some(id));
+    }
+    if let Some(parent) = choose_reply {
+        draft.parent = Some(parent);
         actions.push(Action::Mail(MailAction::Pin(Pane::Chat(key.clone()))));
     }
-    if let Some(error) = &draft.error {
-        ui.colored_label(egui::Color32::YELLOW, error);
+    if let Some(parent) = draft.parent.clone() {
+        let title = messages
+            .iter()
+            .find(|(i, _)| i == &parent.id)
+            .map(|(_, (_, m))| snippet(m))
+            .unwrap_or_else(|| "Earlier message".into());
+        ui.horizontal_wrapped(|ui| {
+            if ui.small_button(format!("Replying to: {title}")).clicked() {
+                view::switch(data, key, activity, Some(parent.id.clone()));
+            }
+            if ui.small_button("Remove reply").clicked() {
+                draft.parent = None;
+            }
+        });
     }
-    let sending = data.mail.sending.contains(&draft_id);
-    if pending {
-        ui.weak("Delivery remains unconfirmed.");
-        if ui
-            .add_enabled(!sending, egui::Button::new("Retry same message"))
-            .clicked()
-        {
-            actions.push(Action::Mail(MailAction::Retry(draft_id)));
-        }
-    } else {
-        let valid = !draft.body.trim().is_empty() && draft.body.len() <= 32768;
-        let shortcut = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
-        if ui.add_enabled(valid, egui::Button::new("Send")).clicked() || (valid && shortcut) {
-            draft.parent = parent;
-            actions.push(Action::Mail(MailAction::Send(draft_id)));
-        }
-        if draft.body.len() > 32768 {
-            ui.weak("Messages allow 32 KiB of text.");
-        }
+    if !pending.is_empty() {
+        ui.menu_button(format!("{} awaiting confirmation", pending.len()), |ui| {
+            for (id, error, sending) in &pending {
+                ui.push_id(id, |ui| {
+                    let msg = if id == &draft.id {
+                        draft.pending.as_ref()
+                    } else {
+                        data.saved
+                            .mail
+                            .drafts
+                            .iter()
+                            .find(|d| d.id == *id)
+                            .and_then(|d| d.pending.as_ref())
+                    };
+                    if let Some(msg) = msg {
+                        let body = msg.request["message"]["body"].as_str().unwrap_or("");
+                        let brief: String = body.chars().take(80).collect();
+                        ui.label(if brief.is_empty() {
+                            "Message with files".into()
+                        } else {
+                            brief
+                        });
+                    }
+                    if *sending {
+                        ui.weak("Checking acceptance…");
+                    } else {
+                        if let Some(error) = error {
+                            ui.label(error);
+                        }
+                        if ui.button("Retry same message").clicked() {
+                            actions.push(Action::Mail(MailAction::Retry(id.clone())));
+                        }
+                    }
+                    ui.separator();
+                });
+            }
+        });
     }
+    let blocked = draft.pending.is_some() || data.local_key.is_empty();
+    let result = view::composer(
+        ui,
+        data,
+        view::Composer {
+            text: &mut draft.body,
+            files: &mut draft.files,
+            target,
+            label: "Send",
+            limit: 32 * 1024,
+            blocked,
+        },
+        actions,
+    );
+    if result.changed {
+        actions.push(Action::Mail(MailAction::Pin(Pane::Chat(key.clone()))));
+    }
+    data.saved.mail.drafts[index] = draft;
+    if result.send {
+        actions.push(Action::Mail(MailAction::Send(draft_id)));
+    }
+}
+fn snippet(m: &Value) -> String {
+    let text = m["body"]
+        .as_str()
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("");
+    if text.is_empty() {
+        return m["attachments"][0]["name"]
+            .as_str()
+            .unwrap_or("Earlier message")
+            .chars()
+            .take(65)
+            .collect();
+    }
+    let mut out: String = text.chars().take(65).collect();
+    if out.len() < text.len() {
+        out.push('…');
+    }
+    out
 }
 // Stable machine clients represent the human desktop on each network member.
 // Arbitrary client IDs (including automation senders) remain separate identities.

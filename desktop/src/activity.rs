@@ -2,9 +2,10 @@
 use crate::{
     Data,
     client::run_key,
+    conversation,
     model::{ThreadKey, terminal},
 };
-use eframe::egui::{self, RichText};
+use eframe::egui;
 use serde_json::Value;
 #[derive(Default)]
 pub struct Window {
@@ -27,164 +28,96 @@ pub fn runs(data: &Data, key: &ThreadKey) -> Vec<Value> {
         .unwrap_or_else(|| all.len().saturating_sub(10));
     all[start..].to_vec()
 }
-pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey) {
-    let name = title(data, key);
-    let all = data.agents.history(key);
-    let loaded = all.is_some();
-    let total = all.map_or(0, <[Value]>::len);
-    let runs = runs(data, key);
-    let machine = data
-        .saved
-        .destinations
-        .iter()
-        .find(|d| d.key == key.peer)
-        .map(|d| d.label.as_str())
-        .unwrap_or("Machine");
-    ui.horizontal_wrapped(|ui| {
-        ui.heading(format!("{name} · Activity"));
-        ui.weak(machine);
-    });
-    ui.weak("Private execution narration · messages are sent explicitly");
+pub fn earlier(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey) {
     if let Some(error) = data.agents.error(key) {
-        ui.colored_label(
-            egui::Color32::LIGHT_RED,
-            format!("Observation unavailable · {error}"),
-        );
+        ui.label(format!("Observation unavailable · {error}"));
     }
-    if !loaded {
+    let Some(all) = data.agents.history(key) else {
         ui.weak("Waiting for the activity catalog…");
         return;
-    }
-    if total == 0 {
-        ui.weak("No activations yet.");
-        return;
-    }
-    let start = total.saturating_sub(runs.len());
+    };
+    let runs = runs(data, key);
+    let start = all.len().saturating_sub(runs.len());
     let first = runs
         .first()
         .and_then(|r| r["record"]["spec"]["id"].as_str())
         .map(str::to_owned);
     let previous = all
-        .and_then(|rows| rows.get(start.saturating_sub(10)))
+        .get(start.saturating_sub(10))
         .and_then(|r| r["record"]["spec"]["id"].as_str())
         .map(str::to_owned);
-    data.activity.entry(key.clone()).or_insert(Window { first });
-    if runs.len() < total {
-        ui.horizontal(|ui| {
-            if ui.button("Load earlier activity").clicked() {
-                let w = data.activity.entry(key.clone()).or_default();
-                w.first = previous.clone();
-            }
-            ui.weak(format!(
-                "Showing the latest {} of {total} retained runs",
-                runs.len()
-            ));
-        });
+    let window = data.activity.entry(key.clone()).or_insert(Window { first });
+    if start > 0 && ui.small_button("Load earlier activity").clicked() {
+        window.first = previous;
     }
-    ui.separator();
-    egui::ScrollArea::vertical()
-        .id_salt(("agent-activity", &key.peer, &key.id))
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            for run in &runs {
-                let id = run["record"]["spec"]["id"].as_str().unwrap_or_default();
-                let tag = run_key(&key.peer, id);
-                let state = run["status"].as_str().unwrap_or("unknown");
-                let imported = !run["record"]["transcript_import"].is_null()
-                    || !run["record"]["imported"].is_null();
-                let label = if imported {
-                    "Imported history"
-                } else if run["record"]["resident_activation"] == false {
-                    "Earlier thread execution"
+}
+pub fn run(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, run: &Value) {
+    let id = run["record"]["spec"]["id"].as_str().unwrap_or_default();
+    let tag = run_key(&key.peer, id);
+    let imported =
+        !run["record"]["transcript_import"].is_null() || !run["record"]["imported"].is_null();
+    let label = if imported {
+        "Imported history"
+    } else if run["record"]["resident_activation"] == false {
+        "Earlier thread execution"
+    } else {
+        "Activation"
+    };
+    let reason = run["record"]["mailbox"]["reason"]
+        .as_str()
+        .unwrap_or_default();
+    let status = run["status"].as_str().unwrap_or("");
+    let suffix = if status == "completed" {
+        String::new()
+    } else {
+        format!(" · {status}")
+    };
+    let title = if reason.is_empty() {
+        format!("{label}{suffix}")
+    } else {
+        format!("{label} · {reason}{suffix}")
+    };
+    ui.push_id(&tag, |ui| {
+        if let Some(error) = data.watches.get(&tag).and_then(|w| w.error.as_ref()) {
+            ui.label(format!("Reconnecting observation · {error}"));
+        }
+        let details = egui::CollapsingHeader::new(title)
+            .default_open(!terminal(run) || matches!(status, "failed" | "interrupted"))
+            .show(ui, |ui| {
+                if let Some(t) = data.transcripts.get(&tag) {
+                    for row in &t.rows {
+                        conversation::activity_row(ui, row);
+                    }
+                    if t.seq < run["last_seq"].as_u64().unwrap_or(0) {
+                        ui.weak("Replaying retained activity…");
+                    }
                 } else {
-                    "Activation"
-                };
-                let reason = run["record"]["mailbox"]["reason"]
-                    .as_str()
-                    .unwrap_or_default();
-                ui.push_id((&key.peer, id), |ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "{label} · {} · {state}{}",
-                            id.chars().take(8).collect::<String>(),
-                            if reason.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" · {reason}")
-                            }
-                        ))
-                        .strong(),
-                    )
-                    .on_hover_text(format!(
-                        "Run: {id}\nAccepted at Unix milliseconds: {}\nBackend: {}",
-                        run["record"]["created_at"],
-                        run["record"]["spec"]["backend"]
-                            .as_str()
-                            .unwrap_or_default()
-                    ));
-                    if let Some(w) = data.watches.get(&tag)
-                        && let Some(error) = &w.error
-                    {
-                        ui.colored_label(
-                            egui::Color32::LIGHT_RED,
-                            format!("Reconnecting observation · {error}"),
-                        );
-                    }
-                    match data.transcripts.get(&tag) {
-                        None => {
-                            ui.weak("Loading retained activity…");
-                        }
-                        Some(t) => {
-                            for row in &t.rows {
-                                ui.push_id(&row.id, |ui| {
-                                    if matches!(
-                                        row.label.as_str(),
-                                        "Tool"
-                                            | "Tool result"
-                                            | "Tool output"
-                                            | "Command"
-                                            | "Thinking"
-                                            | "Activation input"
-                                            | "Imported history"
-                                            | "Context"
-                                            | "Schedule"
-                                    ) {
-                                        egui::CollapsingHeader::new(&row.label)
-                                            .default_open(row.label == "Thinking" && !terminal(run))
-                                            .show(ui, |ui| {
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(&row.text).monospace(),
-                                                    )
-                                                    .wrap()
-                                                    .selectable(true),
-                                                );
-                                            });
-                                    } else {
-                                        ui.label(
-                                            RichText::new(if row.label == "Agent" {
-                                                "Private narration"
-                                            } else {
-                                                &row.label
-                                            })
-                                            .small()
-                                            .weak(),
-                                        );
-                                        ui.add(egui::Label::new(&row.text).wrap().selectable(true));
-                                    }
-                                    ui.add_space(5.);
-                                });
-                            }
-                            if t.seq < run["last_seq"].as_u64().unwrap_or(0) {
-                                ui.weak("Replaying retained activity…");
-                            }
-                        }
-                    }
-                    ui.separator();
-                });
-            }
-        });
+                    ui.weak("Loading retained activity…");
+                }
+            });
+        let collapsed = details.fully_closed();
+        details.header_response.on_hover_text(format!("Run {id}"));
+        if collapsed
+            && let Some(note) = data.transcripts.get(&tag).and_then(|t| {
+                t.rows
+                    .iter()
+                    .rev()
+                    .find(|row| row.label == "Agent" && !row.text.is_empty())
+            })
+        {
+            ui.weak("Private execution note");
+            let brief: String = note.text.chars().take(240).collect();
+            ui.add(
+                egui::Label::new(if brief.len() < note.text.len() {
+                    format!("{brief}…")
+                } else {
+                    brief
+                })
+                .wrap()
+                .selectable(true),
+            );
+        }
+    });
 }
 
 #[cfg(test)]

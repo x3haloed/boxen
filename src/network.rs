@@ -534,6 +534,9 @@ pub fn deliver(state: &State, jobs: &crate::jobs::Jobs) -> Result<()> {
             if peer.address.is_empty() {
                 return Err("destination endpoint is not known".into());
             }
+            jobs.attachments.transfer(&message.attachments, |request| {
+                crate::protocol::request(state, &peer.address, destination, request)
+            })?;
             let receipt = crate::protocol::request(
                 state,
                 &peer.address,

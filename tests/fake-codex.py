@@ -269,6 +269,13 @@ for line in sys.stdin:
             if not request['params'].get('excludeTurns', False):
                 result['thread']['turns'] = [{'id':'historical-large-turn','text':'x'*(4*1024*1024)}]
     elif method == "turn/start":
+        if request["params"]["input"][0]["text"] == "SLOW ATTACHMENT_FIXTURE":
+            assert all(item["type"] == "text" for item in request["params"]["input"])
+            metadata = request["params"]["input"][1]["text"]
+            assert "fixture Codex attachment " not in metadata
+            files = json.loads(metadata.rsplit("are not included in this input. ", 1)[1])
+            assert len(files) == 1 and files[0]["name"] == "managed.txt"
+            assert pathlib.Path(files[0]["path"]).read_bytes().startswith(b"fixture Codex attachment ")
         if promoted_bridge:
             context=request['params']['input'][1]['text']
             resident_context=json.loads(context.split('Saved continuity snapshot at turn acceptance (JSON):\n',1)[1].split('\n',1)[0])
@@ -282,6 +289,11 @@ for line in sys.stdin:
         cancel.set()
         result = {}
     elif method == "turn/steer":
+        parts = request["params"]["input"]
+        if len(parts) == 1 and parts[0]["text"].startswith("\nBoxen attachment metadata"):
+            assert parts[0]["type"] == "text"
+            files = json.loads(parts[0]["text"].rsplit("are not included in this input. ", 1)[1])
+            assert pathlib.Path(files[0]["path"]).read_bytes().startswith(b"fixture Codex attachment ")
         result = {"turnId": "fixture-turn"}
     elif method == 'mcpServerStatus/list' and promoted_bridge:
         listed=mcp_call('tools/list')['result']['tools']

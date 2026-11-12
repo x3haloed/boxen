@@ -122,6 +122,7 @@ mod tests {
             mailbox: None,
             created_at: now(),
             spec: Spec {
+                attachments: vec![],
                 context: None,
                 id: id.clone(),
                 resident_id: None,
@@ -186,6 +187,9 @@ pub fn valid_id(id: &str) -> Result<()> {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Spec {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::attachments::Attachment>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<crate::context::Settings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,8 +295,19 @@ pub struct SummaryCursor {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Control {
     Cancel,
-    Steer { text: String },
-    Respond { request_id: Value, result: Value },
+    Steer {
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<crate::attachments::Attachment>,
+        #[serde(skip)]
+        file_context: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        update_id: Option<String>,
+    },
+    Respond {
+        request_id: Value,
+        result: Value,
+    },
 }
 
 pub fn terminal(status: &str) -> bool {
@@ -507,8 +522,10 @@ impl Run {
         if matches!(&control, Control::Steer { .. }) && self.snapshot().record.resident.is_some() {
             return Err("resident communication enters its mailbox; operational cancellation and backend input responses remain separate controls".into());
         }
-        if let Control::Steer { text } = &control
-            && (text.is_empty() || text.len() > 256 * 1024)
+        if let Control::Steer {
+            text, attachments, ..
+        } = &control
+            && ((text.is_empty() && attachments.is_empty()) || text.len() > 256 * 1024)
         {
             return Err("steering text must contain 1–262144 bytes".into());
         }
@@ -624,6 +641,7 @@ impl History {
 }
 
 pub struct Jobs {
+    pub attachments: crate::attachments::Store,
     pub network: Mutex<Option<Arc<crate::state::State>>>,
     directory: PathBuf,
     runs: Mutex<HashMap<String, Arc<Run>>>,
@@ -1199,7 +1217,13 @@ impl Jobs {
                 .join("resident-definitions"),
             residents.machine_id().into(),
         );
+        let attachment_root = directory
+            .parent()
+            .ok_or("runs parent required")?
+            .canonicalize()?
+            .join("attachments");
         let jobs = Arc::new(Self {
+            attachments: crate::attachments::Store::new(attachment_root),
             network: Mutex::new(None),
             definitions,
             connectors,
@@ -1421,6 +1445,7 @@ impl Jobs {
         if let Some(prior) = self.mailboxes.retry(&sender, &spec, &source)? {
             return Ok(prior);
         }
+        self.attachments.require(&spec.attachments)?;
         let network = self.network.lock().unwrap().clone();
         let (recipient_owner, destination) = if !matches!(spec.to, Address::Connector { .. }) {
             if let Some(state) = &network {
@@ -1452,6 +1477,12 @@ impl Jobs {
             conversation,
         } = &spec.to
         {
+            if !spec.attachments.is_empty() {
+                return Err(
+                    "file references are supported by Boxen mail, not external connector sends"
+                        .into(),
+                );
+            }
             let Address::Resident { id } = &sender else {
                 return Err("external sends have a bound resident sender".into());
             };
@@ -1651,6 +1682,10 @@ impl Jobs {
         }
         activation.message_ids = batch.iter().map(|m| m.id.clone()).collect();
         let spec = Spec {
+            attachments: batch
+                .iter()
+                .flat_map(|m| m.attachments.iter().cloned())
+                .collect(),
             context: if resident.backend == "openrouter" {
                 Some(resident.context.clone())
             } else {
@@ -1834,8 +1869,9 @@ impl Jobs {
                 let spec = &record.spec;
                 let resident_id = spec.resident_id.as_deref()
                     .or_else(|| record.resident.as_ref().map(|resident| resident.id.as_str()));
-                let title: String = spec.prompt.lines().next().unwrap_or("Untitled thread")
-                    .chars().take(72).collect();
+                let title: String = spec.prompt.lines().next().filter(|line| !line.trim().is_empty())
+                    .or_else(|| spec.attachments.first().map(|file| file.name.as_str()))
+                    .unwrap_or("Untitled thread").chars().take(72).collect();
                 json!({
                     "record": {
                         "spec": {"id":spec.id,"thread_id":spec.thread_id,"backend":spec.backend,
@@ -2139,7 +2175,11 @@ impl Jobs {
                 return Err("Boxen context policies apply to the built-in runtime; managed runtimes own their native compaction".into());
             }
         }
-        if spec.prompt.is_empty() || spec.prompt.len() > 256 * 1024 {
+        if activation.is_none() {
+            self.attachments.require(&spec.attachments)?;
+        }
+        if (spec.prompt.is_empty() && spec.attachments.is_empty()) || spec.prompt.len() > 256 * 1024
+        {
             return Err("prompt must contain 1–262144 bytes".into());
         }
         if !std::path::Path::new(&spec.cwd).is_absolute()

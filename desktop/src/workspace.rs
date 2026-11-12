@@ -37,6 +37,37 @@ impl Default for Workspace {
     }
 }
 impl Workspace {
+    pub fn merge_resident_views(&mut self, activity: &mut std::collections::HashSet<ThreadKey>) {
+        let legacy: Vec<_> = self
+            .dock
+            .iter_all_tabs()
+            .filter_map(|(_, pane)| match pane {
+                Pane::Activity(key) => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        for key in legacy {
+            let old = Pane::Activity(key.clone());
+            let new = Pane::Chat(key.clone());
+            let Some(path) = self.dock.find_tab(&old) else {
+                continue;
+            };
+            if self.dock.find_tab(&new).is_some() {
+                if !self.is_preview(&old) {
+                    self.pin_pane(&new);
+                }
+                self.dock.remove_tab(path);
+            } else {
+                let was_preview = self.is_preview(&old);
+                self.dock[path.surface][path.node].tabs_mut().unwrap()[path.tab.0] = new;
+                if was_preview {
+                    self.chat_preview = Some(key.clone());
+                }
+                activity.insert(key);
+            }
+        }
+        self.activity_preview = None;
+    }
     pub fn show_work(&mut self) {
         if let Some(path) = self.dock.find_tab(&Pane::Work) {
             self.focus(path);

@@ -643,6 +643,7 @@ pub fn operation(
                     owner,
                     Address::Resident { id: r.into() },
                     Send {
+                        attachments: vec![],
                         service: Some(service),
                         id: message_id,
                         to: address(instance, conversation)?,
@@ -778,6 +779,7 @@ pub fn operation(
                     .or_else(|| jobs.mailboxes.source_id(&source))
                     .unwrap_or(state::random_hex()?);
                 let spec = Send {
+                    attachments: vec![],
                     service: None,
                     id: message_id,
                     to: target,
@@ -1248,6 +1250,7 @@ fn ingest_locked(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Val
                     conversation: conversation.into(),
                 },
                 Send {
+                    attachments: vec![],
                     service: None,
                     id: mid,
                     to: Address::Resident {

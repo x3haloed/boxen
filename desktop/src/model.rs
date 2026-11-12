@@ -54,7 +54,13 @@ pub fn catalog(peer: &str, runs: &[Value]) -> Vec<Conversation> {
         } else {
             let prompt = run["title"]
                 .as_str()
-                .or_else(|| run["record"]["spec"]["prompt"].as_str())
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    run["record"]["spec"]["prompt"]
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty())
+                })
+                .or_else(|| run["record"]["spec"]["attachments"][0]["name"].as_str())
                 .unwrap_or("Untitled thread");
             out.push(Conversation {
                 key: ThreadKey {
@@ -86,11 +92,22 @@ pub struct Row {
     pub id: String,
     pub label: String,
     pub text: String,
+    pub attachments: Vec<crate::attachments::FileRef>,
+    pub request: Option<Value>,
+    pub update_id: Option<String>,
+    pub tool: Option<ToolDetail>,
+}
+#[derive(Clone, Debug, Default)]
+pub struct ToolDetail {
+    pub output: String,
+    pub result: Option<String>,
+    pub failed: bool,
 }
 #[derive(Default)]
 pub struct Transcript {
     pub seq: u64,
     pub rows: Vec<Row>,
+    pub rejected_updates: HashSet<String>,
     positions: BTreeMap<String, usize>,
     imported: bool,
 }
@@ -101,6 +118,10 @@ impl Transcript {
                 id,
                 label: label.into(),
                 text: String::new(),
+                attachments: vec![],
+                request: None,
+                update_id: None,
+                tool: None,
             });
             self.rows.len() - 1
         });
@@ -133,7 +154,13 @@ impl Transcript {
             "scheduled_event" => self.put(format!("event-{seq}"),"Schedule",display(data),false),
             "context_boundary" => self.put(format!("event-{seq}"),"Context",format!("Policy: {} · {} of {} source entries selected · {} observation bodies masked. Original history remains retained.",data["settings"]["mode"].as_str().unwrap_or("unknown"),data["selected"].as_array().map_or(0,Vec::len),data["source_count"],data["masked"].as_array().map_or(0,Vec::len)),false),
             "inference_frame" if data["event"]["type"]=="response_headers" && data["event"]["status"].as_u64().is_some_and(|s|s>=400) => self.put(format!("event-{seq}"),"Incident",format!("Inference provider response: HTTP {}\nGeneration: {}",data["event"]["status"],data["event"]["generation_id"].as_str().unwrap_or("not supplied")),false),
-            "user_message" => self.put(format!("event-{seq}"), "You", text("text"), false),
+            "user_message" => {
+                let id = format!("event-{seq}");
+                self.put(id.clone(), "You", text("text"), false);
+                let row = &mut self.rows[self.positions[&id]];
+                row.attachments = crate::attachments::FileRef::parse(&data["attachments"]);
+                row.update_id = data["update_id"].as_str().map(str::to_owned);
+            },
             "assistant_delta" | "reasoning_delta" | "assistant_message" => self.put(
                 text("id"),
                 if kind == "reasoning_delta" {
@@ -144,24 +171,21 @@ impl Transcript {
                 text("text"),
                 kind != "assistant_message",
             ),
-            "tool_started" => self.put(
-                format!("event-{seq}"),
-                "Tool",
-                format!("{}\n{}", text("tool"), display(&data["arguments"])),
-                false,
-            ),
-            "tool_output" => self.put(
-                format!("tool-{}", text("call_id")),
-                "Tool output",
-                text("text"),
-                true,
-            ),
-            "tool_result" => self.put(
-                format!("event-{seq}"),
-                "Tool result",
-                display(&data["result"]),
-                false,
-            ),
+            "tool_started" | "tool_output" | "tool_result" | "resident_tool_result" => {
+                let call = text("call_id");
+                let id = if call.is_empty() {format!("event-{seq}")} else {format!("tool-{call}")};
+                if kind == "tool_started" || !self.positions.contains_key(&id) {
+                    let name = text("tool");
+                    self.put(id.clone(),"Tool",format!("{name}\n{}",display(&data["arguments"])),false);
+                }
+                let details = self.rows[self.positions[&id]].tool.get_or_insert_with(ToolDetail::default);
+                if kind == "tool_output" {
+                    details.output.push_str(&text("text"));
+                } else if matches!(kind,"tool_result" | "resident_tool_result") {
+                    details.result = Some(display(&data["result"]));
+                    details.failed = data["success"] == false || data["result"]["exit_code"].as_i64().is_some_and(|n|n!=0);
+                }
+            }
             "control" if data["type"] == "steer" => self.put(
                 format!("event-{seq}"),
                 "You · steering",
@@ -171,7 +195,9 @@ impl Transcript {
             "backend" => {
                 let method = data["method"].as_str().unwrap_or("");
                 let p = &data["params"];
-                if method == "item/started" || method == "item/completed" {
+                if method == "item/tool/call" && let Some(call) = p["callId"].as_str() {
+                    self.put(format!("tool-{call}"),"Tool",format!("{}\n{}",display(&p["tool"]),display(&p["arguments"])),false);
+                } else if method == "item/started" || method == "item/completed" {
                     let item = &p["item"];
                     let ty = item["type"].as_str().unwrap_or("Activity");
                     if ty != "userMessage" {
@@ -195,7 +221,15 @@ impl Transcript {
                             _ => display(item),
                         };
                         if !body.is_empty() || method == "item/completed" {
-                            self.put(item["id"].as_str().unwrap_or(ty).into(), label, body, false)
+                            let id = item["id"].as_str().unwrap_or(ty).to_owned();
+                            self.put(id.clone(),label,body,false);
+                            if ty == "commandExecution" && method == "item/completed" {
+                                self.rows[self.positions[&id]].tool = Some(ToolDetail {
+                                    result:item["exitCode"].as_i64().map(|n| format!("Exit code {n}")),
+                                    failed:matches!(item["status"].as_str(),Some("failed"|"declined")) || item["exitCode"].as_i64().is_some_and(|n|n!=0),
+                                    ..Default::default()
+                                });
+                            }
                         }
                     }
                 } else if method.ends_with("Delta") || method.ends_with("/delta") {
@@ -212,18 +246,28 @@ impl Transcript {
                         p["delta"].as_str().unwrap_or("").into(),
                         true,
                     );
-                } else if !data["id"].is_null() {
+                } else if !data["id"].is_null() && (method.contains("requestApproval") || method.contains("requestUserInput")) {
                     self.put(
                         format!("event-{seq}"),
                         "Backend input requested",
                         display(data),
                         false,
                     );
+                    self.rows[self.positions[&format!("event-{seq}")]].request = Some(data.clone());
                 } else if matches!(method, "turn/plan/updated" | "turn/diff/updated" | "error") {
                     self.put(format!("event-{seq}"), method, display(p), false);
                 }
             }
-            "status" => self.put(
+            "request_answered" => {
+                for row in &mut self.rows {
+                    if row.request.as_ref().is_some_and(|r|r["id"] == data["request_id"]) {
+                        row.request = None;
+                        row.label = "Backend input answered".into();
+                    }
+                }
+            }
+            "control" => self.put(format!("event-{seq}"),"Control",display(data),false),
+            "status" if data["status"] != "completed" => self.put(
                 format!("event-{seq}"),
                 "Status",
                 if text("detail").is_empty() || text("detail") == "null" {
@@ -233,8 +277,13 @@ impl Transcript {
                 },
                 false,
             ),
-            "control_error"
-            | "tool_outcome_unknown"
+            "control_error" => {
+                if let Some(id) = data["update"]["update_id"].as_str() {
+                    self.rejected_updates.insert(id.into());
+                }
+                self.put(format!("event-{seq}"), "Incident", display(data), false);
+            }
+            "tool_outcome_unknown"
             | "recovery_notice"
             | "backend_session_rebuilt"
             | "context_summary_failed"

@@ -318,6 +318,22 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
     );
     let outcome = (|| -> Result<Value> {
         match request["op"].as_str().unwrap_or("") {
+            "attachment" => {
+                let result = jobs.attachments.operation(request);
+                logging::record(
+                    if result.is_ok() {
+                        Level::Debug
+                    } else {
+                        Level::Warn
+                    },
+                    Target::State,
+                    "attachment.operation",
+                    Context::peer(owner),
+                    || json!({"action":request["action"],"digest":request["file"]["digest"],"offset":request["offset"],"complete":result.as_ref().ok().and_then(|v| v["complete"].as_bool())}),
+                    || Value::Null,
+                );
+                result
+            }
             "log_status" => Ok(logging::global()?.status()),
             "log_off" => {
                 logging::global()?.off();
@@ -469,9 +485,17 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
             )?),
             "control" => {
                 let run = jobs.get(owner, request["id"].as_str().ok_or("run id required")?)?;
-                run.control(serde_json::from_value::<Control>(
-                    request["action"].clone(),
-                )?)?;
+                let mut action: Control = serde_json::from_value(request["action"].clone())?;
+                if let Control::Steer {
+                    attachments,
+                    file_context,
+                    ..
+                } = &mut action
+                {
+                    jobs.attachments.require(attachments)?;
+                    *file_context = jobs.attachments.context(attachments);
+                }
+                run.control(action)?;
                 Ok(json!({"accepted":true}))
             }
             _ => Err("unknown peer operation".into()),
@@ -623,6 +647,7 @@ fn handle_inner(
                     if machine == state.public_key() && message.owner == *machine => {}
                 _ => return Err("network mail recipient is not local".into()),
             }
+            jobs.attachments.require(&message.attachments)?;
             let accepted = jobs.mailboxes.accept_network(&remote, message)?;
             jobs.notify();
             session.send(&json!({"id":accepted.id,"status":"accepted","accepted_on":state.public_key(),"sequence":accepted.seq}))?;

@@ -52,6 +52,7 @@ struct Rpc {
     next_id: u64,
     replies: HashMap<u64, Value>,
     awaiting: HashSet<u64>,
+    steering: HashMap<u64, Value>,
     pending: HashSet<String>,
     thread: Option<String>,
     turn: Option<String>,
@@ -176,21 +177,32 @@ impl Rpc {
                     self.run
                         .append("control", json!({"type":"cancel_requested"}))?;
                 }
-                Control::Steer { text } => {
-                    if text.is_empty() || text.len() > 256 * 1024 {
-                        return Err("invalid steering text".into());
-                    }
+                Control::Steer {
+                    text,
+                    attachments,
+                    file_context,
+                    update_id,
+                } => {
                     if let (Some(thread), Some(turn)) = (&self.thread, &self.turn) {
-                        let params = json!({"threadId":thread,"expectedTurnId":turn,"input":[{"type":"text","text":text}]});
+                        let mut input = Vec::new();
+                        if !text.is_empty() {
+                            input.push(json!({"type":"text","text":text}));
+                        }
+                        if !file_context.is_empty() {
+                            input.push(json!({"type":"text","text":file_context}));
+                        }
+                        let params = json!({"threadId":thread,"expectedTurnId":turn,"input":input});
                         let id = self.send("turn/steer", params)?;
+                        let message = json!({"text":text,"attachments":attachments,"steering":true,"update_id":update_id});
                         self.run.append(
                             "control",
-                            json!({"type":"steer_requested","request_id":id,"text":text}),
+                            json!({"type":"steer_requested","request_id":id,"message":message}),
                         )?;
+                        self.steering.insert(id, message);
                     } else {
                         self.run.append(
                             "control_error",
-                            json!({"message":"Steering becomes available after the turn starts"}),
+                            json!({"message":"Steering becomes available after the turn starts","update":{"update_id":update_id}}),
                         )?;
                     }
                 }
@@ -243,6 +255,12 @@ impl Rpc {
             if let Some(id) = message["id"].as_u64() {
                 if self.awaiting.remove(&id) {
                     self.replies.insert(id, message);
+                } else if let Some(update) = self.steering.remove(&id) {
+                    if message.get("error").is_some() {
+                        self.run.append("control_error", json!({"request_id":id,"message":"Codex rejected the update","update":update,"error":message["error"]}))?;
+                    } else {
+                        self.run.append("user_message", update)?;
+                    }
                 } else {
                     self.run.append("rpc_response", message)?;
                 }
@@ -401,7 +419,7 @@ pub fn execute(
         } else {
             "user_message"
         },
-        json!({"text":spec.prompt}),
+        json!({"text":spec.prompt,"attachments":spec.attachments}),
     )?;
     let bridge = if promoted {
         Some(crate::resident_bridge::Bridge::start(
@@ -457,6 +475,7 @@ pub fn execute(
         next_id: 1,
         replies: HashMap::new(),
         awaiting: HashSet::new(),
+        steering: HashMap::new(),
         pending: HashSet::new(),
         thread: None,
         turn: None,
@@ -632,9 +651,14 @@ pub fn execute(
         return Ok(());
     }
     run.status("running", "Starting Codex turn")?;
+    let mut input = Vec::new();
+    if !spec.prompt.is_empty() {
+        input.push(json!({"type":"text","text":spec.prompt}));
+    }
+    input.push(json!({"type":"text","text":format!("Boxen provides the following current-run metadata independently of the request author. {}{}",trigger_context,rpc.jobs.attachments.context(&spec.attachments))}));
     let response = rpc.request(
         "turn/start",
-        json!({"threadId":thread,"input":[{"type":"text","text":spec.prompt},{"type":"text","text":format!("Boxen provides the following current-run metadata independently of the request author. {}",trigger_context)}],"summary":"auto"}),
+        json!({"threadId":thread,"input":input,"summary":"auto"}),
     )?;
     rpc.turn = response["turn"]["id"].as_str().map(str::to_owned);
     if !rpc.finished {

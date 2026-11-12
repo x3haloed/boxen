@@ -268,11 +268,12 @@ Single-clicking a resident or an expanded class instance opens a conversation
 preview titled with that agent's name; double-clicking pins it. The conversation
 is a chronological projection of mail between the human client and that instance,
 with sent messages on the right, received messages on the left and a simple message
-composer. Older mail subjects remain visible; new chat messages use a generic
-conversation subject. No private activity is presented as delivered correspondence.
-The Activity button beside a resident's name appears while its row is hovered and
-opens the separate **Activity** preview. Opening either view does not activate the
-resident. Drafting pins a conversation, and exact uncertain sends retain the same
+composer. Subjects remain available in the separate Mail editor; chat bubbles
+omit them and new chat messages use a generic conversation subject. No private
+activity is presented as delivered correspondence. The Activity shortcut beside
+a resident's name opens the same conversation tab in Activity. Opening either
+view does not activate the resident. Drafting pins a conversation, and exact
+uncertain sends retain the same
 explicit retry behavior as other mail editors. Sent history is read through the
 existing paginated resident inbox API only for open conversations, filtered to this
 network's stable human-client sender identities. Each host's stable human inbox
@@ -284,11 +285,11 @@ addresses and journals remain authoritative; the desktop combines their views.
 These reads work with network-capable daemons without a daemon upgrade.
 Existing Mail panels and drafts remain accessible.
 
-Activity, ordinary threads
-and mail share one preview across docking groups, floating surfaces
-and machines. Dragging an activity tab or choosing **Keep open** pins it. Class
-headers continue to expand their instances rather than open a combined identity.
-Layout reset and saved-workspace restoration preserve pinned activity tabs.
+Resident conversations, ordinary threads and Mail share one preview across docking
+groups, floating surfaces and machines. Dragging a conversation tab or choosing
+**Keep open** pins it. Class headers continue to expand their instances rather
+than open a combined identity. Saved layouts migrate separate resident Activity
+tabs into the corresponding conversations.
 
 Activity observes the resident instance's canonical conversation. Its private
 narration, backend-exposed thinking, tools/results, accepted activation input,
@@ -318,3 +319,41 @@ observation workers retain their finite body leases and cursor-based renewal.
 ## Network discovery and outgoing mail
 
 The existing workspace refreshes daemon membership about every ten seconds and uses daemon-retained member endpoints. New members appear without rebuilding GUI state; removed or changed destinations detach their existing observers. Fresh mail submissions use the local daemon's durable network outbox. Existing receipt text distinguishes saved/queued mail from destination mailbox acceptance; background receipt checks do not clear newer drafts or resubmit messages. Network-origin provenance identifies the sender's machine for reply selection. No new panels or controls are added.
+
+## Conversation views and attachments
+
+The Agents and Threads panels retain separate lists. Both open a conversation
+with **Messages** and **Activity** in the same tab. The selected view belongs
+to the conversation; a draft belongs to the composer, independently of that
+view. **Show in Activity** moves to the corresponding message. Scrolling away
+from the end stops following new items; **Jump to latest** resumes following.
+
+Messages uses left and right placement for authorship. Resident Messages
+contains explicit mailbox correspondence; Activity places those same messages
+alongside private activations and narration. Anonymous Messages contains user
+requests, accepted updates, and assistant text. Activity adds ordered runtime
+events. Tool output and results stay with their call, while failed calls and
+pending input remain visible without opening routine activity. There is no
+standing success banner.
+
+Enter sends from the focused composer; Shift+Enter adds a line. A resident
+message can be sent during an activation. Reply explicitly selects an earlier
+message and leaves a removable quote in the draft. A pending resident send
+retains its own exact request while the next draft can be written. Anonymous
+updates stay tied to the intended run; if it ends, a separate action prepares
+the draft for a follow-up. No uncertain update is replayed automatically.
+
+The composer accepts up to eight original files, up to 32 MiB each, through the
+file picker or a drop on the editor. Text is optional with a file. File chips
+open details, a bounded image or text preview, and removal for drafts or
+**Save as** for sent files. **Files** locates the message that carried a file.
+The source pathname is not retained in the message. Drafts and exact retries
+use the staged bytes, even if the file at the source pathname changes.
+
+The daemon checks retained originals before accepting an anonymous request or
+a network mailbox envelope. An offline resident's mail can queue on the source
+machine; the destination receives and checks the bytes before accepting that
+mail. Codex and the built-in runtime receive filenames, sizes, and paths on the
+executing host. A model only receives the contents through an explicit file read;
+Boxen does not automatically inject text, pixels, or archive contents. See
+[the attachment protocol](attachments.md).

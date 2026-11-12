@@ -148,7 +148,11 @@ fn self_command() -> Result<Command> {
     command.arg("inference-worker");
     Ok(command)
 }
-fn controls(run: &Run, rx: &mpsc::Receiver<Control>, pending: &mut Vec<String>) -> Result<bool> {
+fn controls(
+    run: &Run,
+    rx: &mpsc::Receiver<Control>,
+    pending: &mut Vec<(Value, String)>,
+) -> Result<bool> {
     let mut cancelled = false;
     while let Ok(control) = rx.try_recv() {
         match control {
@@ -156,15 +160,28 @@ fn controls(run: &Run, rx: &mpsc::Receiver<Control>, pending: &mut Vec<String>) 
                 run.append("control", json!({"type":"cancel_requested"}))?;
                 cancelled = true;
             }
-            Control::Steer { text } => {
-                if pending.iter().map(String::len).sum::<usize>() + text.len() > 256 * 1024 {
+            Control::Steer {
+                text,
+                attachments,
+                file_context,
+                update_id,
+            } => {
+                if pending
+                    .iter()
+                    .map(|(_, content)| content.len())
+                    .sum::<usize>()
+                    + text.len()
+                    + file_context.len()
+                    > 384 * 1024
+                {
                     run.append(
                         "control_error",
-                        json!({"message":"pending steering exceeds 256 KiB"}),
+                        json!({"message":"pending steering exceeds its input budget","update":{"update_id":update_id}}),
                     )?;
                 } else {
-                    run.append("control", json!({"type":"steer_queued","text":text}))?;
-                    pending.push(text);
+                    let message = json!({"text":text,"attachments":attachments,"steering":true,"update_id":update_id});
+                    run.append("control", json!({"type":"steer_queued","message":message}))?;
+                    pending.push((message, format!("{text}{file_context}")));
                 }
             }
             Control::Respond { .. } => {
@@ -177,8 +194,13 @@ fn controls(run: &Run, rx: &mpsc::Receiver<Control>, pending: &mut Vec<String>) 
     }
     Ok(cancelled)
 }
-fn apply_steering(run: &Run, pending: &mut Vec<String>, messages: &mut Vec<Value>) -> Result<()> {
-    for text in pending.drain(..) {
+fn apply_steering(
+    run: &Run,
+    pending: &mut Vec<(Value, String)>,
+    messages: &mut Vec<Value>,
+) -> Result<()> {
+    for (update, text) in pending.drain(..) {
+        run.append("user_message", update)?;
         let message = json!({"role":"user","content":text});
         run.append("inference_message", message.clone())?;
         messages.push(message);
@@ -191,7 +213,7 @@ fn exchange(
     body: &Value,
     step: usize,
     rx: &mpsc::Receiver<Control>,
-    pending: &mut Vec<String>,
+    pending: &mut Vec<(Value, String)>,
     purpose: &str,
 ) -> Result<Option<Value>> {
     let payload = serde_json::to_vec(&json!({"config":config,"body":body}))?;
@@ -341,7 +363,7 @@ fn shell(
     call_id: &str,
     args: Value,
     rx: &mpsc::Receiver<Control>,
-    pending: &mut Vec<String>,
+    pending: &mut Vec<(Value, String)>,
 ) -> Result<Option<Value>> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -570,7 +592,7 @@ pub fn execute(
         } else {
             "user_message"
         },
-        json!({"text":spec.prompt}),
+        json!({"text":spec.prompt,"attachments":spec.attachments}),
     )?;
     if let Some(r) = &resident {
         run.append("resident_context",json!({"resident_id":r.id,"revision":r.revision,"machine_id":r.machine_id,"used_bytes":r.used_bytes(),"quota_bytes":r.quota_bytes}))?;
@@ -601,7 +623,7 @@ pub fn execute(
     if let Some(recovery) = &record.recovery {
         system.push_str(&format!("\nRecovery incident: {recovery}"));
     }
-    let input = json!({"role":"user","content":format!("{}{}",spec.prompt,observation_context)});
+    let input = json!({"role":"user","content":format!("{}{}{}",spec.prompt,observation_context,jobs.attachments.context(&spec.attachments))});
     run.append("inference_message", input.clone())?;
 
     let mut tools = vec![

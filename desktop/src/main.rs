@@ -1,10 +1,13 @@
 mod activity;
 mod agents;
+mod attachments;
 mod client;
+mod conversation;
 mod correspondence;
 mod field;
 mod menu;
 mod model;
+mod thread_view;
 mod work;
 mod workspace;
 use client::{Bus, Client, Pending, Update, run_key};
@@ -32,6 +35,12 @@ struct Saved {
     selected: usize,
     hidden_machines: HashSet<String>,
     drafts: Vec<(ThreadKey, String)>,
+    new_thread_text: String,
+    new_thread_files: Vec<attachments::FileRef>,
+    thread_files: Vec<(ThreadKey, Vec<attachments::FileRef>)>,
+    activity_views: HashSet<ThreadKey>,
+    draft_runs: Vec<(ThreadKey, String)>,
+    steering: Vec<thread_view::Steering>,
     pending: Vec<Pending>,
     mail: correspondence::SavedMail,
     correspondence_added: bool,
@@ -49,6 +58,12 @@ struct Observing {
 #[derive(Default)]
 struct Data {
     work: work::State,
+    views: HashMap<ThreadKey, conversation::View>,
+    preparing: HashMap<attachments::Target, attachments::Preparation>,
+    file_previews: HashMap<String, Option<Result<attachments::Preview, String>>>,
+    thread_issues: HashMap<ThreadKey, String>,
+    active_steering: HashSet<ThreadKey>,
+    preparing_followups: HashMap<String, ThreadKey>,
     local_key: String,
     mail: correspondence::Mailbox,
     agents: agents::State,
@@ -65,6 +80,8 @@ struct Data {
 }
 enum Action {
     Work(work::Action),
+    File(attachments::FileAction),
+    Respond(ThreadKey, String, Value, Value),
     OpenActivity(ThreadKey, bool),
     OpenChat(ThreadKey, bool),
     Mail(correspondence::MailAction),
@@ -95,7 +112,6 @@ struct Desktop {
     cwd: String,
     backend: String,
     model: String,
-    prompt: String,
     last_save: Instant,
     next_watch: u64,
     next_discovery: Instant,
@@ -148,6 +164,9 @@ impl Desktop {
             saved.workspace.show_work();
             saved.work_added = true;
         }
+        saved
+            .workspace
+            .merge_resident_views(&mut saved.activity_views);
         let bus = Bus::new(cc.egui_ctx.clone());
         let mut app = Self {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -160,19 +179,8 @@ impl Desktop {
             },
             data: Data {
                 work: work::State::new(&home, &origin),
-                local_key: String::new(),
-                mail: Default::default(),
-                agents: Default::default(),
-                activity: Default::default(),
                 saved,
-                catalogs: HashMap::new(),
-                errors: HashMap::new(),
-                transcripts: HashMap::new(),
-                watches: HashMap::new(),
-                selected_thread: None,
-                filter: String::new(),
-                notice: String::new(),
-                sending: HashSet::new(),
+                ..Default::default()
             },
             client: None,
             bus,
@@ -190,7 +198,6 @@ impl Desktop {
             cwd: String::new(),
             backend: "codex".into(),
             model: String::new(),
-            prompt: String::new(),
             last_save: Instant::now(),
             next_watch: 0,
             next_discovery: Instant::now() + Duration::from_secs(10),
@@ -458,6 +465,7 @@ impl Desktop {
                             w.retry = Instant::now() + Duration::from_secs(2);
                         }
                     }
+                    self.reconcile_steering(&id);
                     if let Some(s) = batch.get("snapshot") {
                         self.replace_snapshot(id.split(':').next().unwrap_or(""), s.clone());
                     }
@@ -471,45 +479,24 @@ impl Desktop {
                     }
                 }
                 Update::Followup(previous, result) => {
-                    self.data.sending.remove(&previous);
+                    let key = self.data.preparing_followups.remove(&previous);
                     match result {
                         Ok(pending) => self.submit(pending),
                         Err(error) => {
-                            self.data.notice = format!("Could not prepare follow-up: {error}")
+                            if let Some(key) = key {
+                                self.data
+                                    .thread_issues
+                                    .insert(key, format!("Could not prepare follow-up: {error}"));
+                            }
                         }
                     }
                 }
-                Update::Controlled(id, dest, text, result) => {
+                Update::Files(update) => self.file_update(update),
+                Update::Steered(key, result, sent) => self.steered(key, result, sent),
+                Update::Controlled(id, _dest, _text, result) => {
                     self.data.sending.remove(&id);
-                    match result {
-                        Ok(_) => {
-                            if !text.is_empty()
-                                && let Some(thread) = self
-                                    .data
-                                    .catalogs
-                                    .get(&dest.key)
-                                    .into_iter()
-                                    .flatten()
-                                    .find(|t| {
-                                        t.runs.iter().any(|r| r["record"]["spec"]["id"] == id)
-                                    })
-                                && let Some((_, draft)) = self
-                                    .data
-                                    .saved
-                                    .drafts
-                                    .iter_mut()
-                                    .find(|(k, d)| k == &thread.key && d.trim() == text)
-                            {
-                                draft.clear();
-                            }
-                            self.data.notice =
-                                "Control accepted; runtime outcome appears in the stream.".into();
-                        }
-                        Err(error) => {
-                            self.data.notice = format!(
-                                "Control outcome uncertain: {error}. The draft is retained; this action has not been automatically repeated."
-                            )
-                        }
+                    if let Err(error) = result {
+                        self.data.notice = format!("Control outcome uncertain: {error}");
                     }
                 }
                 Update::Submitted(id, result) => {
@@ -528,14 +515,12 @@ impl Desktop {
                                     peer: p.destination.key.clone(),
                                     id: p.spec["thread_id"].as_str().unwrap_or("").into(),
                                 };
-                                if let Some(draft) =
-                                    self.data.saved.drafts.iter_mut().find(|(k, d)| {
-                                        k == &key
-                                            && d.trim() == p.spec["prompt"].as_str().unwrap_or("")
-                                    })
-                                {
-                                    draft.1.clear()
-                                }
+                                self.clear_submitted_draft(
+                                    &key,
+                                    p.spec["prompt"].as_str().unwrap_or(""),
+                                    &attachments::FileRef::parse(&p.spec["attachments"]),
+                                );
+                                self.data.thread_issues.remove(&key);
                                 let list = self.data.catalogs.entry(key.peer.clone()).or_default();
                                 if let Some(t) = list.iter_mut().find(|t| t.key == key) {
                                     if !t.runs.iter().any(|r| r["record"]["spec"]["id"] == id) {
@@ -557,16 +542,18 @@ impl Desktop {
                                     );
                                 }
                                 self.persist();
-                            } else {
-                                self.data.notice =
-                                    "Control accepted; runtime outcome appears in the stream."
-                                        .into();
                             }
                         }
                         Err(error) => {
-                            self.data.notice = format!(
-                                "Request outcome: {error}. A retained pending submission can be retried with the same ID; control actions are not automatically repeated."
-                            )
+                            if let Some(p) =
+                                self.data.saved.pending.iter().find(|p| p.spec["id"] == id)
+                            {
+                                let key = ThreadKey {
+                                    peer: p.destination.key.clone(),
+                                    id: p.spec["thread_id"].as_str().unwrap_or("").into(),
+                                };
+                                self.data.thread_issues.insert(key, error);
+                            }
                         }
                     }
                 }
@@ -578,19 +565,42 @@ impl Desktop {
             peer: p.destination.key.clone(),
             id: p.spec["thread_id"].as_str().unwrap_or("").into(),
         };
-        if let Some((_, draft)) = self
-            .data
-            .saved
-            .drafts
-            .iter_mut()
-            .find(|(k, d)| k == &key && d.trim() == p.spec["prompt"].as_str().unwrap_or(""))
-        {
-            draft.clear();
-        }
+        self.clear_submitted_draft(
+            &key,
+            p.spec["prompt"].as_str().unwrap_or(""),
+            &attachments::FileRef::parse(&p.spec["attachments"]),
+        );
+        self.data.thread_issues.remove(&key);
         self.data
             .saved
             .pending
             .retain(|v| v.destination.key != p.destination.key || v.spec["id"] != p.spec["id"]);
+    }
+    fn clear_submitted_draft(
+        &mut self,
+        key: &ThreadKey,
+        text: &str,
+        files: &[attachments::FileRef],
+    ) {
+        let draft = self
+            .data
+            .saved
+            .drafts
+            .iter()
+            .find(|(k, _)| k == key)
+            .map_or("", |(_, d)| d.as_str());
+        let attached = self
+            .data
+            .saved
+            .thread_files
+            .iter()
+            .find(|(k, _)| k == key)
+            .map_or(&[][..], |(_, f)| f.as_slice());
+        if draft == text && attached == files {
+            self.data.saved.drafts.retain(|(k, _)| k != key);
+            self.data.saved.thread_files.retain(|(k, _)| k != key);
+            self.data.saved.draft_runs.retain(|(k, _)| k != key);
+        }
     }
     fn replace_snapshot(&mut self, peer: &str, snapshot: Value) {
         if let Some(threads) = self.data.catalogs.get_mut(peer) {
@@ -620,7 +630,9 @@ impl Desktop {
                         }
                     }
                 }
-                Pane::Activity(key) => {
+                Pane::Chat(key) | Pane::Activity(key)
+                    if self.data.saved.activity_views.contains(key) =>
+                {
                     for run in activity::runs(&self.data, key) {
                         selected.push((key.clone(), run));
                     }
@@ -708,60 +720,6 @@ impl Desktop {
             }
         });
     }
-    fn send(&mut self, key: ThreadKey) {
-        let Some(thread) = find_thread(&self.data, &key) else {
-            return;
-        };
-        let Some(last) = thread.runs.last().cloned() else {
-            return;
-        };
-        let text = self
-            .data
-            .saved
-            .drafts
-            .iter()
-            .find(|(k, _)| k == &key)
-            .map(|(_, d)| d.trim().to_owned())
-            .unwrap_or_default();
-        if text.is_empty() {
-            return;
-        }
-        let Some(dest) = self
-            .data
-            .saved
-            .destinations
-            .iter()
-            .find(|d| d.key == key.peer)
-            .cloned()
-        else {
-            return;
-        };
-        if !terminal(&last) {
-            let id = last["record"]["spec"]["id"]
-                .as_str()
-                .unwrap_or("")
-                .to_owned();
-            if self.data.sending.insert(id.clone())
-                && let Some(client) = &self.client
-            {
-                client.control(
-                    dest,
-                    id,
-                    json!({"type":"steer","text":text}),
-                    self.bus.publisher(),
-                );
-
-                self.data.notice =
-                    "Steering submitted once; an uncertain response is not automatically retried."
-                        .into();
-            }
-        } else if let Some(previous) = last["record"]["spec"]["id"].as_str()
-            && let Some(client) = &self.client
-            && self.data.sending.insert(previous.to_owned())
-        {
-            client.followup(dest, previous.into(), new_id(), text, self.bus.publisher());
-        }
-    }
     fn submit(&mut self, pending: Pending) {
         let id = pending.spec["id"].as_str().unwrap_or("").to_owned();
         if self.data.sending.contains(&id) {
@@ -796,14 +754,24 @@ impl Desktop {
                     self.persist();
                 }
             },
+            Action::File(action) => self.file_action(action),
+            Action::Respond(key, id, request_id, result) => {
+                if let Some(client) = &self.client {
+                    client.control(
+                        conversation::destination(&self.data, &key.peer),
+                        id,
+                        json!({"type":"respond","request_id":request_id,"result":result}),
+                        self.bus.publisher(),
+                    );
+                }
+            }
             Action::OpenChat(key, pin) => {
                 self.data.saved.workspace.open_editor(Pane::Chat(key), pin)
             }
-            Action::OpenActivity(key, pin) => self
-                .data
-                .saved
-                .workspace
-                .open_editor(Pane::Activity(key), pin),
+            Action::OpenActivity(key, pin) => {
+                conversation::switch(&mut self.data, &key, true, None);
+                self.data.saved.workspace.open_editor(Pane::Chat(key), pin);
+            }
             Action::Mail(a) => self.mail_action(a),
             Action::Split(pane, direction) => {
                 if let Some(path) = self.data.saved.workspace.dock.find_tab(&pane) {
@@ -1185,7 +1153,7 @@ impl TabViewer for Viewer<'_> {
                 }
             }
             Pane::Chat(key) => correspondence::chat(ui, self.data, key, self.actions),
-            Pane::Activity(key) => activity::panel(ui, self.data, key),
+            Pane::Activity(key) => correspondence::chat(ui, self.data, key, self.actions),
             Pane::Correspondence => correspondence::inbox(ui, self.data, self.actions),
             Pane::Message(_) | Pane::Compose(_) => {
                 egui::ScrollArea::vertical()
@@ -1322,185 +1290,7 @@ impl TabViewer for Viewer<'_> {
                         }
                     });
             }
-            Pane::Thread(key) => {
-                let Some(thread) = find_thread(self.data, key) else {
-                    ui.label("Waiting for this machine’s thread catalog…");
-                    if let Some((index, pending)) =
-                        self.data.saved.pending.iter().enumerate().find(|(_, p)| {
-                            p.destination.key == key.peer && p.spec["thread_id"] == key.id
-                        })
-                    {
-                        ui.label(pending.spec["prompt"].as_str().unwrap_or(""));
-                        ui.label("Submission retained; acceptance may be unknown.");
-                        if ui
-                            .add_enabled(
-                                !self
-                                    .data
-                                    .sending
-                                    .contains(pending.spec["id"].as_str().unwrap_or("")),
-                                egui::Button::new("Retry same request"),
-                            )
-                            .clicked()
-                        {
-                            self.actions.push(Action::Retry(index));
-                        }
-                    }
-                    return;
-                };
-                let runs = thread.runs.clone();
-                let last = runs.last();
-                let status = last.and_then(|r| r["status"].as_str()).unwrap_or("unknown");
-                let busy = last.is_some_and(|r| !terminal(r));
-                let dest = self
-                    .data
-                    .saved
-                    .destinations
-                    .iter()
-                    .find(|d| d.key == key.peer);
-                ui.horizontal_wrapped(|ui| {
-                    ui.weak(dest.map(|d| d.label.as_str()).unwrap_or("Machine"));
-                    ui.weak("/");
-                    ui.weak(status);
-                    if self.data.saved.workspace.preview.as_ref() == Some(key) {
-                        ui.weak("· preview");
-                    }
-                    if busy && ui.small_button("Cancel run").clicked() {
-                        self.actions.push(Action::Cancel(key.clone()));
-                    }
-                });
-                if let Some(error) = self.data.errors.get(&key.peer) {
-                    ui.colored_label(
-                        egui::Color32::LIGHT_RED,
-                        format!("Run catalog unavailable · {error}"),
-                    );
-                }
-                for run in &runs {
-                    let id = run["record"]["spec"]["id"].as_str().unwrap_or("");
-                    if let Some(error) = self
-                        .data
-                        .watches
-                        .get(&run_key(&key.peer, id))
-                        .and_then(|w| w.error.as_ref())
-                    {
-                        ui.colored_label(
-                            egui::Color32::YELLOW,
-                            format!("Reconnecting observation · {error}"),
-                        );
-                    }
-                }
-                ui.separator();
-                // The composer owns its draft per conversation, independent of tab position or preview replacement.
-                let height = (ui.available_height() - 132.).max(40.);
-                egui::ScrollArea::vertical()
-                    .id_salt(("history", &key.peer, &key.id))
-                    .auto_shrink([false, false])
-                    .max_height(height)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        ui.set_min_height(height);
-                        for run in &runs {
-                            let id = run["record"]["spec"]["id"].as_str().unwrap_or("");
-                            if let Some(transcript) =
-                                self.data.transcripts.get(&run_key(&key.peer, id))
-                            {
-                                for row in &transcript.rows {
-                                    ui.push_id((id, &row.id), |ui| {
-                                        if matches!(
-                                            row.label.as_str(),
-                                            "Command" | "Tool" | "Tool result" | "Tool output"
-                                        ) {
-                                            egui::CollapsingHeader::new(&row.label)
-                                                .default_open(true)
-                                                .show(ui, |ui| {
-                                                    ui.add(
-                                                        egui::Label::new(
-                                                            RichText::new(&row.text).monospace(),
-                                                        )
-                                                        .wrap()
-                                                        .selectable(true),
-                                                    );
-                                                });
-                                        } else {
-                                            ui.label(RichText::new(&row.label).small().color(
-                                                if row.label == "You" {
-                                                    egui::Color32::from_rgb(137, 188, 211)
-                                                } else {
-                                                    egui::Color32::GRAY
-                                                },
-                                            ));
-                                            ui.add(
-                                                egui::Label::new(&row.text).wrap().selectable(true),
-                                            );
-                                        }
-                                        ui.add_space(8.);
-                                    });
-                                }
-                            }
-                        }
-                    });
-                ui.separator();
-                let pending = self
-                    .data
-                    .saved
-                    .pending
-                    .iter()
-                    .enumerate()
-                    .find(|(_, p)| p.destination.key == key.peer && p.spec["thread_id"] == key.id)
-                    .map(|(i, _)| i);
-                if let Some(index) = pending {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Submission awaiting acceptance reconciliation.");
-                        if ui.button("Retry same request").clicked() {
-                            self.actions.push(Action::Retry(index));
-                        }
-                    });
-                }
-                let draft_index = match self.data.saved.drafts.iter().position(|(k, _)| k == key) {
-                    Some(i) => i,
-                    None => {
-                        self.data.saved.drafts.push((key.clone(), String::new()));
-                        self.data.saved.drafts.len() - 1
-                    }
-                };
-                let draft = &mut self.data.saved.drafts[draft_index].1;
-                let edit = ui.add(
-                    egui::TextEdit::multiline(draft)
-                        .id_salt(("draft", &key.peer, &key.id))
-                        .hint_text(if busy {
-                            "Message the running thread…"
-                        } else {
-                            "Message…"
-                        })
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY),
-                );
-                if edit.changed() && !draft.is_empty() {
-                    self.actions.push(Action::Pin(key.clone()));
-                }
-                let shortcut = edit.has_focus()
-                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
-                let blocked = pending.is_some()
-                    || draft.trim().is_empty()
-                    || last.is_some_and(|r| {
-                        self.data
-                            .sending
-                            .contains(r["record"]["spec"]["id"].as_str().unwrap_or(""))
-                    });
-                ui.horizontal(|ui| {
-                    if (ui
-                        .add_enabled(
-                            !blocked,
-                            egui::Button::new(if busy { "Send steering" } else { "Send" }),
-                        )
-                        .clicked()
-                        || shortcut)
-                        && !blocked
-                    {
-                        self.actions.push(Action::Send(key.clone()));
-                    }
-                    ui.weak("⌘/Ctrl + Enter");
-                });
-            }
+            Pane::Thread(key) => thread_view::panel(ui, self.data, key, self.actions),
         }
     }
 }
@@ -1558,18 +1348,18 @@ impl eframe::App for Desktop {
         if show_in_window_menu && let Some(command) = menu::in_window(ui, self.ready) {
             self.menu_command(command);
         }
-        egui::Panel::bottom("statusbar").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if self.data.notice.is_empty() {
-                    ui.weak("Daemon owns execution · closing a pane detaches its viewer");
-                } else {
+        // State supplies ordinary success. This strip exists only when there
+        // is a notice the operator can act on or dismiss.
+        if !self.data.notice.is_empty() {
+            egui::Panel::bottom("statusbar").show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(&self.data.notice);
                     if ui.small_button("Dismiss").clicked() {
                         self.data.notice.clear();
                     }
-                }
+                });
             });
-        });
+        }
         let mut actions = vec![];
         // Dock state is temporarily moved out so viewer data and layout never alias.
         let mut dock = std::mem::replace(
@@ -1614,6 +1404,9 @@ impl eframe::App for Desktop {
         if self.new_thread {
             let mut open = true;
             let mut submit = false;
+            let mut prompt = std::mem::take(&mut self.data.saved.new_thread_text);
+            let mut files = std::mem::take(&mut self.data.saved.new_thread_files);
+            let mut file_actions = Vec::new();
             egui::Window::new("New thread")
                 .open(&mut open)
                 .collapsible(false)
@@ -1655,23 +1448,28 @@ impl eframe::App for Desktop {
                             .hint_text("Model (blank uses daemon default)")
                             .desired_width(f32::INFINITY),
                     );
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.prompt)
-                            .hint_text("Message")
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(4),
-                    );
                     ui.small("Execution uses the daemon’s current Full access policy.");
-                    submit = ui
-                        .add_enabled(
-                            !self.cwd.is_empty()
-                                && !self.prompt.trim().is_empty()
-                                && self.client.is_some(),
-                            egui::Button::new("Start thread"),
-                        )
-                        .clicked();
+                    submit = conversation::composer(
+                        ui,
+                        &mut self.data,
+                        conversation::Composer {
+                            text: &mut prompt,
+                            files: &mut files,
+                            target: attachments::Target::NewThread,
+                            label: "Start thread",
+                            limit: 256 * 1024,
+                            blocked: self.cwd.is_empty() || self.client.is_none(),
+                        },
+                        &mut file_actions,
+                    )
+                    .send;
                 });
             self.new_thread = open;
+            self.data.saved.new_thread_text = prompt;
+            self.data.saved.new_thread_files = files;
+            for action in file_actions {
+                self.action(action);
+            }
             if submit
                 && let Some(dest) = self
                     .data
@@ -1685,11 +1483,12 @@ impl eframe::App for Desktop {
                     peer: dest.key.clone(),
                     id: id.clone(),
                 };
-                self.submit(Pending{destination:dest,spec:json!({"id":id,"thread_id":key.id,"backend":self.backend,"cwd":self.cwd,"model":self.model,"prompt":self.prompt})});
+                let prompt = std::mem::take(&mut self.data.saved.new_thread_text);
+                let attachments = std::mem::take(&mut self.data.saved.new_thread_files);
+                self.submit(Pending{destination:dest,spec:json!({"id":id,"thread_id":key.id,"backend":self.backend,"cwd":self.cwd,"model":self.model,"prompt":prompt,"attachments":attachments})});
                 self.data.saved.workspace.open(key.clone(), true);
                 self.data.selected_thread = Some(key);
                 self.new_thread = false;
-                self.prompt.clear();
             }
         }
         self.command_palette(&ctx);

@@ -50,6 +50,9 @@ impl Address {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Send {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::attachments::Attachment>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<Value>,
     pub id: String,
@@ -63,6 +66,9 @@ pub struct Send {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::attachments::Attachment>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,6 +99,7 @@ impl Message {
             && self.reply_to == spec.reply_to.clone().unwrap_or_else(|| sender.clone())
             && self.in_reply_to == spec.in_reply_to
             && self.service == spec.service
+            && self.attachments == spec.attachments
     }
 }
 struct Inner {
@@ -377,7 +384,10 @@ impl Mailboxes {
             return Err("service requests address external connectors and fit 32 KiB".into());
         }
         if spec.body.len() > 32 * 1024
-            || (spec.body.is_empty() && origin.is_none() && spec.service.is_none())
+            || (spec.body.is_empty()
+                && spec.attachments.is_empty()
+                && origin.is_none()
+                && spec.service.is_none())
         {
             return Err("message body acceptance range is 1–32768 bytes".into());
         }
@@ -427,6 +437,7 @@ impl Mailboxes {
             return Err("network pending outbox reached its 256-message bound".into());
         }
         let message = Message {
+            attachments: spec.attachments,
             network: destination
                 .map(|d| json!({"source_machine":self.machine,"destination_machine":d})),
             service: spec.service,
@@ -477,7 +488,7 @@ impl Mailboxes {
         }) || message.accepted_on != remote
             || message.subject.len() > 256
             || message.subject.trim().is_empty()
-            || message.body.is_empty()
+            || (message.body.is_empty() && message.attachments.is_empty())
             || message.body.len() > 32768
             || message.service.is_some()
             || message.origin.is_some()

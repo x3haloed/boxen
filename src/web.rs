@@ -241,7 +241,13 @@ fn handle(
             connection_id: None,
         },
         || json!({"local":local,"op":operation["op"]}),
-        || operation.clone(),
+        || {
+            if operation["op"] == "attachment" {
+                Value::Null
+            } else {
+                operation.clone()
+            }
+        },
     );
     if request == "POST /api/logs HTTP/1.1" {
         let filter = serde_json::from_value::<Filter>(

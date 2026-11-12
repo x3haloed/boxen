@@ -2,6 +2,7 @@
 extern crate cosmo_compat as _;
 
 mod agent_tools;
+mod attachments;
 #[path = "../shared/browser_assignment.rs"]
 mod browser_assignment;
 mod browser_tools;
@@ -506,6 +507,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 return Err("start requires HOST:PORT PUBLIC_KEY CWD MODEL PROMPT".into());
             }
             let spec = jobs::Spec {
+                attachments: vec![],
                 resident_id: None,
                 context,
                 id: id.clone(),

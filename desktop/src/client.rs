@@ -18,6 +18,7 @@ pub struct Client {
     origin: String,
     token: String,
     agent: ureq::Agent,
+    local_key: Arc<std::sync::OnceLock<String>>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Pending {
@@ -26,6 +27,8 @@ pub struct Pending {
 }
 pub enum Update {
     Mail(crate::correspondence::MailUpdate),
+    Files(crate::attachments::FileUpdate),
+    Steered(crate::model::ThreadKey, Result<Value, String>, bool),
     Discovered(Result<Value, String>),
     Catalog(Destination, Result<Vec<Value>, String>),
     Batch(String, u64, Value),
@@ -83,7 +86,9 @@ impl Client {
         Ok(Self {
             origin: origin.trim_end_matches('/').into(),
             token: token.trim().into(),
+            local_key: Default::default(),
             agent: ureq::Agent::config_builder()
+                .http_status_as_error(false)
                 .timeout_global(Some(Duration::from_secs(8)))
                 .build()
                 .into(),
@@ -96,24 +101,46 @@ impl Client {
         });
     }
     pub fn status(&self) -> Result<Value, String> {
-        self.agent
+        let mut response = self
+            .agent
             .get(format!("{}/api/status", self.origin))
             .header("Authorization", format!("Bearer {}", self.token))
             .call()
-            .map_err(safe_error)?
-            .body_mut()
-            .read_json()
-            .map_err(safe_error)
+            .map_err(safe_error)?;
+        if !response.status().is_success() {
+            return Err(format!("Daemon status: {}", response.status()));
+        }
+        let status: Value = response.body_mut().read_json().map_err(safe_error)?;
+        if let Some(id) = status["identity"].as_str() {
+            let _ = self.local_key.set(id.into());
+        }
+        Ok(status)
+    }
+    pub fn local(&self) -> Destination {
+        Destination {
+            key: self.local_key.get().cloned().unwrap_or_default(),
+            address: String::new(),
+            label: "This machine".into(),
+        }
     }
     pub fn operation(&self, dest: &Destination, request: Value) -> Result<Value, String> {
-        self.agent
+        let mut response = self
+            .agent
             .post(format!("{}/api/operation", self.origin))
             .header("Authorization", format!("Bearer {}", self.token))
             .send_json(json!({"peer":dest.key,"address":dest.address,"request":request}))
-            .map_err(safe_error)?
-            .body_mut()
-            .read_json()
-            .map_err(safe_error)
+            .map_err(safe_error)?;
+        if !response.status().is_success() {
+            let code = response.status().as_u16();
+            let detail = response
+                .body_mut()
+                .with_config()
+                .limit(4096)
+                .read_to_string()
+                .unwrap_or_default();
+            return Err(format!("HTTP {code}: {detail}"));
+        }
+        response.body_mut().read_json().map_err(safe_error)
     }
     pub fn catalog(&self, dest: Destination, publisher: Publisher, stop: Arc<AtomicBool>) {
         let client = self.clone();
@@ -172,10 +199,12 @@ impl Client {
         previous: String,
         id: String,
         text: String,
+        files: Vec<crate::attachments::FileRef>,
         publisher: Publisher,
     ) {
         let client = self.clone();
         std::thread::spawn(move || {
+            let tag = run_key(&destination.key, &previous);
             let result = client
                 .operation(&destination, json!({"op":"get","id":previous}))
                 .and_then(|snapshot| {
@@ -185,9 +214,16 @@ impl Client {
                     }
                     spec["id"] = json!(id);
                     spec["prompt"] = json!(text);
+                    if files.is_empty() {
+                        if let Some(spec) = spec.as_object_mut() {
+                            spec.remove("attachments");
+                        }
+                    } else {
+                        spec["attachments"] = json!(files);
+                    }
                     Ok(Pending { destination, spec })
                 });
-            publisher.send(Update::Followup(previous, result));
+            publisher.send(Update::Followup(tag, result));
         });
     }
     pub fn watch(
@@ -276,10 +312,14 @@ impl Client {
         let client = self.clone();
         std::thread::spawn(move || {
             let id = pending.spec["id"].as_str().unwrap_or("").to_owned();
-            let result = client.operation(
-                &pending.destination,
-                json!({"op":"start","spec":pending.spec}),
-            );
+            let result = client
+                .copy_files(&pending.destination, &pending.spec["attachments"])
+                .and_then(|_| {
+                    client.operation(
+                        &pending.destination,
+                        json!({"op":"start","spec":pending.spec}),
+                    )
+                });
             publisher.send(Update::Submitted(id, result));
         });
     }
@@ -471,11 +511,22 @@ mod tests {
         );
         let next = crate::new_id();
         let followup = Bus::new(egui::Context::default());
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use sha2::{Digest, Sha256};
+        let original = b"fixture follow-up attachment";
+        let file = crate::attachments::FileRef {
+            name: "fixture.txt".into(),
+            digest: format!("{:x}", Sha256::digest(original)),
+            size: original.len() as u64,
+        };
+        client.status().unwrap();
+        client.operation(&client.local(),json!({"op":"attachment","action":"write","file":file,"offset":0,"data":STANDARD.encode(original)})).unwrap();
         client.followup(
-            dest,
+            dest.clone(),
             id,
             next.clone(),
             "Follow-up".into(),
+            vec![file.clone()],
             followup.publisher(),
         );
         let pending = match followup.rx.recv_timeout(Duration::from_secs(10)).unwrap() {
@@ -485,9 +536,29 @@ mod tests {
         let mut expected = first["record"]["spec"].clone();
         expected["id"] = json!(next);
         expected["prompt"] = json!("Follow-up");
+        expected["attachments"] = json!([file]);
         assert_eq!(pending.spec, expected);
+        let submitted = Bus::new(egui::Context::default());
+        client.submit(pending, submitted.publisher());
+        match submitted.rx.recv_timeout(Duration::from_secs(20)).unwrap() {
+            Update::Submitted(id, result) => {
+                assert_eq!(id, next);
+                assert_eq!(result.unwrap()["record"]["spec"], expected);
+            }
+            _ => panic!("Follow-up with the original was not accepted"),
+        }
+        let retained = client
+            .operation(
+                &dest,
+                json!({"op":"attachment","action":"read","file":file,"offset":0}),
+            )
+            .unwrap();
+        assert_eq!(
+            STANDARD.decode(retained["data"].as_str().unwrap()).unwrap(),
+            original
+        );
         println!(
-            "Remote native client: thinking, incremental tool output, detached replay, final response, exact-ID retry passed"
+            "Remote native client: thinking, incremental tool output, detached replay, final response, exact-ID retry and attachment follow-up passed"
         );
     }
 }
