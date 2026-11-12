@@ -10,7 +10,7 @@ The transport also carries [remote Codex workloads](workloads.md). There is no N
 
 `cargo build --release` produces a self-contained native binary at `target/release/boxen` on Unix. `bash scripts/build-ape.sh` produces `target/cosmo/release/boxen.com`, using pinned cosmo-build 10.0.0 and cosmo-compat 10.0.0. The APE contains ARM64 and x86-64 code. Do not strip intermediate executables before APE fusion.
 
-The build helper verifies the Cosmopolitan compiler archive's SHA-256. Build-tool caches default to ignored `work/cosmo`; set `COSMO_HOME` to reuse a cache elsewhere. If the default compiler download is unavailable, `COSMO_COSMOCC_URL` can select an official mirror while retaining checksum verification. The verified archive for compiler 4.0.2 is also available from the official Cosmopolitan GitHub release.
+The build script downloads the pinned compiler from the official Cosmopolitan GitHub release. The build helper verifies the archive's SHA-256. Build-tool caches default to ignored `work/cosmo`. Set `COSMO_HOME` to reuse a cache elsewhere or `COSMO_COSMOCC_URL` to select another source for the same verified archive.
 
 On macOS and Linux invoke the APE using `bash boxen.com ...`; do not assume Finder launch or direct kernel execution. Consumers need no Cargo, Rust, Python, or Node installation to run the executable. Python and SSH are used only by development helpers.
 
