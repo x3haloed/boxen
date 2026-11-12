@@ -8,11 +8,12 @@ pub(crate) fn tool() -> Value {
     json!({
         "type":"function",
         "name":"boxen_thread_files",
-        "description":"This tool lists working directories recorded by accepted runs in this anonymous conversation. Pull retrieves a named relative file from a recorded run's machine and returns a local path to retained bytes. The original is read at pull time. An unavailable host, directory, or file returns an error. Retained message attachments have their own original bytes.",
+        "description":"This tool lists working directories recorded by accepted runs in this anonymous conversation. Pull retrieves a named relative file from a recorded run's machine and returns a local path to retained bytes. The original is read at pull time. An unavailable host, directory, or file returns an error. List includes retained request attachments. Attachment takes a run_id and digest and returns a local path to the retained original.",
         "inputSchema":{"type":"object","properties":{
-            "action":{"type":"string","enum":["list","pull"]},
+            "action":{"type":"string","enum":["list","pull","attachment"]},
             "run_id":{"type":"string"},
             "path":{"type":"string"},
+            "digest":{"type":"string"},
             "offset":{"type":"integer","minimum":0}
         },"required":["action"],"additionalProperties":false}
     })
@@ -40,12 +41,13 @@ impl Jobs {
                 {
                     let id = &s.record.spec.id;
                     directories.push(json!({"run_id":id,"machine":self.run_machine(id)?,
-                        "directory":s.record.spec.cwd,"automatic":s.record.automatic_cwd}));
+                        "directory":s.record.spec.cwd,"automatic":s.record.automatic_cwd,"attachments":s.record.spec.attachments}));
                 }
                 let next = offset.saturating_add(directories.len() as u64);
                 Ok(json!({"directories":directories,"next_offset":(next<count).then_some(next)}))
             }
             Some("pull") => self.pull_workspace_file(thread, request),
+            Some("attachment") => self.workspace_attachment(thread, request),
             _ => Err("unknown thread file action".into()),
         };
         logging::record(
@@ -76,6 +78,23 @@ impl Jobs {
             return Err("the source must be a terminal run in this anonymous conversation".into());
         }
         Ok(snapshot)
+    }
+
+    fn workspace_attachment(&self, thread: &str, request: &Value) -> Result<Value> {
+        let id = request["run_id"].as_str().ok_or("source run ID required")?;
+        let run = self.workspace_run(thread, id)?;
+        let digest = request["digest"]
+            .as_str()
+            .ok_or("attachment digest required")?;
+        let file = run
+            .record
+            .spec
+            .attachments
+            .iter()
+            .find(|file| file.digest == digest)
+            .ok_or("this run has no request attachment with that digest")?;
+        Ok(json!({"path":self.attachments.verify(file)?,"file":file,
+            "source":{"machine":self.run_machine(id)?,"run_id":id},"snapshot":"retained_original"}))
     }
 
     pub(crate) fn offer_workspace_file(&self, request: &Value) -> Result<Value> {

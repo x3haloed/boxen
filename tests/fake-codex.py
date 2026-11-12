@@ -104,6 +104,9 @@ def work(prompt):
         response, history = invoke("boxen_thread_files", {"action":"list"}, 100)
         assert response["success"] and len(history["directories"]) == 2
         prior = history["directories"][1]
+        attachment = prior["attachments"][0]
+        response, retained = invoke("boxen_thread_files", {"action":"attachment","run_id":prior["run_id"],"digest":attachment["digest"]}, 102)
+        assert response["success"] and pathlib.Path(retained["path"]).stat().st_size == attachment["size"]
         response, file = invoke("boxen_thread_files", {"action":"pull","run_id":prior["run_id"],"path":"earlier.bin"}, 101)
         assert response["success"], file
         assert pathlib.Path(file["path"]).read_bytes() == b"source changed after its original snapshot"

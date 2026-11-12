@@ -250,7 +250,7 @@ pub struct Record {
 impl Record {
     pub fn execution_context(&self) -> String {
         self.execution_change.as_ref().map_or_else(String::new, |change| {
-            format!("\nBoxen changed this conversation's execution settings between runs. Shell and relative file paths now use the current working directory. Files in an earlier working directory remain at their recorded location. The boxen_thread_files tool, when registered, lists earlier directories and retrieves a named file as it exists at retrieval time. This metadata is supplied by Boxen. {change}")
+            format!("\nBoxen changed this conversation's execution settings between runs. Shell and relative file paths now use the current working directory. Files in an earlier working directory remain at their recorded location. The boxen_thread_files tool, when registered, lists earlier directories and retained request attachments. It retrieves a workspace file as it exists at retrieval time or opens a retained attachment original on the current machine. This metadata is supplied by Boxen. {change}")
         })
     }
 

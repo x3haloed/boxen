@@ -64,11 +64,12 @@ returns the current destination and generation as known to the queried machine.
 The first turn on a new machine uses `after` and opens a new native session
 where needed. Activity preserves the original execution machine for prior runs.
 
-`thread_workspace` takes `thread_id` and `action` (`list` or `pull`). List
-returns recorded machine and directory references with an optional
+`thread_workspace` takes `thread_id` and `action` (`list`, `pull`, or `attachment`). List
+returns recorded machine and directory references and retained request attachments with an optional
 `next_offset`. Pull takes the historical `run_id` and a relative `path` and
 returns the local retained file path and original location. The source uses
-the current file bytes and a paired route. Files remain at their original
+the current file bytes and a paired route. Attachment takes a run ID and digest
+and resolves the retained original on the current machine. Files remain at their original
 locations during a move. New anonymous Codex sessions and the built-in runtime
 can use the same operations through `boxen_thread_files`.
 

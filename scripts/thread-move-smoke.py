@@ -128,6 +128,8 @@ with tempfile.TemporaryDirectory(prefix="boxen-thread-move-") as temp:
         assert base64.b64decode(op(1, op="attachment", action="read", file=file, offset=0)["data"]) == contents
         stop(0)
         assert op(1, op="get", id=thread) == first
+        original = op(1, op="thread_workspace", action="attachment", thread_id=thread, run_id=thread, digest=file["digest"])
+        assert Path(original["path"]).read_bytes() == contents
         rejected(1, "unreachable", op="thread_workspace", action="pull", thread_id=thread, run_id=thread, path="earlier.bin")
         for i in range(2):
             stop(i)

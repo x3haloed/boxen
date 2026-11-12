@@ -207,7 +207,12 @@ impl Desktop {
                     .insert(key, "The move is still pending.".into());
             }
             Err(error) => {
-                if error.contains("Move could not be prepared:")
+                let preflight_rejected = error.contains("Move could not be prepared:")
+                    || error.ends_with(
+                        "a move requires the latest run of an idle anonymous conversation",
+                    )
+                    || error.ends_with("conversation changed before the move could begin");
+                if preflight_rejected
                     && let Some(m) = self.data.saved.moves.iter().find(|m| m.key == key)
                 {
                     let settings = RunSettings {
