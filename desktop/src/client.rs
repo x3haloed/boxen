@@ -31,6 +31,7 @@ pub enum Update {
     Mail(crate::correspondence::MailUpdate),
     Files(crate::attachments::FileUpdate),
     Steered(crate::model::ThreadKey, Result<Value, String>, bool),
+    Moved(crate::model::ThreadKey, Result<Value, String>),
     Discovered(Result<Value, String>),
     Catalog(Destination, Result<Vec<Value>, String>),
     Batch(String, u64, Value),
@@ -215,10 +216,24 @@ impl Client {
                     if spec["id"] != previous || !spec["thread_id"].is_string() {
                         return Err("Invalid follow-up source run".into());
                     }
-                    if let Some(cwd) = settings.cwd {
-                        spec["cwd"] = json!(cwd);
+                    let placement = match client.operation(
+                        &destination,
+                        json!({"op":"thread_placement","thread_id":spec["thread_id"]}),
+                    ) {
+                        Ok(place) => Some(place),
+                        Err(error) if error.ends_with("unknown peer operation") => None,
+                        Err(error) => return Err(error),
+                    };
+                    if let Some(place) = placement
+                        .filter(|p| p["machine"] == destination.key && p["head"] == previous)
+                    {
+                        spec["cwd"] = place["cwd"].clone();
+                        spec["model"] = place["model"].clone();
                     } else if snapshot["record"]["automatic_cwd"] == true {
                         spec["cwd"] = json!("");
+                    }
+                    if let Some(cwd) = settings.cwd {
+                        spec["cwd"] = json!(cwd);
                     }
                     if let Some(model) = settings.model {
                         spec["model"] = json!(model);
@@ -548,6 +563,7 @@ mod tests {
             "WORKSPACE_SETTINGS_FIXTURE".into(),
             vec![file.clone()],
             crate::thread_view::RunSettings {
+                target: None,
                 cwd: Some(cwd.clone()),
                 model: Some(selected_model.into()),
             },

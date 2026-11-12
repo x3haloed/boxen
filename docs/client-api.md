@@ -42,6 +42,36 @@ For catalog refresh, pass each response's `next_after` back as `summary_page.aft
 
 Control acceptance means delivery to the runtime control queue, not confirmed execution of the action. Observe retained control outcomes and the terminal status. Steering and backend responses are not idempotent submissions; do not blindly resend after losing their response. An uncertain earlier run remains `interrupted`; a new message can continue the same thread. The new run records `recovery_notice`, and Boxen passes the uncertainty to the runtime without replaying the earlier work or requiring an acknowledgment ceremony.
 
+## Anonymous conversation moves
+
+Send `thread_move` to the current machine with a new 64-character move `id`, the
+`thread_id`, the latest terminal run ID in `after`, and the target machine key
+in `target`. Supply its `address` or use an empty address to use the source's
+paired endpoint. Optional `cwd` and `model` values replace the current choices.
+An empty `cwd` selects the automatic working area on the destination. If `cwd`
+is omitted, the daemon retains the automatic choice or validates the existing
+explicit path on the destination. The move preserves the conversation ID,
+terminal run journals, retained run artifacts, and message attachments. The
+move accepts up to 1 GiB and 16,384 files of retained run history. Attachments
+use the existing attachment storage limits.
+
+The destination prepares the directory before the source records the outgoing
+move. Once that record exists, the source rejects new turns. An exact retry of
+an already accepted run still returns its snapshot. After verifying staged
+history, the destination records acceptance and exposes the conversation. A
+retry of the same move ID recovers the same acceptance. `thread_placement`
+returns the current destination and generation as known to the queried machine.
+The first turn on a new machine uses `after` and opens a new native session
+where needed. Activity preserves the original execution machine for prior runs.
+
+`thread_workspace` takes `thread_id` and `action` (`list` or `pull`). List
+returns recorded machine and directory references with an optional
+`next_offset`. Pull takes the historical `run_id` and a relative `path` and
+returns the local retained file path and original location. The source uses
+the current file bytes and a paired route. Files remain at their original
+locations during a move. New anonymous Codex sessions and the built-in runtime
+can use the same operations through `boxen_thread_files`.
+
 ## Live observation and recovery
 
 `POST /api/watch` uses the same destination envelope, with `request: {"id":"RUN_ID","after":0}`. The response is newline-delimited JSON:

@@ -78,6 +78,20 @@ impl Workspace {
     pub fn open(&mut self, key: ThreadKey, pin: bool) {
         self.open_editor(Pane::Thread(key), pin);
     }
+    pub fn relocate_thread(&mut self, old: &ThreadKey, new: &ThreadKey) {
+        let old_pane = Pane::Thread(old.clone());
+        if let Some(path) = self.dock.find_tab(&old_pane) {
+            let new_pane = Pane::Thread(new.clone());
+            if self.dock.find_tab(&new_pane).is_some() {
+                self.dock.remove_tab(path);
+            } else {
+                self.dock[path.surface][path.node].tabs_mut().unwrap()[path.tab.0] = new_pane;
+            }
+        }
+        if self.preview.as_ref() == Some(old) {
+            self.preview = Some(new.clone());
+        }
+    }
     pub fn open_message(&mut self, key: ThreadKey, pin: bool) {
         self.open_editor(Pane::Message(key), pin);
     }
@@ -269,6 +283,24 @@ mod tests {
             peer: "p".into(),
             id: id.into(),
         }
+    }
+    #[test]
+    fn moved_thread_keeps_its_docked_preview_slot() {
+        let mut workspace = Workspace::default();
+        let old = key("conversation");
+        let new = ThreadKey {
+            peer: "destination".into(),
+            id: old.id.clone(),
+        };
+        workspace.open(old.clone(), false);
+        let path = workspace.dock.find_tab(&Pane::Thread(old.clone())).unwrap();
+        workspace.relocate_thread(&old, &new);
+        assert!(workspace.dock.find_tab(&Pane::Thread(old)).is_none());
+        assert_eq!(
+            workspace.dock.find_tab(&Pane::Thread(new.clone())),
+            Some(path)
+        );
+        assert!(workspace.is_preview(&Pane::Thread(new)));
     }
     #[test]
     fn chat_preview_is_global_and_drafting_pins_it() {

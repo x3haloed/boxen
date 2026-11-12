@@ -12,8 +12,15 @@ use serde_json::{Value, json};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct RunSettings {
+    pub target: Option<String>,
     pub cwd: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PendingMove {
+    key: ThreadKey,
+    request: Value,
 }
 
 fn settings_for(data: &Data, key: &ThreadKey) -> RunSettings {
@@ -25,7 +32,13 @@ fn settings_for(data: &Data, key: &ThreadKey) -> RunSettings {
         .unwrap_or_default()
 }
 
-fn next_run_settings(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, enabled: bool) {
+fn next_run_settings(
+    ui: &mut egui::Ui,
+    data: &mut Data,
+    key: &ThreadKey,
+    enabled: bool,
+    actions: &mut Vec<Action>,
+) {
     if ui
         .add_enabled(enabled, egui::Button::new("Run settings"))
         .clicked()
@@ -45,6 +58,25 @@ fn next_run_settings(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, enable
     let modal =
         egui::Modal::new(egui::Id::new(("thread-run-settings", key))).show(ui.ctx(), |ui| {
             ui.heading("Run settings");
+            if let Some(issue) = data.thread_issues.get(key) {
+                ui.label(issue);
+            }
+            egui::ComboBox::from_label("Machine")
+                .selected_text(settings.target.as_ref().map_or_else(
+                    || view::destination(data, &key.peer).label,
+                    |peer| view::destination(data, peer).label,
+                ))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut settings.target,
+                        None,
+                        view::destination(data, &key.peer).label,
+                    );
+                    for d in data.saved.destinations.iter().filter(|d| d.key != key.peer) {
+                        ui.selectable_value(&mut settings.target, Some(d.key.clone()), &d.label);
+                    }
+                });
+
             let mut change_directory = settings.cwd.is_some();
             ui.checkbox(&mut change_directory, "Choose a working directory");
             if change_directory {
@@ -68,7 +100,9 @@ fn next_run_settings(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, enable
             ui.horizontal(|ui| (ui.button("Cancel").clicked(), ui.button("Done").clicked()))
                 .inner
         });
-    if modal.inner.1 {
+    if modal.inner.1 && settings.target.is_some() {
+        actions.push(Action::MoveConversation(key.clone(), settings));
+    } else if modal.inner.1 {
         data.saved
             .thread_settings
             .retain(|(target, _)| target != key);
@@ -100,7 +134,204 @@ pub fn capture(data: &mut Data, key: &ThreadKey, run: Option<&str>) {
     }
 }
 impl Desktop {
+    pub fn move_conversation(&mut self, key: ThreadKey, settings: RunSettings) {
+        let Some(target) = settings.target.as_deref() else {
+            return;
+        };
+        let Some(last) = find_thread(&self.data, &key).and_then(|t| t.runs.last()) else {
+            return;
+        };
+        let Some(head) = last["record"]["spec"]["id"].as_str() else {
+            return;
+        };
+        if !terminal(last) || self.data.saved.moves.iter().any(|m| m.key == key) {
+            return;
+        }
+        let dest = view::destination(&self.data, target);
+        let mut request = json!({"op":"thread_move","id":new_id(),"thread_id":key.id,
+            "after":head,"target":dest.key,"address":dest.address});
+        if let Some(cwd) = settings.cwd {
+            request["cwd"] = json!(cwd);
+        }
+        if let Some(model) = settings.model {
+            request["model"] = json!(model);
+        }
+        self.data.saved.moves.push(PendingMove {
+            key: key.clone(),
+            request,
+        });
+        self.retry_move(&key);
+    }
+
+    pub fn retry_move(&mut self, key: &ThreadKey) {
+        if self.data.moving.contains(key) {
+            return;
+        }
+        let Some(m) = self
+            .data
+            .saved
+            .moves
+            .iter()
+            .find(|m| &m.key == key)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if !self.persist() {
+            return;
+        }
+        self.data.moving.insert(key.clone());
+        let destination = view::destination(&self.data, &key.peer);
+        let publisher = self.bus.publisher();
+        std::thread::spawn(move || {
+            let result = client.operation(&destination, m.request);
+            publisher.send(Update::Moved(m.key, result));
+        });
+    }
+
+    pub fn moved(&mut self, key: ThreadKey, result: Result<Value, String>) {
+        self.data.moving.remove(&key);
+        match result {
+            Ok(result) if result["complete"] == true => {
+                if let Some(machine) = result["machine"].as_str() {
+                    self.relocate_view(&key, machine);
+                    self.persist();
+                }
+            }
+            Ok(_) => {
+                self.data
+                    .thread_issues
+                    .insert(key, "The move is still pending.".into());
+            }
+            Err(error) => {
+                if error.contains("Move could not be prepared:")
+                    && let Some(m) = self.data.saved.moves.iter().find(|m| m.key == key)
+                {
+                    let settings = RunSettings {
+                        target: m.request["target"].as_str().map(str::to_owned),
+                        cwd: m.request["cwd"].as_str().map(str::to_owned),
+                        model: m.request["model"].as_str().map(str::to_owned),
+                    };
+                    self.data.saved.moves.retain(|m| m.key != key);
+                    self.data
+                        .saved
+                        .thread_settings
+                        .retain(|(target, _)| target != &key);
+                    self.data.editing_thread_settings = Some((key.clone(), settings));
+                    self.persist();
+                }
+                self.data.thread_issues.insert(key, error);
+            }
+        }
+    }
+
+    pub fn reconcile_placements(&mut self) {
+        let mut accepted = std::collections::HashMap::<String, (u64, String)>::new();
+        for (peer, threads) in &self.data.catalogs {
+            for thread in threads {
+                if let Some(place) = thread.runs.last().map(|run| &run["placement"])
+                    && place["machine"] == *peer
+                    && let Some(generation) = place["generation"].as_u64()
+                    && accepted
+                        .get(&thread.key.id)
+                        .is_none_or(|(old, _)| generation > *old)
+                {
+                    accepted.insert(thread.key.id.clone(), (generation, peer.clone()));
+                }
+            }
+        }
+        let old_keys: Vec<_> = self
+            .data
+            .saved
+            .workspace
+            .dock
+            .iter_all_tabs()
+            .filter_map(|(_, pane)| match pane {
+                crate::model::Pane::Thread(key) => Some(key.clone()),
+                _ => None,
+            })
+            .chain(self.data.saved.drafts.iter().map(|(key, _)| key.clone()))
+            .chain(self.data.saved.moves.iter().map(|m| m.key.clone()))
+            .collect();
+        let mut changed = false;
+        for key in old_keys {
+            if let Some((_, peer)) = accepted.get(&key.id)
+                && peer != &key.peer
+            {
+                self.relocate_view(&key, peer);
+                changed = true;
+            }
+        }
+        for (peer, threads) in &mut self.data.catalogs {
+            threads.retain(|thread| {
+                accepted
+                    .get(&thread.key.id)
+                    .is_none_or(|(_, target)| target == peer)
+            });
+        }
+        if changed {
+            self.persist();
+        }
+    }
+
+    fn relocate_view(&mut self, key: &ThreadKey, machine: &str) {
+        let next = ThreadKey {
+            peer: machine.into(),
+            id: key.id.clone(),
+        };
+        self.data.saved.workspace.relocate_thread(key, &next);
+        if let Some(view) = self.data.views.remove(key) {
+            self.data.views.entry(next.clone()).or_insert(view);
+        }
+        if let Some(thread) = find_thread(&self.data, key) {
+            let runs: Vec<_> = thread
+                .runs
+                .iter()
+                .filter_map(|run| run["record"]["spec"]["id"].as_str().map(str::to_owned))
+                .collect();
+            for run in runs {
+                if let Some(transcript) = self.data.transcripts.remove(&run_key(&key.peer, &run)) {
+                    self.data
+                        .transcripts
+                        .entry(run_key(machine, &run))
+                        .or_insert(transcript);
+                }
+            }
+        }
+        for (draft, _) in &mut self.data.saved.drafts {
+            if draft == key {
+                *draft = next.clone();
+            }
+        }
+        for (draft, _) in &mut self.data.saved.thread_files {
+            if draft == key {
+                *draft = next.clone();
+            }
+        }
+        if self.data.saved.activity_views.remove(key) {
+            self.data.saved.activity_views.insert(next.clone());
+        }
+        if self.data.selected_thread.as_ref() == Some(key) {
+            self.data.selected_thread = Some(next);
+        }
+        self.data.saved.moves.retain(|m| &m.key != key);
+        self.data
+            .saved
+            .thread_settings
+            .retain(|(target, _)| target != key);
+        self.data.thread_issues.remove(key);
+        if let Some(threads) = self.data.catalogs.get_mut(&key.peer) {
+            threads.retain(|thread| &thread.key != key);
+        }
+    }
+
     pub fn send(&mut self, key: ThreadKey) {
+        if self.data.saved.moves.iter().any(|m| m.key == key) {
+            return;
+        }
         let Some(last) = find_thread(&self.data, &key)
             .and_then(|t| t.runs.last())
             .cloned()
@@ -274,6 +505,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         .unwrap_or_default();
     let last = runs.last();
     let running = active(last).map(str::to_owned);
+    let moving = data.saved.moves.iter().any(|m| &m.key == key);
     let pending = data
         .saved
         .pending
@@ -316,10 +548,12 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             last.is_some()
                 && running.is_none()
                 && pending.is_none()
+                && !moving
                 && !data
                     .preparing_followups
                     .values()
                     .any(|target| target == key),
+            actions,
         );
         if activity {
             ui.weak(&dest.label);
@@ -429,6 +663,20 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                 let id = run["record"]["spec"]["id"].as_str().unwrap_or("");
                 let tag = run_key(&key.peer, id);
                 ui.push_id(&tag, |ui| {
+                    if activity
+                        && let Some(machine) = run["machine"].as_str().filter(|m| *m != key.peer)
+                    {
+                        let label = data
+                            .saved
+                            .destinations
+                            .iter()
+                            .find(|dest| dest.key == machine)
+                            .map(|dest| dest.label.clone())
+                            .unwrap_or_else(|| {
+                                format!("Machine {}", machine.chars().take(8).collect::<String>())
+                            });
+                        ui.weak(label);
+                    }
                     let rows = data
                         .transcripts
                         .get(&tag)
@@ -521,6 +769,15 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     if let Some(anchor) = switched {
         view::switch(data, key, true, Some(anchor));
     }
+    if moving {
+        ui.horizontal_wrapped(|ui| {
+            if data.moving.contains(key) {
+                ui.label("Moving conversation…");
+            } else if ui.button("Retry same move").clicked() {
+                actions.push(Action::RetryMove(key.clone()));
+            }
+        });
+    }
     if let Some((index, id)) = &pending {
         ui.horizontal_wrapped(|ui| {
             let sending = data.sending.contains(id);
@@ -586,7 +843,8 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             }
         });
     }
-    let frozen = pending.is_some()
+    let frozen = moving
+        || pending.is_some()
         || data.saved.steering.iter().any(|s| s.key == *key)
         || data
             .preparing_followups

@@ -23,6 +23,10 @@ pub mod inference_health;
 pub mod promotion;
 #[path = "thread_import.rs"]
 pub mod thread_import;
+#[path = "thread_move.rs"]
+mod thread_move;
+#[path = "thread_workspace.rs"]
+pub(crate) mod thread_workspace;
 #[path = "transcript_import.rs"]
 pub mod transcript_import;
 
@@ -246,7 +250,7 @@ pub struct Record {
 impl Record {
     pub fn execution_context(&self) -> String {
         self.execution_change.as_ref().map_or_else(String::new, |change| {
-            format!("\nBoxen changed this conversation's execution settings between runs. Shell and relative file paths now use the current working directory. Files in an earlier working directory remain at their recorded location. This metadata is supplied by Boxen. {change}")
+            format!("\nBoxen changed this conversation's execution settings between runs. Shell and relative file paths now use the current working directory. Files in an earlier working directory remain at their recorded location. The boxen_thread_files tool, when registered, lists earlier directories and retrieves a named file as it exists at retrieval time. This metadata is supplied by Boxen. {change}")
         })
     }
 
@@ -574,6 +578,57 @@ fn project(snapshot: &mut Snapshot, event: &Event) {
     }
 }
 
+fn load_run(path: &std::path::Path, id: &str) -> Result<Arc<Run>> {
+    let record: Record = serde_json::from_slice(&fs::read(path.join("record.json"))?)?;
+    if record.spec.id != id {
+        return Err("run record identity mismatch".into());
+    }
+    let log_path = path.join("events.jsonl");
+    if !log_path.exists() {
+        state::write_new(&log_path, b"")?;
+    }
+    let mut snapshot = Snapshot {
+        record,
+        status: "starting".into(),
+        backend_thread: None,
+        last_seq: 0,
+    };
+    let mut events = Vec::new();
+    let mut complete_bytes = 0;
+    let mut reader = BufReader::new(File::open(&log_path)?);
+    loop {
+        let mut line = Vec::new();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        if !line.ends_with(b"\n") {
+            // An uncommitted final record was never published.
+            OpenOptions::new()
+                .write(true)
+                .open(&log_path)?
+                .set_len(complete_bytes)?;
+            break;
+        }
+        let event: Event = serde_json::from_slice(&line).map_err(|_| "corrupt event log")?;
+        if event.seq != snapshot.last_seq + 1 {
+            return Err("event log sequence mismatch".into());
+        }
+        complete_bytes += line.len() as u64;
+        project(&mut snapshot, &event);
+        events.push(event);
+    }
+    Ok(Arc::new(Run {
+        inner: Mutex::new(Inner {
+            cancel_requested: false,
+            snapshot,
+            events,
+            file: OpenOptions::new().append(true).open(log_path)?,
+            control: None,
+        }),
+        changed: Condvar::new(),
+    }))
+}
+
 pub struct History {
     directory: PathBuf,
     thread_id: String,
@@ -709,7 +764,11 @@ impl Jobs {
         if last.record.resident.is_some() {
             return Err("resident schedules use the resident activation handler".into());
         }
-        Ok(last.record.spec.clone())
+        let mut spec = last.record.spec.clone();
+        if last.record.automatic_cwd {
+            spec.cwd.clear();
+        }
+        Ok(spec)
     }
     fn reconcile_schedule(
         &self,
@@ -1266,58 +1325,10 @@ impl Jobs {
             };
             valid_id(id)?;
             // An interrupted directory creation without a record never accepted a run.
-            if !path.join("record.json").exists() {
+            if !path.join("record.json").exists() || !jobs.incoming_published(&path)? {
                 continue;
             }
-            let record: Record = serde_json::from_slice(&fs::read(path.join("record.json"))?)?;
-            if record.spec.id != id {
-                return Err("run record identity mismatch".into());
-            }
-            let log_path = path.join("events.jsonl");
-            if !log_path.exists() {
-                state::write_new(&log_path, b"")?;
-            }
-            let mut snapshot = Snapshot {
-                record,
-                status: "starting".into(),
-                backend_thread: None,
-                last_seq: 0,
-            };
-            let mut events = Vec::new();
-            let mut complete_bytes = 0;
-            let mut reader = BufReader::new(File::open(&log_path)?);
-            loop {
-                let mut line = Vec::new();
-                if reader.read_until(b'\n', &mut line)? == 0 {
-                    break;
-                }
-                if !line.ends_with(b"\n") {
-                    // An uncommitted final record was never published.
-                    OpenOptions::new()
-                        .write(true)
-                        .open(&log_path)?
-                        .set_len(complete_bytes)?;
-                    break;
-                }
-                let event: Event =
-                    serde_json::from_slice(&line).map_err(|_| "corrupt event log")?;
-                if event.seq != snapshot.last_seq + 1 {
-                    return Err("event log sequence mismatch".into());
-                }
-                complete_bytes += line.len() as u64;
-                project(&mut snapshot, &event);
-                events.push(event);
-            }
-            let run = Arc::new(Run {
-                inner: Mutex::new(Inner {
-                    cancel_requested: false,
-                    snapshot,
-                    events,
-                    file: OpenOptions::new().append(true).open(log_path)?,
-                    control: None,
-                }),
-                changed: Condvar::new(),
-            });
+            let run = load_run(&path, id)?;
             if !terminal(&run.snapshot().status) {
                 logging::record(
                     Level::Warn,
@@ -1899,6 +1910,8 @@ impl Jobs {
                         "transcript_import": record.transcript_import.as_ref().map(|_| true)
                     },
                     "title": title,
+                    "machine": self.run_machine(&spec.id).ok(),
+                    "placement": self.placement(&spec.thread_id).ok().flatten().map(|p| p.summary()),
                     "status": snapshot.status,
                     "last_seq": snapshot.last_seq
                 })
@@ -2132,6 +2145,39 @@ impl Jobs {
         self.mailboxes.register(owner, &resident.id)?;
         Ok(resident)
     }
+    fn resolve_working_directory(
+        &self,
+        thread: &str,
+        requested: &str,
+        create: bool,
+    ) -> Result<String> {
+        let path = if requested.is_empty() {
+            let root = self.directory.parent().ok_or("run directory has no home")?;
+            let path = root.canonicalize()?.join("threads").join(thread);
+            if create {
+                for dir in [path.parent().expect("thread has a parent"), path.as_path()] {
+                    if fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+                        return Err("automatic working directory cannot be a symbolic link".into());
+                    }
+                    state::private_dir(dir)?;
+                }
+            }
+            path
+        } else {
+            let path = PathBuf::from(requested);
+            if !path.is_absolute() || !path.is_dir() {
+                return Err(
+                    "working directory must exist on the executing machine and be absolute".into(),
+                );
+            }
+            path
+        };
+        Ok(path
+            .to_str()
+            .ok_or("working directory requires a UTF-8 path")?
+            .into())
+    }
+
     pub fn start(self: &Arc<Self>, owner: &str, spec: Spec) -> Result<Snapshot> {
         self.start_after(owner, spec, None)
     }
@@ -2216,25 +2262,20 @@ impl Jobs {
         {
             return Err("prompt must contain 1–262144 bytes".into());
         }
-        let automatic_path = if automatic_cwd {
-            let root = self.directory.parent().ok_or("run directory has no home")?;
-            let path = root.canonicalize()?.join("threads").join(&spec.thread_id);
-            spec.cwd = path
-                .to_str()
-                .ok_or("automatic working directory requires a UTF-8 path")?
-                .into();
-            Some(path)
-        } else {
-            None
-        };
-        if !automatic_cwd
-            && (!std::path::Path::new(&spec.cwd).is_absolute()
-                || !std::path::Path::new(&spec.cwd).is_dir())
+        let placement = self.placement(&spec.thread_id)?;
+        if let Some(moved) = &placement
+            && moved.target != self.machine_id()
         {
-            return Err(
-                "working directory must exist on the executing machine and be absolute".into(),
-            );
+            return Err(format!("conversation execution moved to machine {}", moved.target).into());
         }
+        if placement
+            .as_ref()
+            .is_some_and(|m| !runs.contains_key(m.head()))
+        {
+            return Err("accepted move history is unavailable".into());
+        }
+        let requested_cwd = spec.cwd.clone();
+        spec.cwd = self.resolve_working_directory(&spec.thread_id, &requested_cwd, false)?;
         if runs
             .values()
             .filter(|run| !terminal(&run.snapshot().status))
@@ -2258,6 +2299,13 @@ impl Jobs {
             }
         }
         let head = previous.last();
+        if after.is_none()
+            && placement
+                .as_ref()
+                .is_some_and(|m| head.is_some_and(|head| m.is_head(&head.record.spec.id)))
+        {
+            return Err("first run after a move requires the latest run ID".into());
+        }
         if let Some(after) = after {
             valid_id(after)?;
             if resident.is_some() || head.is_none_or(|head| head.record.spec.id != after) {
@@ -2278,22 +2326,45 @@ impl Jobs {
                 }
             }
         }
-        let execution_change = head.filter(|head| {
-            head.record.spec.cwd != spec.cwd || head.record.spec.model != spec.model
-        }).filter(|_| resident.is_none()).map(|head| {
-            json!({
-                "previous_run_id":head.record.spec.id,
-                "previous":{"machine":self.machine_id(),"cwd":head.record.spec.cwd,"model":head.record.spec.model},
-                "current":{"machine":self.machine_id(),"cwd":spec.cwd,"model":spec.model}
-            })
-        });
-        let resume = previous.iter().rev().find_map(|s| s.backend_thread.clone());
+        let previous_machine = head
+            .map(|head| self.run_machine(&head.record.spec.id))
+            .transpose()?;
+        let changed_machine = previous_machine
+            .as_deref()
+            .is_some_and(|m| m != self.machine_id());
+        let execution_change = head
+            .filter(|head| changed_machine || head.record.spec.cwd != spec.cwd || head.record.spec.model != spec.model)
+            .filter(|_| resident.is_none())
+            .map(|head| {
+                json!({
+                    "previous_run_id":head.record.spec.id,
+                    "previous":{"machine":previous_machine,"cwd":head.record.spec.cwd,"model":head.record.spec.model},
+                    "current":{"machine":self.machine_id(),"cwd":spec.cwd,"model":spec.model}
+                })
+            });
+        let resume = if changed_machine {
+            None
+        } else {
+            previous.iter().rev().find_map(|s| s.backend_thread.clone())
+        };
         let recovery = previous.last().filter(|r|r.status=="interrupted").map(|r|json!({"prior_run_id":r.record.spec.id,"detail":"Previous execution and tool effects are uncertain. This run continues the canonical conversation with a new message. Boxen has not resubmitted the previous prompt or replayed its tool actions; repeating those actions can duplicate effects that already occurred."}));
         let history = History {
-            native_import: previous.iter().find_map(|r| r.record.imported.clone()),
+            native_import: previous
+                .iter()
+                .find(|r| {
+                    r.record.imported.is_some()
+                        && self
+                            .run_machine(&r.record.spec.id)
+                            .is_ok_and(|machine| machine == self.machine_id())
+                })
+                .and_then(|r| r.record.imported.clone()),
             directory: self.directory.clone(),
             thread_id: spec.thread_id.clone(),
-            rebuild_reason:previous.iter().rev().find(|r|r.backend_thread.is_some()).filter(|r|spec.resident_id.is_some()&&r.record.mailbox.is_none()&&resident.as_ref().is_none_or(|r|r.promotion.is_none())).map(|_|"Resident communication migrated from direct turns to mailbox activations; tools are registered in a new backend session beneath the same canonical conversation.".into()),
+            rebuild_reason: if changed_machine {
+                Some("The conversation moved to another machine. A new backend session can use retained Boxen history, while the old native session remains on its machine.".into())
+            } else {
+                previous.iter().rev().find(|r|r.backend_thread.is_some()).filter(|r|spec.resident_id.is_some()&&r.record.mailbox.is_none()&&resident.as_ref().is_none_or(|r|r.promotion.is_none())).map(|_|"Resident communication migrated from direct turns to mailbox activations; tools are registered in a new backend session beneath the same canonical conversation.".into())
+            },
             runs: previous
                 .iter()
                 .map(|r| runs[&r.record.spec.id].clone())
@@ -2302,13 +2373,8 @@ impl Jobs {
         let runtime_policy = crate::runtime_policy::Policy::load(
             self.directory.parent().ok_or("run directory has no home")?,
         )?;
-        if let Some(path) = automatic_path {
-            for dir in [path.parent().expect("thread has a parent"), path.as_path()] {
-                if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
-                    return Err("automatic working directory cannot be a symbolic link".into());
-                }
-                state::private_dir(dir)?;
-            }
+        if automatic_cwd {
+            self.resolve_working_directory(&spec.thread_id, &requested_cwd, true)?;
         }
         let path = self.directory.join(&spec.id);
         state::private_dir(&path)?;

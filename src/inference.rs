@@ -633,6 +633,10 @@ pub fn execute(
     ];
     tools.push(media::tool());
     tools.push(context::tool());
+    if resident.is_none() {
+        let tool = crate::jobs::thread_workspace::tool();
+        tools.push(json!({"type":"function","function":{"name":tool["name"],"description":tool["description"],"parameters":tool["inputSchema"]}}));
+    }
     for tool in agent_tools::observation_tools() {
         tools.push(json!({"type":"function","function":{"name":tool["name"],"description":tool["description"],"parameters":tool["inputSchema"]}}));
     }
@@ -899,6 +903,8 @@ pub fn execute(
                             (view.settings.budget_bytes / 16).clamp(2048, 4096),
                         )
                         .map(Some)
+                } else if name == "boxen_thread_files" && resident.is_none() {
+                    jobs.workspace_files(&spec.thread_id, &args).map(Some)
                 } else if matches!(name, "boxen_observations" | "boxen_adapter") {
                     agent_tools::observation_tool(&jobs, &run, &id, name, args).map(Some)
                 } else if let Some(r) = &resident {

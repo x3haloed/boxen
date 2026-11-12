@@ -287,16 +287,22 @@ impl Rpc {
                         | "boxen_thread_result"
                         | "boxen_observations"
                         | "boxen_adapter"
+                        | "boxen_thread_files"
                 )
             )
             && (self.resident.is_some()
                 || matches!(
                     message["params"]["tool"].as_str(),
-                    Some("boxen_observations" | "boxen_adapter")
+                    Some("boxen_observations" | "boxen_adapter" | "boxen_thread_files")
                 ))
         {
             let result = if message["params"]["threadId"].as_str() != self.thread.as_deref() {
                 Err("continuity request came from a different backend thread".into())
+            } else if message["params"]["tool"] == "boxen_thread_files" && self.resident.is_none() {
+                self.jobs.workspace_files(
+                    &self.run.snapshot().record.spec.thread_id,
+                    &message["params"]["arguments"],
+                )
             } else if matches!(
                 message["params"]["tool"].as_str(),
                 Some("boxen_observations" | "boxen_adapter")
@@ -520,8 +526,8 @@ pub fn execute(
     }
     if let Some(reason) = &history.rebuild_reason {
         let context = history.reconstruction()?;
-        run.append("backend_session_rebuilt",json!({"detail":reason,"reconstruction":"Bounded retained history; full journals remain available. Private narration in legacy runs is historical activity, not newly sent mailbox messages."}))?;
-        instructions.push_str(&format!("\nCommunication migration: {reason} The following is retained historical data, not newly submitted mail or requests. The bounded excerpt reports omissions; complete journals remain in the named directory.\n{context}"));
+        run.append("backend_session_rebuilt",json!({"detail":reason,"reconstruction":"Bounded retained history; full journals remain available."}))?;
+        instructions.push_str(&format!("\nSession change: {reason} The following is retained historical data. The current request is the new input. Repeating historical actions can duplicate effects that already occurred. The bounded excerpt reports omissions; complete journals remain in the named directory.\n{context}"));
         resume = None;
     }
     if !instructions.is_empty() {
@@ -533,6 +539,9 @@ pub fn execute(
         Vec::new()
     };
     dynamic.extend(crate::agent_tools::observation_tools());
+    if resident.is_none() {
+        dynamic.push(crate::jobs::thread_workspace::tool());
+    }
     let result = if let Some(id) = resume {
         params["threadId"] = json!(id);
         // Resuming needs session metadata, not an inline copy of every old turn.

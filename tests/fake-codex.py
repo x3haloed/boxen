@@ -100,6 +100,14 @@ def work(prompt):
             pass
         notification("serverRequest/resolved", {"requestId": "approval-1"})
     answer = "Fixture result"
+    if prompt == "WORKSPACE_MOVE_FIXTURE":
+        response, history = invoke("boxen_thread_files", {"action":"list"}, 100)
+        assert response["success"] and len(history["directories"]) == 2
+        prior = history["directories"][1]
+        response, file = invoke("boxen_thread_files", {"action":"pull","run_id":prior["run_id"],"path":"earlier.bin"}, 101)
+        assert response["success"], file
+        assert pathlib.Path(file["path"]).read_bytes() == b"source changed after its original snapshot"
+        answer = file["file"]["digest"]
     if prompt.startswith('EVENT_GAME:'):
         settings=json.loads(prompt.split(':',1)[1]);sub=settings['subscription_id'];generation=settings['source_generation']
         response,listed=invoke('boxen_observations',{'action':'list'},190);assert response['success'] and any(s['spec']['id']==sub for s in listed['subscriptions'])
@@ -271,6 +279,11 @@ for line in sys.stdin:
             if not request['params'].get('excludeTurns', False):
                 result['thread']['turns'] = [{'id':'historical-large-turn','text':'x'*(4*1024*1024)}]
     elif method == "turn/start":
+        if request["params"]["input"][0]["text"] == "WORKSPACE_MOVE_FIXTURE":
+            assert session_method == "thread/start"
+            assert any(tool["name"]=="boxen_thread_files" for tool in session_params["dynamicTools"])
+            assert "First thought" in session_params["developerInstructions"]
+            assert "changed this conversation's execution settings" in request["params"]["input"][1]["text"]
         if request["params"]["input"][0]["text"] == "WORKSPACE_SETTINGS_FIXTURE":
             assert session_method == "thread/resume"
             assert session_params["model"] == "fixture-second-model"

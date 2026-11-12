@@ -73,7 +73,9 @@ A peer address locates an already-pinned identity; it grants no new trust.
   the executing daemon's data directory at `threads/<thread-id>`. **Run settings**
   lets you choose the machine, directory, runtime, and model before sending.
   On an idle conversation, **Run settings** can change the directory or model
-  for the next send. The conversation composer sends a follow-up, or steering while
+  for the next send. Choosing another machine moves the idle conversation,
+  including its retained history and attachments. The draft follows the conversation
+  and remains ready to send. The conversation composer sends a follow-up, or steering while
   a run is active. **⌘/Ctrl + Enter**
   submits; cancellation is a separate control.
 

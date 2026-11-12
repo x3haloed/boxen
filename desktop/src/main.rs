@@ -40,6 +40,7 @@ struct Saved {
     new_thread_files: Vec<attachments::FileRef>,
     thread_files: Vec<(ThreadKey, Vec<attachments::FileRef>)>,
     thread_settings: Vec<(ThreadKey, thread_view::RunSettings)>,
+    moves: Vec<thread_view::PendingMove>,
     activity_views: HashSet<ThreadKey>,
     draft_runs: Vec<(ThreadKey, String)>,
     steering: Vec<thread_view::Steering>,
@@ -65,9 +66,12 @@ struct Data {
     file_previews: HashMap<String, Option<Result<attachments::Preview, String>>>,
     thread_issues: HashMap<ThreadKey, String>,
     active_steering: HashSet<ThreadKey>,
+    moving: HashSet<ThreadKey>,
     preparing_followups: HashMap<String, ThreadKey>,
     local_key: String,
     editing_run_settings: Option<new_conversation::Settings>,
+    focus_new_conversation: bool,
+    new_conversation_issue: Option<String>,
     editing_thread_settings: Option<(ThreadKey, thread_view::RunSettings)>,
     mail: correspondence::Mailbox,
     agents: agents::State,
@@ -85,6 +89,8 @@ struct Data {
 enum Action {
     NewConversation,
     StartConversation,
+    MoveConversation(ThreadKey, thread_view::RunSettings),
+    RetryMove(ThreadKey),
     Work(work::Action),
     File(attachments::FileAction),
     Respond(ThreadKey, String, Value, Value),
@@ -432,6 +438,7 @@ impl Desktop {
                             self.data
                                 .catalogs
                                 .insert(dest.key.clone(), catalog(&dest.key, &runs));
+                            self.reconcile_placements();
                         }
                         Err(error) => {
                             self.data.errors.insert(dest.key, error);
@@ -485,6 +492,7 @@ impl Desktop {
                     }
                 }
                 Update::Files(update) => self.file_update(update),
+                Update::Moved(key, result) => self.moved(key, result),
                 Update::Steered(key, result, sent) => self.steered(key, result, sent),
                 Update::Controlled(id, _dest, _text, result) => {
                     self.data.sending.remove(&id);
@@ -533,14 +541,45 @@ impl Desktop {
                             }
                         }
                         Err(error) => {
-                            if let Some(p) =
-                                self.data.saved.pending.iter().find(|p| p.spec["id"] == id)
+                            if let Some(p) = self
+                                .data
+                                .saved
+                                .pending
+                                .iter()
+                                .find(|p| p.spec["id"] == id)
+                                .cloned()
                             {
                                 let key = ThreadKey {
                                     peer: p.destination.key.clone(),
                                     id: p.spec["thread_id"].as_str().unwrap_or("").into(),
                                 };
-                                self.data.thread_issues.insert(key, error);
+                                let directory_rejected = error.starts_with("HTTP 422:") && (
+                                    error.ends_with("working directory must exist on the executing machine and be absolute")
+                                    || error.ends_with("automatic working directory cannot be a symbolic link"));
+                                let stale = error.starts_with("HTTP 422:")
+                                    && error.ends_with(
+                                        "follow-up source is no longer the latest anonymous run",
+                                    );
+                                if p.after.is_none()
+                                    && directory_rejected
+                                    && self.edit_rejected_start(&key, &p)
+                                {
+                                    self.data
+                                        .saved
+                                        .pending
+                                        .retain(|request| request.spec["id"] != id);
+                                    self.data.new_conversation_issue = Some(error);
+                                    self.persist();
+                                } else {
+                                    if p.after.is_some() && (directory_rejected || stale) {
+                                        self.data
+                                            .saved
+                                            .pending
+                                            .retain(|request| request.spec["id"] != id);
+                                        self.persist();
+                                    }
+                                    self.data.thread_issues.insert(key, error);
+                                }
                             }
                         }
                     }
@@ -596,7 +635,7 @@ impl Desktop {
             self.data.saved.draft_runs.retain(|(k, _)| k != key);
         }
     }
-    fn replace_snapshot(&mut self, peer: &str, snapshot: Value) {
+    fn replace_snapshot(&mut self, peer: &str, mut snapshot: Value) {
         if let Some(threads) = self.data.catalogs.get_mut(peer) {
             for t in threads {
                 if let Some(run) = t
@@ -604,6 +643,11 @@ impl Desktop {
                     .iter_mut()
                     .find(|r| r["record"]["spec"]["id"] == snapshot["record"]["spec"]["id"])
                 {
+                    for key in ["placement", "machine"] {
+                        if let Some(value) = run.get(key) {
+                            snapshot[key] = value.clone();
+                        }
+                    }
                     *run = snapshot;
                     return;
                 }
@@ -732,12 +776,16 @@ impl Desktop {
     }
     fn action(&mut self, action: Action) {
         match action {
-            Action::NewConversation => self
-                .data
-                .saved
-                .workspace
-                .open_editor(Pane::NewConversation, true),
+            Action::NewConversation => {
+                self.data.focus_new_conversation = true;
+                self.data
+                    .saved
+                    .workspace
+                    .open_editor(Pane::NewConversation, true);
+            }
             Action::StartConversation => self.start_conversation(),
+            Action::MoveConversation(key, settings) => self.move_conversation(key, settings),
+            Action::RetryMove(key) => self.retry_move(&key),
             Action::Work(action) => match action {
                 work::Action::Submit => {
                     if self.data.work.prepare(&mut self.data.saved.work) && self.persist() {

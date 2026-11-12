@@ -99,7 +99,7 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         events = early + later
         assert [e["seq"] for e in events] == list(range(1, snapshot["last_seq"] + 1))
         assert any(len(e["data"].get("params", {}).get("delta", "")) == 50000 for e in events)
-        assert any(e["kind"] == "rpc_response" for e in events)
+        assert any(e["kind"] == "user_message" and e["data"].get("text") == "fixture steering" for e in events)
         print("PASS live reasoning/tool output before completion, detach/replay without gaps, large Unicode frames, steering")
 
         followup = spec("follow-up", run["thread_id"])

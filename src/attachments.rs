@@ -12,7 +12,7 @@ use std::{
     sync::Mutex,
 };
 
-const FILE_LIMIT: u64 = 32 * 1024 * 1024;
+pub(crate) const FILE_LIMIT: u64 = 32 * 1024 * 1024;
 const CHUNK: usize = 192 * 1024;
 const STORE_LIMIT: u64 = 1024 * 1024 * 1024;
 const STORE_COUNT: usize = 8192;
@@ -75,7 +75,7 @@ impl Store {
         }
         Ok(format!("{:x}", hash.finalize()))
     }
-    fn verify(&self, a: &Attachment) -> Result<PathBuf> {
+    pub(crate) fn verify(&self, a: &Attachment) -> Result<PathBuf> {
         a.validate()?;
         let path = self.path(a);
         if !path.exists() {
@@ -85,6 +85,26 @@ impl Store {
             return Err("attachment original failed its integrity check".into());
         }
         Ok(path)
+    }
+    pub(crate) fn capture(&self, name: &str, bytes: &[u8]) -> Result<Attachment> {
+        let file = Attachment {
+            name: name.into(),
+            size: bytes.len() as u64,
+            digest: format!("{:x}", Sha256::digest(bytes)),
+        };
+        let mut status = self.operation(&json!({"action":"status","file":file}))?;
+        while status["complete"] != true {
+            let offset = status["next"]
+                .as_u64()
+                .filter(|offset| *offset <= file.size)
+                .ok_or("invalid attachment transfer offset")? as usize;
+            let end = bytes.len().min(offset + CHUNK);
+            status = self.operation(&json!({"action":"write","file":file,"offset":offset,"data":STANDARD.encode(&bytes[offset..end])}))?;
+            if status["next"] != end as u64 || (end == offset && status["complete"] != true) {
+                return Err("attachment capture did not reach its retained offset".into());
+            }
+        }
+        Ok(file)
     }
     pub fn require(&self, files: &[Attachment]) -> Result<()> {
         if files.len() > MESSAGE_LIMIT {

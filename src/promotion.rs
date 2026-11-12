@@ -6,6 +6,12 @@ impl Jobs {
     pub fn promote(&self, owner: &str, request: Promote) -> Result<Resident> {
         valid_id(&request.thread_id)?;
         let _transition = self.transitions.lock().unwrap();
+        if self
+            .placement(&request.thread_id)?
+            .is_some_and(|m| m.target != self.machine_id())
+        {
+            return Err("conversation execution moved to another machine".into());
+        }
         let outcome = (|| -> Result<Resident> {
             if let Some(existing) = self.residents.existing_promotion(owner, &request)? {
                 self.mailboxes.register(owner, &existing.id)?;

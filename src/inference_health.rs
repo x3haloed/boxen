@@ -192,6 +192,9 @@ impl Jobs {
                     .ok_or_else(|| "continuation did not accept an activation".into());
             }
             let mut spec: Spec = prior.record.spec;
+            if prior.record.automatic_cwd {
+                spec.cwd.clear();
+            }
             spec.id = id;
             spec.prompt = directions;
             self.start_locked(owner, spec, None, None, None)
