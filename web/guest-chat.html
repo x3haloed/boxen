@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat</title>
+<style>
+:root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #182321; background: #f6f8f7; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 46rem; margin: auto; padding: 1.5rem clamp(1rem, 4vw, 2rem); min-height: 100dvh; display: flex; flex-direction: column; }
+h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+ol { list-style: none; padding: 0; margin: 0 0 1rem; flex: 1; }
+li { max-width: 90%; width: fit-content; margin-bottom: .8rem; padding: .65rem .9rem; border-radius: .8rem; background: white; border: 1px solid #dbe4e0; overflow-wrap: anywhere; }
+li.guest { margin-left: auto; background: #e0f0e9; border-color: #cddfd6; }
+li p { white-space: pre-wrap; margin: .15rem 0 0; }
+small { color: #455953; }
+form { position: sticky; bottom: 0; background: #f6f8f7; padding: .5rem 0 1rem; }
+label { display: block; margin-bottom: .35rem; }
+textarea, button { font: inherit; }
+textarea { width: 100%; border: 1px solid #849790; border-radius: .6rem; padding: .65rem .8rem; resize: vertical; min-height: 3.5rem; }
+button { background: #174d3c; color: white; border: 0; border-radius: .5rem; padding: .5rem 1rem; cursor: pointer; }
+button:disabled { opacity: .55; cursor: default; }
+:focus-visible { outline: 3px solid #286c55; outline-offset: 2px; }
+#status { margin-left: .6rem; color: #455953; }
+</style>
+</head>
+<body>
+<main>
+<h1 id="title">Chat</h1>
+<ol id="messages" aria-label="Messages" role="log"></ol>
+<form>
+<label for="message">Message</label>
+<textarea id="message" rows="2" maxlength="8192" required></textarea>
+<button type="submit">Send</button>
+<span id="status" role="status"></span>
+</form>
+</main>
+<script>
+const messages = document.querySelector('#messages');
+const form = document.querySelector('form');
+const input = document.querySelector('textarea');
+const button = document.querySelector('button');
+const status = document.querySelector('#status');
+const headers = { 'X-Boxen-Chat': '1' };
+const ids = new Set();
+let after = 0;
+let pending;
+let sending = false;
+let connected = false;
+let resident = 'Agent';
+
+async function chatRequest(url, options = {}) {
+  const response = await fetch(url, { ...options, headers: { ...headers, ...options.headers } });
+  if (!response.ok) throw new Error(String(response.status));
+  return response.json();
+}
+
+async function refresh() {
+  try {
+    while (true) {
+      const page = await chatRequest('/messages?after=' + after);
+      resident = page.resident;
+      document.querySelector('#title').textContent = resident;
+      document.title = 'Chat with ' + resident;
+      const nearBottom = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 100;
+      for (const message of page.messages) {
+        if (ids.has(message.id)) continue;
+        ids.add(message.id);
+        const item = document.createElement('li');
+        item.className = message.sender;
+        const author = document.createElement('small');
+        author.textContent = message.sender === 'guest' ? 'You' : resident;
+        const body = document.createElement('p');
+        body.textContent = message.body;
+        item.append(author, body);
+        messages.append(item);
+      }
+      if (nearBottom && page.messages.length) window.scrollTo(0, document.documentElement.scrollHeight);
+      if (page.next_after === after) break;
+      after = page.next_after;
+    }
+    if (!connected && !sending) status.textContent = '';
+    connected = true;
+  } catch {
+    if (!sending) status.textContent = 'Chat is unavailable. Reconnecting…';
+    connected = false;
+  } finally {
+    setTimeout(refresh, connected ? 2000 : 4000);
+  }
+}
+
+form.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (sending || !input.value.trim()) return;
+  if (new TextEncoder().encode(input.value).length > 8192) {
+    status.textContent = 'This message is too long.';
+    return;
+  }
+  if (pending?.body !== input.value) {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const id = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+    pending = { id, body: input.value };
+  }
+  sending = true;
+  button.disabled = true;
+  input.readOnly = true;
+  status.textContent = 'Sending…';
+  try {
+    await chatRequest('/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pending),
+    });
+    pending = undefined;
+    input.value = '';
+    status.textContent = 'Sent';
+  } catch (error) {
+    status.textContent = error.message === '422'
+      ? 'Boxen declined the message.'
+      : 'Delivery could not be confirmed. Send again to retry.';
+  } finally {
+    sending = false;
+    button.disabled = false;
+    input.readOnly = false;
+    input.focus();
+  }
+});
+
+refresh();
+</script>
+</body>
+</html>

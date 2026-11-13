@@ -65,6 +65,7 @@ dependencies = [
  "cosmo-build",
  "cosmo-compat",
  "fs2",
+ "httparse",
  "libc",
  "serde",
  "serde_json",

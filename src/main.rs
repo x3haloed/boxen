@@ -13,6 +13,7 @@ mod codex_executable;
 mod context;
 mod discord_connector;
 mod events;
+mod guest_chat;
 mod inference;
 #[cfg(feature = "inference-probe")]
 mod inference_probe;
@@ -74,6 +75,8 @@ boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID
 boxen [--data-dir PATH] request HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] messages HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] discord-connector --instance ID [--url http://127.0.0.1:PORT]\n\
+boxen [--data-dir PATH] guest-chat-create RESIDENT_ID [--name NAME] [--url http://127.0.0.1:PORT]\n\
+boxen [--data-dir PATH] guest-chat --instance ID [--listen 127.0.0.1:PORT] [--url http://127.0.0.1:PORT]\n\
 boxen [--data-dir PATH] events HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] schedule HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] context HOST:PORT PUBLIC_KEY THREAD_ID JSON\n\
@@ -143,6 +146,12 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
     }
     if command == "discord-connector" {
         return discord_connector::run(&directory, args);
+    }
+    if command == "guest-chat-create" {
+        return guest_chat::create(&directory, args);
+    }
+    if command == "guest-chat" {
+        return guest_chat::run(&directory, args);
     }
     let state = Arc::new(State::open(directory)?);
     match command.as_str() {

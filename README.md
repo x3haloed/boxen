@@ -81,6 +81,8 @@ a separate explicit operation. GUI import/promotion controls remain separate wor
 
 ## Residents
 
+[Guest chat](docs/guest-chat.md) is a bundled connector that gives one invited person a browser conversation with a resident on your Boxen host.
+
 Create a named resident without assigning a job. It has one canonical conversation and a separate revisioned identity/memory store with an enforced configurable quota. It can maintain its own continuity through a daemon-serviced tool. Each resident has a durable mailbox with default automatic activation, batched input, and explicit sending. Final assistant text remains private activity; anonymous threads retain ordinary request/response. Interrupted work leaves a visible incident while the resident stays available for its next message.
 
 [Inference health and explicit continuation](docs/inference-health.md) expose coalesced provider failures without replaying earlier effects.

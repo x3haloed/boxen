@@ -440,6 +440,9 @@ impl Connectors {
     }
 }
 fn validate(d: &Definition) -> Result<()> {
+    if d.provider == crate::guest_chat::PROVIDER {
+        crate::guest_chat::binding(d)?;
+    }
     if d.tools.len() > 16 {
         return Err("instances declare at most 16 service operations".into());
     }
@@ -960,6 +963,23 @@ pub fn operation(
                         )
                     }
                     "ingest" => ingest(jobs, owner, id, &args),
+                    "guest_chat_read" => {
+                        let instance = jobs.connectors.get(owner, id)?;
+                        let (binding, guest) = guest_chat_scope(&instance)?;
+                        let resident = Address::Resident {
+                            id: binding.resident.clone(),
+                        };
+                        let mut page = jobs.mailboxes.guest_chat_messages(
+                            owner,
+                            &guest,
+                            &resident,
+                            args["after"].as_u64().unwrap_or(0),
+                        )?;
+                        page["resident"] =
+                            json!(jobs.residents.get(owner, &binding.resident)?.name);
+                        Ok(page)
+                    }
+                    "guest_chat_send" => guest_chat_send(jobs, owner, id, &args),
                     "outbox" => {
                         let i = jobs.connectors.get(owner, id)?;
                         Ok(
@@ -1145,8 +1165,102 @@ fn ingest(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Value> {
     let _transition = jobs.connectors.intake.lock().unwrap();
     ingest_locked(jobs, owner, id, args)
 }
+fn guest_chat_scope(instance: &Instance) -> Result<(&Binding, Address)> {
+    if !instance.definition.enabled {
+        return Err("guest chat is disabled".into());
+    }
+    let binding = crate::guest_chat::binding(&instance.definition)?;
+    Ok((
+        binding,
+        Address::Connector {
+            instance: instance.definition.id.clone(),
+            conversation: binding.conversation.clone(),
+        },
+    ))
+}
+
+fn native_message_id(
+    owner: &str,
+    instance: &str,
+    conversation: &str,
+    native: &str,
+    recipient: &str,
+) -> Result<String> {
+    Ok(state::hex(&Sha256::digest(serde_json::to_vec(&json!([
+        "connector-message-v1",
+        owner,
+        instance,
+        conversation,
+        native,
+        recipient
+    ]))?)))
+}
+
+fn guest_chat_send(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Value> {
+    let _transition = jobs.connectors.intake.lock().unwrap();
+    let instance = jobs.connectors.get(owner, id)?;
+    let (binding, guest) = guest_chat_scope(&instance)?;
+    let resident = Address::Resident {
+        id: binding.resident.clone(),
+    };
+    let native = args["id"].as_str().ok_or("guest message id required")?;
+    jobs::valid_id(native)?;
+    let body = args["body"].as_str().ok_or("guest message text required")?;
+    if body.trim().is_empty() || body.len() > crate::guest_chat::MAX_MESSAGE {
+        return Err("guest message is nonblank and at most 8 KiB".into());
+    }
+    let message_id =
+        native_message_id(owner, id, &binding.conversation, native, &binding.resident)?;
+    jobs.mailboxes.check()?;
+    if let Ok(prior) = jobs.mailboxes.get(owner, &message_id) {
+        if prior.body != body || prior.sender != guest || prior.to != resident {
+            return Err("guest message id already accepted with different input".into());
+        }
+        return Ok(json!({"id":message_id,"accepted":true}));
+    }
+    let mut message = json!({"id":native,"author":{"id":instance.definition.account,"name":"Guest"},"direct":true});
+    if !instance.policy().permits(
+        &binding.resident,
+        "receive",
+        &binding.conversation,
+        &message,
+    ) || !instance
+        .attention(&binding.resident)
+        .interested(&binding.conversation, &message)
+    {
+        return Err("guest message is outside the resident's current routing or attention".into());
+    }
+    set_native_origin(
+        &mut message,
+        &instance.definition,
+        &binding.conversation,
+        native,
+    );
+    jobs.residents.get(owner, &binding.resident)?;
+    jobs.mailboxes.accept(
+        owner,
+        guest.clone(),
+        Send {
+            attachments: vec![],
+            service: None,
+            id: message_id.clone(),
+            to: resident,
+            subject: String::new(),
+            body: body.into(),
+            reply_to: Some(guest),
+            in_reply_to: None,
+        },
+        format!("connector:{message_id}"),
+        Some(message),
+    )?;
+    jobs.messaging_notify();
+    Ok(json!({"id":message_id,"accepted":true}))
+}
 fn ingest_locked(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Value> {
     let i = jobs.connectors.get(owner, id)?;
+    if i.definition.provider == crate::guest_chat::PROVIDER {
+        return Err("guest chat intake uses its bound conversation and exact message IDs".into());
+    }
     if !i.definition.enabled {
         return Err("connector instance is disabled".into());
     }
@@ -1214,12 +1328,7 @@ fn ingest_locked(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Val
         )?;
         let body = native["body"].as_str().ok_or("native body required")?;
         let mut origin = native.clone();
-        origin["instance"] = json!(id);
-        origin["provider"] = json!(i.definition.provider);
-        origin["account"] = json!(i.definition.account);
-        origin["conversation"] = json!(conversation);
-        origin["native_id"] = json!(native_id);
-        origin.as_object_mut().unwrap().remove("body");
+        set_native_origin(&mut origin, &i.definition, conversation, native_id);
         if serde_json::to_vec(&origin)?.len() > 32 * 1024 {
             return Err("native message metadata exceeds 32 KiB".into());
         }
@@ -1234,14 +1343,7 @@ fn ingest_locked(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Val
                 continue;
             }
             jobs.residents.get(owner, recipient)?;
-            let mid = state::hex(&Sha256::digest(serde_json::to_vec(&json!([
-                "connector-message-v1",
-                owner,
-                id,
-                conversation,
-                native_id,
-                recipient
-            ]))?));
+            let mid = native_message_id(owner, id, conversation, native_id, recipient)?;
             let source = format!("connector:{mid}");
             jobs.mailboxes.accept(
                 owner,
@@ -1279,6 +1381,20 @@ fn ingest_locked(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<Val
         || json!({"conversation":conversation,"native_messages":messages.len(),"deliveries":accepted,"cursor":cursor}),
     );
     Ok(json!({"accepted":true,"cursor":cursor,"deliveries":accepted}))
+}
+
+fn set_native_origin(
+    origin: &mut Value,
+    definition: &Definition,
+    conversation: &str,
+    native_id: &str,
+) {
+    origin.as_object_mut().unwrap().remove("body");
+    origin["instance"] = json!(definition.id);
+    origin["provider"] = json!(definition.provider);
+    origin["account"] = json!(definition.account);
+    origin["conversation"] = json!(conversation);
+    origin["native_id"] = json!(native_id);
 }
 
 fn cursor_key(owner: &str, id: &str, conversation: &str, stream: Option<&str>) -> String {
@@ -1549,6 +1665,8 @@ pub(crate) fn local_runner_operation(
                         | "gateway_event"
                         | "native_presence"
                         | "attachment"
+                        | "guest_chat_read"
+                        | "guest_chat_send"
                 )
             )
         {
@@ -1557,6 +1675,14 @@ pub(crate) fn local_runner_operation(
             );
         }
         let i = jobs.connectors.local_runner_instance(id)?;
+        if i.definition.provider == crate::guest_chat::PROVIDER
+            && !matches!(
+                request["args"]["action"].as_str(),
+                Some("get" | "guest_chat_read" | "guest_chat_send")
+            )
+        {
+            return Err("guest chat runner control accepts only its chat operations".into());
+        }
         crate::protocol::operation(jobs, &i.owner, request)
     })();
     event(

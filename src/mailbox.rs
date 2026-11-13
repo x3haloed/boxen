@@ -102,6 +102,12 @@ impl Message {
             && self.attachments == spec.attachments
     }
 }
+pub enum Route<'a> {
+    Local,
+    Network(&'a str),
+    GuestChat,
+}
+
 struct Inner {
     file: Option<File>,
     seq: u64,
@@ -257,7 +263,10 @@ impl Mailboxes {
                 inner
                     .sources
                     .insert(message.source.clone(), message.id.clone());
-                if let Some(delivery) = event.get("network_delivery") {
+                if let Some(delivery) = event
+                    .get("network_delivery")
+                    .or_else(|| event.get("local_delivery"))
+                {
                     inner.receipts.insert(message.id.clone(), delivery.clone());
                 }
                 inner.ids.insert(message.id.clone(), inner.messages.len());
@@ -329,15 +338,6 @@ impl Mailboxes {
     pub fn source_id(&self, source: &str) -> Option<String> {
         self.inner.lock().unwrap().sources.get(source).cloned()
     }
-    pub fn send(
-        &self,
-        owner: &str,
-        sender: Address,
-        spec: Send,
-        source: String,
-    ) -> Result<Message> {
-        self.accept(owner, sender, spec, source, None)
-    }
     pub fn accept(
         &self,
         owner: &str,
@@ -346,7 +346,7 @@ impl Mailboxes {
         source: String,
         origin: Option<Value>,
     ) -> Result<Message> {
-        self.accept_routed(owner, sender, spec, source, origin, None)
+        self.accept_routed(owner, sender, spec, source, origin, Route::Local)
     }
     pub fn accept_routed(
         &self,
@@ -355,8 +355,12 @@ impl Mailboxes {
         spec: Send,
         source: String,
         origin: Option<Value>,
-        destination: Option<&str>,
+        route: Route<'_>,
     ) -> Result<Message> {
+        let destination = match route {
+            Route::Network(machine) => Some(machine),
+            _ => None,
+        };
         self.check()?;
         jobs::valid_id(&spec.id)?;
         sender.validate()?;
@@ -412,7 +416,8 @@ impl Mailboxes {
                 "message id or source already accepted with different input or sender".into(),
             );
         }
-        if let Address::Connector { instance, .. } = &spec.to
+        if !matches!(route, Route::GuestChat)
+            && let Address::Connector { instance, .. } = &spec.to
             && inner
                 .messages
                 .iter()
@@ -459,6 +464,11 @@ impl Mailboxes {
         if let Some(d) = destination {
             event["network_delivery"] = json!({"transport":"boxen_network","destination_machine":d,"status":"queued","saved_on":self.machine,"attempts":0,"next_attempt_at":0});
         }
+        if matches!(route, Route::GuestChat) {
+            // The local browser projects this journal. There is no external send
+            // between retaining the message and making it available to the guest.
+            event["local_delivery"] = json!({"transport":"guest_chat","status":"accepted","external_id":message.id,"at":message.accepted_at});
+        }
         Self::append(&mut inner, event)?;
         logging::record(
             Level::Info,
@@ -472,7 +482,7 @@ impl Mailboxes {
                 },
                 ..Context::default()
             },
-            || json!({"message_id":message.id,"sender":message.sender,"to":message.to,"body_bytes":message.body.len(),"sequence":message.seq}),
+            || json!({"message_id":message.id,"sender":message.sender,"to":message.to,"body_bytes":message.body.len(),"sequence":message.seq,"local_delivery":matches!(route, Route::GuestChat)}),
             || json!({"subject":message.subject,"body":message.body}),
         );
         Ok(message)
@@ -889,6 +899,44 @@ impl Mailboxes {
             })
             .cloned()
             .collect()
+    }
+    pub fn guest_chat_messages(
+        &self,
+        owner: &str,
+        guest: &Address,
+        resident: &Address,
+        after: u64,
+    ) -> Result<Value> {
+        self.check()?;
+        let inner = self.inner.lock().unwrap();
+        let mut bytes = 0;
+        let mut next_after = after;
+        let mut messages = Vec::new();
+        let start = inner
+            .messages
+            .partition_point(|message| message.seq <= after);
+        for message in inner.messages[start..].iter().filter(|m| m.owner == owner) {
+            let incoming = &message.sender == guest && &message.to == resident;
+            let outgoing = &message.sender == resident
+                && &message.to == guest
+                && inner
+                    .receipts
+                    .get(&message.id)
+                    .is_some_and(|r| r["transport"] == "guest_chat");
+            if !incoming && !outgoing {
+                continue;
+            }
+            bytes += message.body.len() + 256;
+            if messages.len() == 64 || bytes > 128 * 1024 {
+                break;
+            }
+            next_after = message.seq;
+            messages.push(json!({
+                "id":message.id, "sender":if incoming {"guest"} else {"resident"},
+                "body":message.body, "at":message.accepted_at,
+            }));
+        }
+        Ok(json!({"messages":messages,"next_after":next_after}))
     }
     pub fn has_pending(&self, owner: &str, resident: &str, presented: &HashSet<String>) -> bool {
         let target = Address::Resident {

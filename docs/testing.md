@@ -51,6 +51,7 @@ statuses and timings. These suites run against the uploaded file:
 - Native-preserving promotion, scoped MCP tools and selective correspondence (`resident-promotion`).
 - Selective delivery, no-send completion and batch recovery (`mailbox`).
 - Instance-scoped messaging connectors and uncertain external effects (`messaging`).
+- Bundled guest chat, scoped browser projection, exact retries and restart (`guest-chat`).
 - Hot logging filters, file/stream sinks and failure behavior (`logging`).
 - Resident/thread scheduled wakes, coalescing, crash recovery and idle CPU (`scheduler`).
 - External observations/adapters, bounded failures, lifecycle, effects and storage (`events`).

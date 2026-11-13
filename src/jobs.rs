@@ -1500,6 +1500,10 @@ impl Jobs {
         if matches!(&sender, Address::Connector { .. }) {
             return Err("native connector senders enter through scoped intake".into());
         }
+        let route = destination
+            .as_deref()
+            .map(crate::mailbox::Route::Network)
+            .unwrap_or(crate::mailbox::Route::Local);
         if let Address::Connector {
             instance,
             conversation,
@@ -1562,20 +1566,37 @@ impl Jobs {
                     return Err("reply provenance belongs to another connector conversation".into());
                 }
             }
+            if connector.definition.provider == crate::guest_chat::PROVIDER {
+                let _transition = self.connectors.intake.lock().unwrap();
+                let connector =
+                    crate::messaging::authorize(self, owner, id, instance, conversation, true)?;
+                let binding = crate::guest_chat::binding(&connector.definition)?;
+                if binding.resident != *id || binding.conversation != *conversation {
+                    return Err(
+                        "guest chat sends belong to the bound resident and conversation".into(),
+                    );
+                }
+                if !connector
+                    .policy()
+                    .permits(id, "send", conversation, &Value::Null)
+                {
+                    return Err("guest chat send is denied by connector policy".into());
+                }
+                let message = self.mailboxes.accept_routed(
+                    &recipient_owner,
+                    sender,
+                    spec,
+                    source,
+                    None,
+                    crate::mailbox::Route::GuestChat,
+                )?;
+                self.notify();
+                return Ok(message);
+            }
         }
-        let message = if destination.is_none() {
+        let message =
             self.mailboxes
-                .send(&recipient_owner, sender, spec, source)?
-        } else {
-            self.mailboxes.accept_routed(
-                &recipient_owner,
-                sender,
-                spec,
-                source,
-                None,
-                destination.as_deref(),
-            )?
-        };
+                .accept_routed(&recipient_owner, sender, spec, source, None, route)?;
         self.notify();
         Ok(message)
     }
