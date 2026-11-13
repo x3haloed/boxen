@@ -11,7 +11,7 @@ pub(crate) enum Command {
 impl Command {
     fn label(self) -> &'static str {
         match self {
-            Self::NewThread => "New Conversation",
+            Self::NewThread => "New Thread",
             Self::Reconnect => "Reconnect Daemon",
             Self::ShowWork => "Show Work",
             Self::Palette => "Command Palette…",

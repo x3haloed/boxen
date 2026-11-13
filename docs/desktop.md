@@ -42,7 +42,7 @@ A peer address locates an already-pinned identity; it grants no new trust.
 
 - On macOS, Boxen uses the system menu bar. Windows uses a native menu bar in
   the Boxen window. Linux uses an in-window menu on both X11 and Wayland.
-  **File** contains **New Conversation** and **Reconnect Daemon**, which is enabled
+  **File** contains **New Thread** and **Reconnect Daemon**, which is enabled
   when the desktop has yet to connect. **View** contains **Show Work** and
   **Command Palette…**.
 - The thread list contains anonymous conversations only, grouped by canonical
@@ -68,10 +68,14 @@ A peer address locates an already-pinned identity; it grants no new trust.
   Typing filters commands and threads; arrows select, Enter opens, Escape closes.
   **Show thread list** restores a closed list; **Reset docking layout** restores
   the sidebar while preserving open conversations and drafts.
-- **New Conversation** in Threads or File opens a composer in the workspace.
-  Send uses this machine, the default Codex model, and a working area under
-  the executing daemon's data directory at `threads/<thread-id>`. **Run settings**
-  lets you choose the machine, directory, runtime, and model before sending.
+- **New Thread** in Threads, File, or the command palette opens a compact dialog.
+  **Start thread** uses this machine, the default Codex model, and a working area
+  under the executing daemon's data directory at `threads/<thread-id>`. Expand
+  **Run settings** in the dialog to choose the machine, directory, runtime, or model.
+  When the daemon queues the first run, the dialog closes and the thread opens
+  in **Messages**. A rejected submission preserves the draft and settings.
+  When queue status is uncertain, the catalog checks for the same request ID and
+  **Retry same request** submits that exact request again.
   On an idle conversation, **Run settings** can change the directory or model
   for the next send. Choosing another machine moves the idle conversation,
   including its retained history and attachments. The draft follows the conversation

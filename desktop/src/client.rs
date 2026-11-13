@@ -27,6 +27,14 @@ pub struct Pending {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
 }
+#[derive(Debug)]
+pub struct SubmitError {
+    pub detail: String,
+    // An attachment copy failure never dispatches the start. Only known
+    // pre-publication start rejections allow a fresh ID.
+    pub safe_to_edit: bool,
+}
+
 pub enum Update {
     Mail(crate::correspondence::MailUpdate),
     Files(crate::attachments::FileUpdate),
@@ -37,7 +45,7 @@ pub enum Update {
     Batch(String, u64, Value),
     WatchError(String, u64, String),
     Followup(String, Result<Pending, String>),
-    Submitted(String, Result<Value, String>),
+    Submitted(String, Result<Value, SubmitError>),
     Controlled(String, Destination, String, Result<Value, String>),
 }
 pub struct Bus {
@@ -338,18 +346,31 @@ impl Client {
             }
         });
     }
-    pub fn submit(&self, pending: Pending, publisher: Publisher) {
+    pub fn submit(&self, pending: Pending, retry: bool, publisher: Publisher) {
         let client = self.clone();
         std::thread::spawn(move || {
             let id = pending.spec["id"].as_str().unwrap_or("").to_owned();
             let result = client
                 .copy_files(&pending.destination, &pending.spec["attachments"])
+                .map_err(|detail| SubmitError { detail, safe_to_edit: !retry })
                 .and_then(|_| {
                     let mut request = json!({"op":"start","spec":pending.spec});
                     if let Some(after) = pending.after {
                         request["after"] = json!(after);
                     }
-                    client.operation(&pending.destination, request)
+                    client.operation(&pending.destination, request).map_err(|detail| {
+                        let safe_to_edit = detail.strip_prefix("HTTP 422: ").is_some_and(|reason| {
+                            matches!(reason,
+                                "working directory must exist on the executing machine and be absolute"
+                                | "automatic working directory cannot be a symbolic link"
+                                | "working directory requires a UTF-8 path"
+                                | "this prototype allows eight active runs per machine"
+                                | "OpenRouter credential file is unavailable on the executing machine"
+                                | "OpenRouter credential is not UTF-8"
+                                | "OpenRouter credential file contains no single valid key")
+                        });
+                        SubmitError { detail, safe_to_edit }
+                    })
                 });
             publisher.send(Update::Submitted(id, result));
         });
@@ -582,7 +603,7 @@ mod tests {
         assert_eq!(pending.spec, expected);
         let submitted = Bus::new(egui::Context::default());
         assert_eq!(pending.after.as_deref(), Some(id.as_str()));
-        client.submit(pending.clone(), submitted.publisher());
+        client.submit(pending.clone(), false, submitted.publisher());
         match submitted.rx.recv_timeout(Duration::from_secs(20)).unwrap() {
             Update::Submitted(id, result) => {
                 assert_eq!(id, next);

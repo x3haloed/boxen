@@ -38,6 +38,7 @@ struct Saved {
     new_thread_text: String,
     new_thread_settings: new_conversation::Settings,
     new_thread_files: Vec<attachments::FileRef>,
+    new_thread_request: Option<String>,
     thread_files: Vec<(ThreadKey, Vec<attachments::FileRef>)>,
     thread_settings: Vec<(ThreadKey, thread_view::RunSettings)>,
     moves: Vec<thread_view::PendingMove>,
@@ -69,7 +70,8 @@ struct Data {
     moving: HashSet<ThreadKey>,
     preparing_followups: HashMap<String, ThreadKey>,
     local_key: String,
-    editing_run_settings: Option<new_conversation::Settings>,
+    new_thread_dialog: bool,
+    show_new_thread_settings: bool,
     focus_new_conversation: bool,
     new_conversation_issue: Option<String>,
     editing_thread_settings: Option<(ThreadKey, thread_view::RunSettings)>,
@@ -89,6 +91,7 @@ struct Data {
 enum Action {
     NewConversation,
     StartConversation,
+    SaveDesktop,
     MoveConversation(ThreadKey, thread_view::RunSettings),
     RetryMove(ThreadKey),
     Work(work::Action),
@@ -175,6 +178,10 @@ impl Desktop {
         saved
             .workspace
             .merge_resident_views(&mut saved.activity_views);
+        while let Some(path) = saved.workspace.dock.find_tab(&Pane::LegacyNewConversation) {
+            saved.workspace.dock.remove_tab(path);
+        }
+        let new_thread_dialog = saved.new_thread_request.is_some();
         let bus = Bus::new(cc.egui_ctx.clone());
         let mut app = Self {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -188,6 +195,7 @@ impl Desktop {
             data: Data {
                 work: work::State::new(&home, &origin),
                 saved,
+                new_thread_dialog,
                 ..Default::default()
             },
             client: None,
@@ -218,7 +226,8 @@ impl Desktop {
             menu::Command::Reconnect if !self.ready => self.connect(),
             menu::Command::Reconnect => {}
             menu::Command::ShowWork => self.data.saved.workspace.show_work(),
-            menu::Command::Palette => self.open_palette(),
+            menu::Command::Palette if !self.data.new_thread_dialog => self.open_palette(),
+            menu::Command::Palette => {}
         }
     }
     fn open_palette(&mut self) {
@@ -432,13 +441,16 @@ impl Desktop {
                                 })
                                 .cloned()
                                 .collect();
-                            for p in reconciled {
-                                self.accept_pending(&p);
+                            for p in &reconciled {
+                                self.accept_pending(p);
                             }
                             self.data
                                 .catalogs
                                 .insert(dest.key.clone(), catalog(&dest.key, &runs));
                             self.reconcile_placements();
+                            if !reconciled.is_empty() {
+                                self.persist();
+                            }
                         }
                         Err(error) => {
                             self.data.errors.insert(dest.key, error);
@@ -516,7 +528,6 @@ impl Desktop {
                                     peer: p.destination.key.clone(),
                                     id: p.spec["thread_id"].as_str().unwrap_or("").into(),
                                 };
-                                self.accept_pending(&p);
                                 let list = self.data.catalogs.entry(key.peer.clone()).or_default();
                                 if let Some(t) = list.iter_mut().find(|t| t.key == key) {
                                     if !t.runs.iter().any(|r| r["record"]["spec"]["id"] == id) {
@@ -527,9 +538,14 @@ impl Desktop {
                                         0,
                                         Conversation {
                                             key,
-                                            title: p.spec["prompt"]
+                                            title: snapshot["record"]["spec"]["prompt"]
                                                 .as_str()
-                                                .unwrap_or("")
+                                                .and_then(|prompt| prompt.lines().next())
+                                                .filter(|line| !line.trim().is_empty())
+                                                .or_else(|| {
+                                                    p.spec["attachments"][0]["name"].as_str()
+                                                })
+                                                .unwrap_or("Untitled thread")
                                                 .chars()
                                                 .take(72)
                                                 .collect(),
@@ -537,10 +553,15 @@ impl Desktop {
                                         },
                                     );
                                 }
+                                self.accept_pending(&p);
                                 self.persist();
                             }
                         }
+                        Err(error) if self.is_new_thread_request(&id) => {
+                            self.new_thread_failed(&id, error);
+                        }
                         Err(error) => {
+                            let error = error.detail;
                             if let Some(p) = self
                                 .data
                                 .saved
@@ -560,26 +581,14 @@ impl Desktop {
                                     && error.ends_with(
                                         "follow-up source is no longer the latest anonymous run",
                                     );
-                                if p.after.is_none()
-                                    && directory_rejected
-                                    && self.edit_rejected_start(&key, &p)
-                                {
+                                if p.after.is_some() && (directory_rejected || stale) {
                                     self.data
                                         .saved
                                         .pending
                                         .retain(|request| request.spec["id"] != id);
-                                    self.data.new_conversation_issue = Some(error);
                                     self.persist();
-                                } else {
-                                    if p.after.is_some() && (directory_rejected || stale) {
-                                        self.data
-                                            .saved
-                                            .pending
-                                            .retain(|request| request.spec["id"] != id);
-                                        self.persist();
-                                    }
-                                    self.data.thread_issues.insert(key, error);
                                 }
+                                self.data.thread_issues.insert(key, error);
                             }
                         }
                     }
@@ -592,6 +601,9 @@ impl Desktop {
             peer: p.destination.key.clone(),
             id: p.spec["thread_id"].as_str().unwrap_or("").into(),
         };
+        if self.is_new_thread_request(p.spec["id"].as_str().unwrap_or_default()) {
+            self.open_queued_thread(key.clone());
+        }
         self.clear_submitted_draft(
             &key,
             p.spec["prompt"].as_str().unwrap_or(""),
@@ -763,7 +775,8 @@ impl Desktop {
         if self.data.sending.contains(&id) {
             return;
         }
-        if !self.data.saved.pending.iter().any(|p| p.spec["id"] == id) {
+        let retry = self.data.saved.pending.iter().any(|p| p.spec["id"] == id);
+        if !retry {
             self.data.saved.pending.push(pending.clone());
         }
         // The idempotency key and exact spec are durable before the network request.
@@ -771,19 +784,21 @@ impl Desktop {
             && let Some(client) = &self.client
         {
             self.data.sending.insert(id);
-            client.submit(pending, self.bus.publisher());
+            client.submit(pending, retry, self.bus.publisher());
         }
     }
     fn action(&mut self, action: Action) {
         match action {
             Action::NewConversation => {
-                self.data.focus_new_conversation = true;
-                self.data
-                    .saved
-                    .workspace
-                    .open_editor(Pane::NewConversation, true);
+                if !self.data.new_thread_dialog {
+                    self.data.new_thread_dialog = true;
+                    self.data.focus_new_conversation = true;
+                }
             }
             Action::StartConversation => self.start_conversation(),
+            Action::SaveDesktop => {
+                self.persist();
+            }
             Action::MoveConversation(key, settings) => self.move_conversation(key, settings),
             Action::RetryMove(key) => self.retry_move(&key),
             Action::Work(action) => match action {
@@ -890,7 +905,7 @@ impl Desktop {
             return;
         }
         let mut commands: Vec<(String, Option<ThreadKey>)> = vec![
-            ("New Conversation".into(), None),
+            ("New Thread".into(), None),
             ("Show thread list".into(), None),
             ("Reset docking layout".into(), None),
             ("Machine connections…".into(), None),
@@ -994,7 +1009,6 @@ impl Desktop {
                                 matches!(
                                     p,
                                     Pane::Thread(_)
-                                        | Pane::NewConversation
                                         | Pane::Chat(_)
                                         | Pane::Activity(_)
                                         | Pane::Message(_)
@@ -1120,7 +1134,7 @@ impl TabViewer for Viewer<'_> {
             }
             Pane::Threads => "Threads".into(),
             Pane::Welcome => "Conversation".into(),
-            Pane::NewConversation => "New Conversation".into(),
+            Pane::LegacyNewConversation => unreachable!("removed while loading the workspace"),
             Pane::Thread(key) => {
                 let title = find_thread(self.data, key)
                     .map(|t| t.title.clone())
@@ -1146,7 +1160,7 @@ impl TabViewer for Viewer<'_> {
             Pane::Correspondence => egui::Id::new("correspondence"),
             Pane::Threads => egui::Id::new("threads"),
             Pane::Welcome => egui::Id::new("welcome"),
-            Pane::NewConversation => egui::Id::new("new-conversation"),
+            Pane::LegacyNewConversation => unreachable!("removed while loading the workspace"),
         }
     }
     fn scroll_bars(&self, _: &Pane) -> [bool; 2] {
@@ -1222,9 +1236,9 @@ impl TabViewer for Viewer<'_> {
                     ui.label("⌘/Ctrl + Shift + P opens the command palette.");
                 });
             }
-            Pane::NewConversation => new_conversation::panel(ui, self.data, self.actions),
+            Pane::LegacyNewConversation => unreachable!("removed while loading the workspace"),
             Pane::Threads => {
-                if ui.button("New Conversation").clicked() {
+                if ui.button("New Thread").clicked() {
                     self.actions.push(Action::NewConversation);
                 }
                 ui.horizontal(|ui| {
@@ -1383,13 +1397,15 @@ impl eframe::App for Desktop {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if ctx.input_mut(|i| {
-            i.consume_key(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::P,
-            ) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::P)
-                || i.consume_key(egui::Modifiers::NONE, egui::Key::F1)
-        }) {
+        if !self.data.new_thread_dialog
+            && ctx.input_mut(|i| {
+                i.consume_key(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::P,
+                ) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::P)
+                    || i.consume_key(egui::Modifiers::NONE, egui::Key::F1)
+            })
+        {
             if self.palette {
                 self.palette = false;
             } else {
@@ -1461,6 +1477,13 @@ impl eframe::App for Desktop {
             && !field.show(&ctx)
         {
             self.field = None;
+        }
+        if self.data.new_thread_dialog {
+            let mut actions = Vec::new();
+            new_conversation::dialog(&ctx, &mut self.data, &mut actions);
+            for action in actions {
+                self.action(action);
+            }
         }
         // Save edited drafts/layout after user interaction, without a permanent repaint loop.
         if self.last_save.elapsed() > Duration::from_secs(1)

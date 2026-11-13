@@ -121,6 +121,32 @@ pub struct Composer<'a> {
     pub limit: usize,
     pub blocked: bool,
 }
+pub fn send_on_enter(ui: &mut egui::Ui, editor_id: egui::Id) -> bool {
+    // The frame's modifier snapshot can already be clear by the time
+    // Shift+Enter is processed. Match the modifiers on the key event itself.
+    ui.memory(|m| m.has_focus(editor_id))
+        && ui.input_mut(|input| {
+            let mut send = false;
+            input.events.retain(|event| {
+                if let egui::Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    repeat,
+                    modifiers,
+                    ..
+                } = event
+                    && modifiers.is_none()
+                {
+                    send |= !repeat;
+                    false
+                } else {
+                    true
+                }
+            });
+            send
+        })
+}
+
 pub fn composer(
     ui: &mut egui::Ui,
     data: &mut Data,
@@ -141,29 +167,7 @@ pub fn composer(
     let mut changed = chips(ui, files, &local, true, previews, actions);
     let working = preparing.get(&target).is_some_and(|p| p.working);
     let editor_id = ui.make_persistent_id(("composer", &target));
-    // The frame's modifier snapshot can already be clear by the time
-    // Shift+Enter is processed. Match the modifiers on the key event itself.
-    let enter = ui.memory(|m| m.has_focus(editor_id))
-        && ui.input_mut(|input| {
-            let mut send = false;
-            input.events.retain(|event| {
-                if let egui::Event::Key {
-                    key: egui::Key::Enter,
-                    pressed: true,
-                    repeat,
-                    modifiers,
-                    ..
-                } = event
-                    && modifiers.is_none()
-                {
-                    send |= !repeat;
-                    false
-                } else {
-                    true
-                }
-            });
-            send
-        });
+    let enter = send_on_enter(ui, editor_id);
     let (editor, valid, click) = ui
         .horizontal(|ui| {
             let attach = ui

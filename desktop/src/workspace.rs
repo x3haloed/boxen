@@ -164,7 +164,6 @@ impl Workspace {
                 matches!(
                     p,
                     Pane::Thread(_)
-                        | Pane::NewConversation
                         | Pane::Work
                         | Pane::Chat(_)
                         | Pane::Activity(_)

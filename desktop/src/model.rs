@@ -18,7 +18,8 @@ pub enum Pane {
     Message(ThreadKey),
     Compose(String),
     Welcome,
-    NewConversation,
+    #[serde(rename = "NewConversation", skip_serializing)]
+    LegacyNewConversation,
     Thread(ThreadKey),
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
