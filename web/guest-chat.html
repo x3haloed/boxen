@@ -254,6 +254,12 @@ window.addEventListener('drop', event => {
   addFiles(event.dataTransfer.files);
 });
 
+input.addEventListener('keydown', event => {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  if (!event.repeat) form.requestSubmit(button);
+});
+
 form.addEventListener('submit', async event => {
   event.preventDefault();
   if (sending || (!input.value.trim() && !files.length)) return;
