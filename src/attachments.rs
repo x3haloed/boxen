@@ -16,7 +16,7 @@ pub(crate) const FILE_LIMIT: u64 = 32 * 1024 * 1024;
 const CHUNK: usize = 192 * 1024;
 const STORE_LIMIT: u64 = 1024 * 1024 * 1024;
 const STORE_COUNT: usize = 8192;
-const MESSAGE_LIMIT: usize = 8;
+pub(crate) const MESSAGE_LIMIT: usize = 8;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -86,25 +86,41 @@ impl Store {
         }
         Ok(path)
     }
-    pub(crate) fn capture(&self, name: &str, bytes: &[u8]) -> Result<Attachment> {
-        let file = Attachment {
-            name: name.into(),
-            size: bytes.len() as u64,
-            digest: format!("{:x}", Sha256::digest(bytes)),
-        };
-        let mut status = self.operation(&json!({"action":"status","file":file}))?;
-        while status["complete"] != true {
-            let offset = status["next"]
-                .as_u64()
-                .filter(|offset| *offset <= file.size)
-                .ok_or("invalid attachment transfer offset")? as usize;
-            let end = bytes.len().min(offset + CHUNK);
-            status = self.operation(&json!({"action":"write","file":file,"offset":offset,"data":STANDARD.encode(&bytes[offset..end])}))?;
-            if status["next"] != end as u64 || (end == offset && status["complete"] != true) {
-                return Err("attachment capture did not reach its retained offset".into());
-            }
+    pub(crate) fn preview_mime(&self, a: &Attachment) -> Option<&'static str> {
+        a.validate().ok()?;
+        let mut header = [0; 12];
+        let count = File::open(self.path(a)).ok()?.read(&mut header).ok()?;
+        match crate::media::kind(&header[..count]) {
+            Some(("image", mime)) => Some(mime),
+            _ => None,
         }
-        Ok(file)
+    }
+    pub(crate) fn capture(&self, name: &str, bytes: &[u8]) -> Result<Attachment> {
+        capture(name, bytes, |request| self.operation(&request))
+    }
+    pub(crate) fn capture_local(&self, path: &Path) -> Result<Attachment> {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("attachment filename is UTF-8")?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > FILE_LIMIT {
+            return Err("attachments are regular files of at most 32 MiB".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(FILE_LIMIT + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > FILE_LIMIT {
+            return Err("attachment grew beyond 32 MiB".into());
+        }
+        self.capture(name, &bytes)
     }
     pub fn require(&self, files: &[Attachment]) -> Result<()> {
         if files.len() > MESSAGE_LIMIT {
@@ -245,4 +261,51 @@ impl Store {
         }
         Ok(())
     }
+}
+
+pub(crate) fn capture(
+    name: &str,
+    bytes: &[u8],
+    mut transfer: impl FnMut(Value) -> Result<Value>,
+) -> Result<Attachment> {
+    let file = Attachment {
+        name: name.into(),
+        size: bytes.len() as u64,
+        digest: format!("{:x}", Sha256::digest(bytes)),
+    };
+    file.validate()?;
+    let probe = json!({"action":"status","file":file});
+    let mut status = transfer(probe.clone())?;
+    while status["complete"] != true {
+        let offset = status["next"]
+            .as_u64()
+            .filter(|offset| *offset <= file.size)
+            .ok_or("invalid attachment transfer offset")? as usize;
+        let end = bytes.len().min(offset + CHUNK);
+        status = match transfer(json!({
+            "action":"write","file":file,"offset":offset,"data":STANDARD.encode(&bytes[offset..end])
+        })) {
+            Ok(progress) => progress,
+            Err(error) => {
+                // A concurrent upload or a lost acknowledgment can advance this digest.
+                let current = transfer(probe.clone())?;
+                if current["complete"] == true
+                    || current["next"]
+                        .as_u64()
+                        .is_some_and(|next| next > offset as u64)
+                {
+                    status = current;
+                    continue;
+                }
+                return Err(error);
+            }
+        };
+        if (status["complete"] != true && end == offset)
+            || (status["complete"] != true && status["next"] != end as u64)
+            || (status["complete"] == true && status["next"] != file.size)
+        {
+            return Err("attachment capture did not reach its retained offset".into());
+        }
+    }
+    Ok(file)
 }

@@ -1509,12 +1509,6 @@ impl Jobs {
             conversation,
         } = &spec.to
         {
-            if !spec.attachments.is_empty() {
-                return Err(
-                    "file references are supported by Boxen mail, not external connector sends"
-                        .into(),
-                );
-            }
             let Address::Resident { id } = &sender else {
                 return Err("external sends have a bound resident sender".into());
             };
@@ -1537,6 +1531,11 @@ impl Jobs {
             } else {
                 crate::messaging::authorize(self, owner, id, instance, conversation, true)?
             };
+            if !spec.attachments.is_empty()
+                && connector.definition.provider != crate::guest_chat::PROVIDER
+            {
+                return Err("file references are supported by Boxen mail and guest chat".into());
+            }
             if !spec.subject.is_empty()
                 && !connector
                     .definition
@@ -1797,6 +1796,48 @@ impl Jobs {
             return Err("run belongs to a different peer".into());
         }
         Ok(run)
+    }
+
+    pub(crate) fn guest_chat_status(&self, resident: &crate::residents::Resident) -> &'static str {
+        let runs = self.runs.lock().unwrap();
+        let mut latest = None;
+        let mut status = if resident.auto_activate {
+            "ready"
+        } else {
+            "offline"
+        };
+        for run in runs.values() {
+            let inner = run.inner.lock().unwrap();
+            let snapshot = &inner.snapshot;
+            if snapshot.record.owner != resident.owner
+                || snapshot.record.spec.thread_id != resident.id
+            {
+                continue;
+            }
+            if !terminal(&snapshot.status) {
+                status = "working";
+                break;
+            }
+            let order = (snapshot.record.created_at, snapshot.record.spec.id.clone());
+            if latest.as_ref().is_none_or(|previous| &order > previous) {
+                latest = Some(order);
+                status = if resident.auto_activate && snapshot.status != "failed" {
+                    "ready"
+                } else {
+                    "offline"
+                };
+            }
+        }
+        drop(runs);
+        logging::record(
+            Level::Debug,
+            Target::Workload,
+            "guest_chat.resident_status",
+            Context::peer(&resident.owner),
+            || json!({"resident_id":resident.id,"status":status}),
+            || Value::Null,
+        );
+        status
     }
 
     /// Instantaneous metadata, not a lease against future messages/activations.

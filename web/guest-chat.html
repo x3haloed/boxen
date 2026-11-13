@@ -9,7 +9,12 @@
 * { box-sizing: border-box; }
 body { margin: 0; }
 main { max-width: 46rem; margin: auto; padding: 1.5rem clamp(1rem, 4vw, 2rem); min-height: 100dvh; display: flex; flex-direction: column; }
-h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+header { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; margin-bottom: 1rem; }
+h1 { font-size: 1.5rem; margin: 0; }
+#agent-status { display: inline-flex; align-items: center; gap: .4rem; font-size: .875rem; color: #455953; }
+#agent-status::before { content: ''; width: .55rem; height: .55rem; border-radius: 50%; background: #6e7a76; }
+#agent-status[data-state="ready"]::before { background: #258260; }
+#agent-status[data-state="working"]::before { background: #aa6115; }
 ol { list-style: none; padding: 0; margin: 0 0 1rem; flex: 1; }
 li { max-width: 90%; width: fit-content; margin-bottom: .8rem; padding: .65rem .9rem; border-radius: .8rem; background: white; border: 1px solid #dbe4e0; overflow-wrap: anywhere; }
 li.guest { margin-left: auto; background: #e0f0e9; border-color: #cddfd6; }
@@ -23,32 +28,64 @@ button { background: #174d3c; color: white; border: 0; border-radius: .5rem; pad
 button:disabled { opacity: .55; cursor: default; }
 :focus-visible { outline: 3px solid #286c55; outline-offset: 2px; }
 #status { margin-left: .6rem; color: #455953; }
+.attachments { display: flex; flex-wrap: wrap; gap: .45rem; margin: .35rem 0; }
+.file { display: inline-flex; align-items: center; gap: .5rem; max-width: 100%; padding: .3rem .55rem; border: 1px solid #c8d7d1; border-radius: .5rem; background: #fff; color: #174d3c; overflow-wrap: anywhere; }
+.file img { width: 3rem; height: 3rem; object-fit: cover; border-radius: .3rem; }
+.file img[hidden] { display: none; }
+.file button, #attach, #close-preview { padding: .3rem .55rem; background: #e5ede9; color: #174d3c; }
+form.dragging { outline: 2px dashed #286c55; outline-offset: .4rem; border-radius: .4rem; }
+dialog { max-width: min(90vw, 64rem); max-height: 94dvh; border: 1px solid #c8d7d1; border-radius: .75rem; padding: .8rem; }
+dialog::backdrop { background: #14231fbb; }
+dialog header { justify-content: space-between; margin-bottom: .5rem; }
+dialog img { display: block; max-width: 100%; max-height: 78dvh; margin: auto; object-fit: contain; }
 </style>
 </head>
 <body>
 <main>
+<header>
 <h1 id="title">Chat</h1>
+<span id="agent-status" role="status" data-state="offline">Connecting…</span>
+</header>
 <ol id="messages" aria-label="Messages" role="log"></ol>
 <form>
 <label for="message">Message</label>
-<textarea id="message" rows="2" maxlength="8192" required></textarea>
+<textarea id="message" rows="2" maxlength="8192"></textarea>
+<div class="attachments" id="draft-files" aria-label="Draft attachments"></div>
+<input type="file" id="files" multiple hidden>
+<button id="attach" type="button">Attach files</button>
 <button type="submit">Send</button>
 <span id="status" role="status"></span>
 </form>
 </main>
+<dialog aria-labelledby="preview-name">
+<header><strong id="preview-name"></strong><button type="button" id="close-preview" autofocus>Close</button></header>
+<img alt="">
+<p id="preview-error" hidden>Image preview unavailable.</p>
+</dialog>
 <script>
 const messages = document.querySelector('#messages');
 const form = document.querySelector('form');
 const input = document.querySelector('textarea');
-const button = document.querySelector('button');
+const button = form.querySelector('button[type="submit"]');
 const status = document.querySelector('#status');
+const agentStatus = document.querySelector('#agent-status');
+const fileInput = document.querySelector('#files');
+const attach = document.querySelector('#attach');
+const draftFiles = document.querySelector('#draft-files');
+const preview = document.querySelector('dialog');
+const previewImage = preview.querySelector('img');
+const previewError = document.querySelector('#preview-error');
 const headers = { 'X-Boxen-Chat': '1' };
 const ids = new Set();
+const files = [];
+const maxFiles = 8;
+const maxFileBytes = 32 * 1024 * 1024;
 let after = 0;
 let pending;
 let sending = false;
 let connected = false;
 let resident = 'Agent';
+let dragDepth = 0;
 
 async function chatRequest(url, options = {}) {
   const response = await fetch(url, { ...options, headers: { ...headers, ...options.headers } });
@@ -56,11 +93,59 @@ async function chatRequest(url, options = {}) {
   return response.json();
 }
 
+function setAgentStatus(state) {
+  const labels = { ready: 'Ready', working: 'Working', offline: 'Offline' };
+  agentStatus.dataset.state = state;
+  agentStatus.textContent = labels[state] ?? labels.offline;
+}
+
+function thumbnail(url) {
+  const image = document.createElement('img');
+  image.alt = '';
+  image.src = url;
+  image.loading = 'lazy';
+  image.addEventListener('error', () => { image.hidden = true; });
+  return image;
+}
+
+function displayAttachment(file, messageId, index) {
+  const url = '/attachments/' + messageId + '/' + index;
+  const link = document.createElement('a');
+  link.className = 'file';
+  if (file.image) {
+    link.href = url;
+    link.append(thumbnail(url));
+    link.addEventListener('click', event => {
+      event.preventDefault();
+      document.querySelector('#preview-name').textContent = file.name;
+      previewImage.alt = file.name;
+      previewImage.hidden = false;
+      previewError.hidden = true;
+      previewImage.src = url;
+      preview.showModal();
+    });
+  } else {
+    link.href = url + '?download';
+    link.download = file.name;
+  }
+  link.append(file.name);
+  return link;
+}
+
+document.querySelector('#close-preview').addEventListener('click', () => preview.close());
+preview.addEventListener('close', () => previewImage.removeAttribute('src'));
+previewImage.addEventListener('error', () => {
+  if (!preview.open) return;
+  previewImage.hidden = true;
+  previewError.hidden = false;
+});
+
 async function refresh() {
   try {
     while (true) {
       const page = await chatRequest('/messages?after=' + after);
       resident = page.resident;
+      setAgentStatus(page.status ?? 'ready');
       document.querySelector('#title').textContent = resident;
       document.title = 'Chat with ' + resident;
       const nearBottom = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 100;
@@ -73,7 +158,14 @@ async function refresh() {
         author.textContent = message.sender === 'guest' ? 'You' : resident;
         const body = document.createElement('p');
         body.textContent = message.body;
-        item.append(author, body);
+        item.append(author);
+        if (message.body) item.append(body);
+        if (message.attachments?.length) {
+          const list = document.createElement('div');
+          list.className = 'attachments';
+          message.attachments.forEach((file, index) => list.append(displayAttachment(file, message.id, index)));
+          item.append(list);
+        }
         messages.append(item);
       }
       if (nearBottom && page.messages.length) window.scrollTo(0, document.documentElement.scrollHeight);
@@ -83,6 +175,7 @@ async function refresh() {
     if (!connected && !sending) status.textContent = '';
     connected = true;
   } catch {
+    setAgentStatus('offline');
     if (!sending) status.textContent = 'Chat is unavailable. Reconnecting…';
     connected = false;
   } finally {
@@ -90,9 +183,80 @@ async function refresh() {
   }
 }
 
+function renderDraft() {
+  draftFiles.replaceChildren();
+  for (const entry of files) {
+    const card = document.createElement('div');
+    card.className = 'file';
+    if (entry.preview) card.append(thumbnail(entry.preview));
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = 'Remove';
+    remove.setAttribute('aria-label', 'Remove ' + entry.file.name);
+    remove.disabled = sending;
+    remove.addEventListener('click', () => {
+      files.splice(files.indexOf(entry), 1);
+      if (entry.preview) URL.revokeObjectURL(entry.preview);
+      pending = undefined;
+      renderDraft();
+    });
+    card.append(entry.file.name, remove);
+    draftFiles.append(card);
+  }
+}
+
+function addFiles(incoming) {
+  if (sending) return;
+  const rejected = [];
+  for (const file of incoming) {
+    if (files.length >= maxFiles) {
+      rejected.push('A message can include up to eight files.');
+      break;
+    }
+    if (file.size > maxFileBytes) {
+      rejected.push(file.name + ' exceeds 32 MiB.');
+      continue;
+    }
+    const preview = file.type.startsWith('image/') ? URL.createObjectURL(file) : null;
+    files.push({ file, preview });
+    pending = undefined;
+  }
+  status.textContent = rejected.join(' ');
+  renderDraft();
+}
+
+attach.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  addFiles(fileInput.files);
+  fileInput.value = '';
+});
+const hasFiles = event => Array.from(event.dataTransfer.types).includes('Files');
+window.addEventListener('dragenter', event => {
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  dragDepth++;
+  if (!sending) form.classList.add('dragging');
+});
+window.addEventListener('dragover', event => {
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = sending ? 'none' : 'copy';
+});
+window.addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) form.classList.remove('dragging');
+});
+window.addEventListener('drop', event => {
+  dragDepth = 0;
+  form.classList.remove('dragging');
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  addFiles(event.dataTransfer.files);
+});
+
 form.addEventListener('submit', async event => {
   event.preventDefault();
-  if (sending || !input.value.trim()) return;
+  if (sending || (!input.value.trim() && !files.length)) return;
   if (new TextEncoder().encode(input.value).length > 8192) {
     status.textContent = 'This message is too long.';
     return;
@@ -104,25 +268,43 @@ form.addEventListener('submit', async event => {
   }
   sending = true;
   button.disabled = true;
+  attach.disabled = true;
   input.readOnly = true;
   status.textContent = 'Sending…';
+  renderDraft();
   try {
+    const attachments = [];
+    for (const entry of files) {
+      status.textContent = 'Attaching ' + entry.file.name + '…';
+      entry.upload ??= await chatRequest('/uploads?name=' + encodeURIComponent(entry.file.name), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: entry.file,
+      });
+      attachments.push(entry.upload);
+    }
+    status.textContent = 'Sending…';
     await chatRequest('/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(pending),
+      body: JSON.stringify({ ...pending, attachments }),
     });
     pending = undefined;
     input.value = '';
+    for (const entry of files.splice(0)) {
+      if (entry.preview) URL.revokeObjectURL(entry.preview);
+    }
     status.textContent = 'Sent';
   } catch (error) {
     status.textContent = error.message === '422'
-      ? 'Boxen declined the message.'
+      ? 'Boxen could not accept the message or one of its files.'
       : 'Delivery could not be confirmed. Send again to retry.';
   } finally {
     sending = false;
     button.disabled = false;
+    attach.disabled = false;
     input.readOnly = false;
+    renderDraft();
     input.focus();
   }
 });

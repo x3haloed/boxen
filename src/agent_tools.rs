@@ -17,6 +17,7 @@ pub fn resident_tool(
 ) -> Result<Value> {
     let owner = &resident.owner;
     let mut discord_upload = false;
+    let mut guest_upload = false;
     let service_action = if tool == "boxen_messages" && args["action"] == "call" {
         let instance = jobs.connectors.get(
             owner,
@@ -26,6 +27,8 @@ pub fn resident_tool(
         )?;
         discord_upload =
             instance.definition.provider == "discord" && args["operation"] == "send_files";
+        guest_upload = instance.definition.provider == crate::guest_chat::PROVIDER
+            && args["operation"] == "send_files";
         crate::message_service::declared(
             &instance,
             args["operation"].as_str().ok_or("operation required")?,
@@ -48,6 +51,14 @@ pub fn resident_tool(
         );
         jobs.get(owner, run_id)?
             .reserve_message(call_id, &fingerprint)?;
+    }
+    if guest_upload {
+        return crate::messaging::guest_chat_send_files(
+            jobs,
+            resident,
+            &args,
+            format!("run:{run_id}:{call_id}"),
+        );
     }
     if discord_upload {
         let source = format!("run:{run_id}:{call_id}");

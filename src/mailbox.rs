@@ -900,13 +900,25 @@ impl Mailboxes {
             .cloned()
             .collect()
     }
+    pub(crate) fn guest_chat_message_matches(
+        message: &Message,
+        guest: &Address,
+        resident: &Address,
+        receipt: Option<&Value>,
+    ) -> bool {
+        (&message.sender == guest && &message.to == resident)
+            || (&message.sender == resident
+                && &message.to == guest
+                && receipt.is_some_and(|r| r["transport"] == "guest_chat"))
+    }
+
     pub fn guest_chat_messages(
         &self,
         owner: &str,
         guest: &Address,
         resident: &Address,
         after: u64,
-    ) -> Result<Value> {
+    ) -> Result<(Vec<Message>, u64)> {
         self.check()?;
         let inner = self.inner.lock().unwrap();
         let mut bytes = 0;
@@ -916,27 +928,28 @@ impl Mailboxes {
             .messages
             .partition_point(|message| message.seq <= after);
         for message in inner.messages[start..].iter().filter(|m| m.owner == owner) {
-            let incoming = &message.sender == guest && &message.to == resident;
-            let outgoing = &message.sender == resident
-                && &message.to == guest
-                && inner
-                    .receipts
-                    .get(&message.id)
-                    .is_some_and(|r| r["transport"] == "guest_chat");
-            if !incoming && !outgoing {
+            if !Self::guest_chat_message_matches(
+                message,
+                guest,
+                resident,
+                inner.receipts.get(&message.id),
+            ) {
                 continue;
             }
-            bytes += message.body.len() + 256;
+            bytes += message.body.len()
+                + 256
+                + message
+                    .attachments
+                    .iter()
+                    .map(|file| file.name.len() + 128)
+                    .sum::<usize>();
             if messages.len() == 64 || bytes > 128 * 1024 {
                 break;
             }
             next_after = message.seq;
-            messages.push(json!({
-                "id":message.id, "sender":if incoming {"guest"} else {"resident"},
-                "body":message.body, "at":message.accepted_at,
-            }));
+            messages.push(message.clone());
         }
-        Ok(json!({"messages":messages,"next_after":next_after}))
+        Ok((messages, next_after))
     }
     pub fn has_pending(&self, owner: &str, resident: &str, presented: &HashSet<String>) -> bool {
         let target = Address::Resident {

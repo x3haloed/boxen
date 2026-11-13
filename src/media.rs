@@ -20,7 +20,7 @@ fn hex64(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn kind(b: &[u8]) -> Option<(&'static str, &'static str)> {
+pub(crate) fn kind(b: &[u8]) -> Option<(&'static str, &'static str)> {
     if b.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some(("image", "image/png"))
     } else if b.starts_with(b"\xff\xd8\xff") {

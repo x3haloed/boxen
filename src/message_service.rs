@@ -13,6 +13,15 @@ pub struct Tool {
     pub parameters: Value,
 }
 pub fn tools(instance: &Instance) -> Vec<Tool> {
+    if instance.definition.provider == crate::guest_chat::PROVIDER {
+        return vec![Tool {
+            name: "send_files".into(),
+            kind: "action".into(),
+            permission: "send".into(),
+            description: "Sends a guest chat reply with 1–8 local files, each up to 32 MiB. Relative paths use the resident working directory. Boxen retains the original bytes before accepting the reply. The guest can open supported images in the browser and download other files. Arguments contain paths and optional body and in_reply_to.".into(),
+            parameters: json!({"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8},"body":{"type":"string"},"in_reply_to":{"type":"string"}},"required":["paths"],"additionalProperties":false}),
+        }];
+    }
     if instance.definition.provider != "discord" {
         return instance.definition.tools.clone();
     }

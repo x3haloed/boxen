@@ -2,6 +2,7 @@
 //! owns intake, outgoing acceptance, dispatch uncertainty and service receipts.
 use crate::{
     Result,
+    attachments::{Attachment, MESSAGE_LIMIT},
     jobs::{self, Jobs},
     logging::{self, Context, Level, Target},
     mailbox::{Address, Message, Send},
@@ -555,7 +556,7 @@ fn project_address(a: &Address) -> Value {
     }
 }
 fn project(jobs: &Jobs, m: &Message) -> Value {
-    json!({"id":m.id,"network":m.network,"from":project_address(&m.sender),"to":project_address(&m.to),"subject":if m.subject.is_empty(){Value::Null}else{json!(m.subject)},"body":m.body,"service":m.service,"reply_to":project_address(&m.reply_to),"in_reply_to":m.in_reply_to,"origin":m.origin,"accepted_at":m.accepted_at,"seq":m.seq,"delivery":jobs.mailboxes.receipt(&m.id).unwrap_or_else(||json!({"status":if matches!(m.to,Address::Connector{..}){"queued"}else{"accepted"},"accepted_on":m.accepted_on}))})
+    json!({"id":m.id,"network":m.network,"from":project_address(&m.sender),"to":project_address(&m.to),"subject":if m.subject.is_empty(){Value::Null}else{json!(m.subject)},"body":m.body,"attachments":m.attachments,"service":m.service,"reply_to":project_address(&m.reply_to),"in_reply_to":m.in_reply_to,"origin":m.origin,"accepted_at":m.accepted_at,"seq":m.seq,"delivery":jobs.mailboxes.receipt(&m.id).unwrap_or_else(||json!({"status":if matches!(m.to,Address::Connector{..}){"queued"}else{"accepted"},"accepted_on":m.accepted_on}))})
 }
 pub fn authorize_action(
     jobs: &Jobs,
@@ -969,17 +970,69 @@ pub fn operation(
                         let resident = Address::Resident {
                             id: binding.resident.clone(),
                         };
-                        let mut page = jobs.mailboxes.guest_chat_messages(
+                        let (messages, next_after) = jobs.mailboxes.guest_chat_messages(
                             owner,
                             &guest,
                             &resident,
                             args["after"].as_u64().unwrap_or(0),
                         )?;
-                        page["resident"] =
-                            json!(jobs.residents.get(owner, &binding.resident)?.name);
-                        Ok(page)
+                        let resident = jobs.residents.get(owner, &binding.resident)?;
+                        let status = jobs.guest_chat_status(&resident);
+                        let messages: Vec<_> = messages.iter().map(|message| {
+                            let mut item = json!({
+                                "id":message.id,"sender":if message.sender == guest {"guest"} else {"resident"},
+                                "body":message.body,"at":message.accepted_at,
+                            });
+                            if !message.attachments.is_empty() {
+                                item["attachments"] = json!(message.attachments.iter().map(|file|
+                                    json!({"name":file.name,"size":file.size,"image":jobs.attachments.preview_mime(file).is_some()})
+                                ).collect::<Vec<_>>());
+                            }
+                            item
+                        }).collect();
+                        Ok(
+                            json!({"resident":resident.name,"status":status,"messages":messages,"next_after":next_after}),
+                        )
                     }
                     "guest_chat_send" => guest_chat_send(jobs, owner, id, &args),
+                    "guest_chat_upload" => {
+                        let _transition = jobs.connectors.intake.lock().unwrap();
+                        let instance = jobs.connectors.get(owner, id)?;
+                        guest_chat_scope(&instance)?;
+                        let transfer = &args["transfer"];
+                        if !matches!(transfer["action"].as_str(), Some("status" | "write")) {
+                            return Err("guest uploads support only status and write".into());
+                        }
+                        jobs.attachments.operation(transfer)
+                    }
+                    "guest_chat_attachment" => {
+                        let instance = jobs.connectors.get(owner, id)?;
+                        let (binding, guest) = guest_chat_scope(&instance)?;
+                        let resident = Address::Resident {
+                            id: binding.resident.clone(),
+                        };
+                        let mid = args["message_id"].as_str().ok_or("message id required")?;
+                        let message = jobs.mailboxes.get(owner, mid)?;
+                        let receipt = jobs.mailboxes.receipt(mid);
+                        if !crate::mailbox::Mailboxes::guest_chat_message_matches(
+                            &message,
+                            &guest,
+                            &resident,
+                            receipt.as_ref(),
+                        ) {
+                            return Err("attachment belongs to another conversation".into());
+                        }
+                        let index = args["index"]
+                            .as_u64()
+                            .filter(|index| *index < MESSAGE_LIMIT as u64)
+                            .ok_or("attachment index is outside the message")?
+                            as usize;
+                        let file = message
+                            .attachments
+                            .get(index)
+                            .ok_or("message attachment unavailable")?;
+                        Ok(serde_json::to_value(file)?)
+                    }
                     "outbox" => {
                         let i = jobs.connectors.get(owner, id)?;
                         Ok(
@@ -1179,6 +1232,77 @@ fn guest_chat_scope(instance: &Instance) -> Result<(&Binding, Address)> {
     ))
 }
 
+pub(crate) fn guest_chat_send_files(
+    jobs: &std::sync::Arc<Jobs>,
+    resident: &crate::residents::Resident,
+    args: &Value,
+    source: String,
+) -> Result<Value> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Input {
+        paths: Vec<String>,
+        #[serde(default)]
+        body: String,
+        in_reply_to: Option<String>,
+    }
+    let input: Input = serde_json::from_value(args["arguments"].clone())?;
+    if input.paths.is_empty() || input.paths.len() > MESSAGE_LIMIT || input.body.len() > 32 * 1024 {
+        return Err("guest chat replies carry 1–8 file paths and at most 32 KiB of text".into());
+    }
+    let instance = args["to"]["instance"].as_str().ok_or("instance required")?;
+    let conversation = args["to"]["conversation"]
+        .as_str()
+        .ok_or("conversation required")?;
+    let connector = authorize(
+        jobs,
+        &resident.owner,
+        &resident.id,
+        instance,
+        conversation,
+        true,
+    )?;
+    let (binding, target) = guest_chat_scope(&connector)?;
+    if binding.resident != resident.id || binding.conversation != conversation {
+        return Err("guest chat replies belong to the bound conversation".into());
+    }
+    if let Some(id) = jobs.mailboxes.source_id(&source) {
+        return Ok(project(jobs, &jobs.mailboxes.get(&resident.owner, &id)?));
+    }
+    let mut files = Vec::with_capacity(input.paths.len());
+    for path in input.paths {
+        if path.is_empty() || path.len() > 4096 {
+            return Err("attachment paths contain 1–4096 bytes".into());
+        }
+        files.push(
+            jobs.attachments
+                .capture_local(&std::path::Path::new(&resident.cwd).join(path))?,
+        );
+    }
+    let id = args["id"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or(state::random_hex()?);
+    let message = jobs.send_mail(
+        &resident.owner,
+        Address::Resident {
+            id: resident.id.clone(),
+        },
+        Send {
+            id,
+            to: target,
+            body: input.body,
+            attachments: files,
+            service: None,
+            subject: String::new(),
+            reply_to: None,
+            in_reply_to: input.in_reply_to,
+        },
+        source,
+    )?;
+    Ok(project(jobs, &message))
+}
+
 fn native_message_id(
     owner: &str,
     instance: &str,
@@ -1206,14 +1330,26 @@ fn guest_chat_send(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<V
     let native = args["id"].as_str().ok_or("guest message id required")?;
     jobs::valid_id(native)?;
     let body = args["body"].as_str().ok_or("guest message text required")?;
-    if body.trim().is_empty() || body.len() > crate::guest_chat::MAX_MESSAGE {
-        return Err("guest message is nonblank and at most 8 KiB".into());
+    let attachments: Vec<Attachment> = args
+        .get("attachments")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    if (body.trim().is_empty() && attachments.is_empty())
+        || body.len() > crate::guest_chat::MAX_MESSAGE
+    {
+        return Err("guest messages carry text up to 8 KiB or attachments".into());
     }
     let message_id =
         native_message_id(owner, id, &binding.conversation, native, &binding.resident)?;
     jobs.mailboxes.check()?;
     if let Ok(prior) = jobs.mailboxes.get(owner, &message_id) {
-        if prior.body != body || prior.sender != guest || prior.to != resident {
+        if prior.body != body
+            || prior.sender != guest
+            || prior.to != resident
+            || prior.attachments != attachments
+        {
             return Err("guest message id already accepted with different input".into());
         }
         return Ok(json!({"id":message_id,"accepted":true}));
@@ -1237,11 +1373,12 @@ fn guest_chat_send(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<V
         native,
     );
     jobs.residents.get(owner, &binding.resident)?;
+    jobs.attachments.require(&attachments)?;
     jobs.mailboxes.accept(
         owner,
         guest.clone(),
         Send {
-            attachments: vec![],
+            attachments,
             service: None,
             id: message_id.clone(),
             to: resident,
@@ -1667,6 +1804,8 @@ pub(crate) fn local_runner_operation(
                         | "attachment"
                         | "guest_chat_read"
                         | "guest_chat_send"
+                        | "guest_chat_upload"
+                        | "guest_chat_attachment"
                 )
             )
         {
@@ -1675,12 +1814,9 @@ pub(crate) fn local_runner_operation(
             );
         }
         let i = jobs.connectors.local_runner_instance(id)?;
-        if i.definition.provider == crate::guest_chat::PROVIDER
-            && !matches!(
-                request["args"]["action"].as_str(),
-                Some("get" | "guest_chat_read" | "guest_chat_send")
-            )
-        {
+        let action = request["args"]["action"].as_str().unwrap_or("");
+        let guest_chat = i.definition.provider == crate::guest_chat::PROVIDER;
+        if action != "get" && guest_chat != action.starts_with("guest_chat_") {
             return Err("guest chat runner control accepts only its chat operations".into());
         }
         crate::protocol::operation(jobs, &i.owner, request)
