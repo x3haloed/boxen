@@ -44,6 +44,12 @@ cloudflared tunnel --url http://127.0.0.1:42427 \
   --allowed-mail guest@example.com
 ```
 
+On Windows, run the same command on one line in PowerShell:
+
+```powershell
+cloudflared.exe tunnel --url http://127.0.0.1:42427 --http-host-header 127.0.0.1:42427 --allowed-mail guest@example.com
+```
+
 Use one exact email address. The tunnel should announce one-time PIN
 authentication. Share the generated HTTPS link after confirming a fresh
 browser session sees the email gate. The link changes on tunnel restart.
