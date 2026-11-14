@@ -39,6 +39,7 @@ struct FieldConfig: Decodable {
     let ocrScale: Int?
     let accurateOCR: Bool?
     let matchAll: Bool?
+    let rejectHorizontalEdgeText: Bool?
 }
 
 struct Profile: Decodable {
@@ -156,7 +157,15 @@ struct Field {
         request.recognitionLevel = config.accurateOCR == true ? .accurate : .fast
         request.usesLanguageCorrection = false
         try VNImageRequestHandler(cgImage: ocrImage(crop)).perform([request])
-        let lines = (request.results ?? []).prefix(64).compactMap { $0.topCandidates(1).first }
+        let observations = (request.results ?? []).prefix(64)
+        // Vision boxes use normalized image coordinates, including after upscaling.
+        let lines = observations.compactMap { observation -> VNRecognizedText? in
+            if config.rejectHorizontalEdgeText == true,
+               observation.boundingBox.minX <= 0.02 || observation.boundingBox.maxX >= 0.98 {
+                return nil
+            }
+            return observation.topCandidates(1).first
+        }
         let text = String(lines.map(\.string).joined(separator: "\n").prefix(2048))
         guard !text.isEmpty, let confidence = lines.map(\.confidence).min() else { return nil }
 

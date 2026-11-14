@@ -41,7 +41,7 @@ The WoW profile samples the quest objective tracker, minimap zone label and nume
 
 ## Profiles and observations
 
-A profile specifies a target interval in milliseconds and up to eight named regions. Region coordinates are normalized to the captured image, with the origin at the upper left. A field without a pattern returns its OCR text. A field with a regular expression returns the first capture group, or the whole match if there are no groups. Setting `matchAll` joins the matching values with newlines. A quest counter can match `Checkpoint\s+(\d+/\d+)` and require two consecutive confirmations. Profiles are local operator configuration.
+A profile specifies a target interval in milliseconds and up to eight named regions. Region coordinates are normalized to the captured image, with the origin at the upper left. A field without a pattern returns its OCR text. A field with a regular expression returns the first capture group, or the whole match if there are no groups. Setting `matchAll` joins the matching values with newlines. A quest counter can match `Checkpoint\s+(\d+/\d+)` and require two consecutive confirmations. `rejectHorizontalEdgeText` discards OCR lines whose Vision text boxes reach within 2% of either horizontal edge. The WoW zone and target fields use it to catch possible clipping. Profiles are local operator configuration.
 
 OCR defaults to the fast recognizer and original crop size. `ocrScale` can upscale small HUD text by an integer factor up to four, bounded by the capture size limit. `accurateOCR` selects Vision's more expensive recognizer for a field. The WoW profile uses both settings because the fast pass made digit and label errors on the sampled HUD.
 
@@ -51,6 +51,14 @@ The capture and processing times are measured separately. The target interval in
 
 ## Connection to Boxen
 
-The local sensor owns capture, OCR, tracking, and short-lived evidence. JSON Lines is the process boundary. A separate consumer can forward records using its chosen authenticated transport. The current CLI provides stdout and local frame lookup. Boxen ingestion, remote evidence lookup, and platform-specific capture backends beyond macOS are future work.
+The local sensor owns capture, OCR, tracking, and short-lived evidence. JSON Lines is the process boundary. The bundled Python publisher forwards archive-free observations over Boxen's authenticated CLI. An operator creates a publishing-only `latest` source on the daemon hosting the consumer and optionally an `ordered` source for confirmed field changes. Use one publisher per source. Paired machine operators have the access described in [the network contract](../../docs/network.md). The [observations API](../../docs/events-runtime.md) covers registration, private audiences, and passive or waking subscriptions.
 
-For a Boxen adapter, route coalescible field snapshots to current-state observation sources and confirmed transitions to ordered sources. Use session and frame for provenance and duplicate detection. A profile can specialize a game or application without adding its behavior to the Boxen daemon. Activation remains a subscription decision. A gameplay loop can react to a counter change, request the supporting crop when uncertain, and use a separate action path. Capture loss, transport loss, and unreadable fields represent different conditions.
+```sh
+visual-sensor capture-window addons/visual-sensor/wow.json 0 com.blizzard.worldofwarcraft |
+  python3 addons/visual-sensor/publish.py HOST:PORT PEER_PUBLIC_KEY LATEST_SOURCE_ID \
+    --ordered-source ORDERED_SOURCE_ID
+```
+
+The publisher drains sensor stdout independently of network requests. It keeps one replaceable snapshot and discards snapshots older than three seconds before attempting delivery. Network delay after that point can add to receipt age. Compare `observed_at_ms` and `received_at_ms` on synchronized hosts, or use `--report-age` for local capture-to-acknowledgment timing. The ordered worker queues up to 32 records of confirmed changes, excluding initial acquisitions. A `publisher_gap` record identifies known discarded records or gaps in the incoming frame stream. Pending data lives in memory and is lost if the publisher exits. After an uncertain response, the publisher checks the source's accepted sequence before continuing. Capture session and frame identify each sample independently of publication sequence.
+
+A profile can specialize a game or application without adding its behavior to the Boxen daemon. Activation remains a subscription decision. Remote image evidence lookup and capture backends beyond macOS remain future work.
