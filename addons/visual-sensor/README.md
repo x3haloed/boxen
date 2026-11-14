@@ -62,3 +62,59 @@ visual-sensor capture-window addons/visual-sensor/wow.json 0 com.blizzard.worldo
 The publisher drains sensor stdout independently of network requests. It keeps one replaceable snapshot and discards snapshots older than three seconds before attempting delivery. Network delay after that point can add to receipt age. Compare `observed_at_ms` and `received_at_ms` on synchronized hosts, or use `--report-age` for local capture-to-acknowledgment timing. The ordered worker queues up to 32 records of confirmed changes, excluding initial acquisitions. Repeat `--ordered-field` to select specific fields, such as quest objectives while position remains in the latest snapshot. A `publisher_gap` record identifies known discarded records or gaps in the incoming frame stream. Pending data lives in memory and is lost if the publisher exits. After an uncertain response, the publisher checks the source's accepted sequence before continuing. Capture session and frame identify each sample independently of publication sequence.
 
 A profile can specialize a game or application without adding its behavior to the Boxen daemon. Activation remains a subscription decision. Remote image evidence lookup and capture backends beyond macOS remain future work.
+
+## External watchers
+
+The watcher serves the sensor directly to an external harness over HTTP. It
+does not need a model, a Boxen daemon, or a Boxen machine identity. The harness
+owns any conversation wake policy and can stop watching by closing the stream.
+Multiple watchers have independent cursors. For a LAN listener, the watcher
+requires TLS. The client trusts the deployment certificate and presents a
+sensor-specific bearer token in the Authorization header.
+
+```sh
+python3 addons/visual-sensor/watcher.py --bind SENSOR_IP \
+  --credentials /private/config/watcher.json --cert /private/config/tls.pem \
+  --key /private/config/tls.key -- \
+  work/visual-sensor/visual-sensor watch-window addons/visual-sensor/wow.json \
+    com.blizzard.worldofwarcraft whole quest-objectives zone target-name
+```
+
+The private JSON file has a `crops` token and optionally a distinct `whole`
+token. Each token should be randomly generated with at least 256 bits of
+entropy. Replacing the file atomically revokes old tokens on new requests and
+disconnects old streams on their next authorization check. The capture mode
+`crops` avoids retaining whole windows even for a whole-frame credential.
+Run the watcher in a logged-in graphical session with Screen Recording
+permission for its launch context.
+
+| Request | Result |
+| --- | --- |
+| `GET /v1/snapshot` | Latest observation and capture health |
+| `GET /v1/events` | SSE snapshot, ordered changes, capture health, and explicit gaps |
+| `GET /v1/frames/SESSION/FRAME/FIELD` | PNG of the named region from that exact sample |
+| `GET /v1/frames/SESSION/FRAME` | Exact whole-window PNG with whole-frame grant |
+| `POST /v1/fresh/FIELD` | PNG from a new sample after the request |
+| `POST /v1/fresh` | New whole-window PNG with whole-frame grant |
+
+Change records identify the sample, confirmed before/after values, and crops
+available when published. The watcher sends a replaceable snapshot on attach
+and periodically while sampling. Coordinate changes stay out of the ordered
+stream when their field is omitted from the watch list. SSE IDs cover ordered
+changes and capture interruptions. A new connection starts at the present
+snapshot. A reconnect sends `Last-Event-ID` with the last processed SSE ID and
+receives retained records after that point, or a gap when the cursor predates
+retention or belongs to an earlier server instance. Periodic snapshots and
+health notices do not advance the cursor. Health includes the last successful
+capture time even if OCR values are identical. An interrupted stream is a
+transport failure and can be reconnected independently of capture health.
+
+Evidence is retained in RAM for up to 120 seconds or until the 64 MiB budget
+evicts it. At most 64 ordered records are retained. No watcher images are
+written to disk. An expired or unavailable image returns HTTP 410 and never
+causes recapture. Successful image responses identify the actual sample in
+`X-Visual-Session`, `X-Visual-Frame`, and `X-Visual-Captured-At-Ms`. A fresh
+request is rate limited and waits for a new capture to fulfill it. The watcher
+restarts failed or stalled capture workers, keeping prior evidence available
+within the same retention limits. Restarting the watcher itself clears its RAM
+and changes the SSE epoch.

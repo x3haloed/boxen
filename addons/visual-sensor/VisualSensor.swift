@@ -271,7 +271,7 @@ struct Sensor {
         }
     }
 
-    mutating func accept(_ image: CGImage, frame: Int, capturedAt: Date, captureMs: Double) throws {
+    mutating func observe(_ image: CGImage, frame: Int, capturedAt: Date, captureMs: Double) throws -> Observation {
         let start = DispatchTime.now().uptimeNanoseconds
         var states: [FieldState] = []
         var changes: [Change] = []
@@ -282,14 +282,66 @@ struct Sensor {
         }
         let processingMs = elapsedMs(since: start)
         try archive?.store(image, frame: frame)
-        let observation = Observation(session: session, profile: profile.id, frame: frame,
+        return Observation(session: session, profile: profile.id, frame: frame,
                                       capturedAtUnixMs: Int64(capturedAt.timeIntervalSince1970 * 1000),
                                       width: image.width, height: image.height,
                                       captureMs: captureMs, processingMs: processingMs,
                                       evidenceRetained: archive != nil, fields: states, changes: changes)
+    }
+
+    mutating func accept(_ image: CGImage, frame: Int, capturedAt: Date, captureMs: Double) throws {
+        let observation = try observe(image, frame: frame, capturedAt: capturedAt, captureMs: captureMs)
         var line = try encoder.encode(observation)
         line.append(10)
         try FileHandle.standardOutput.write(contentsOf: line)
+    }
+}
+
+struct WatchSample: Encodable {
+    let observation: Observation
+    let changes: [Change]
+    let fresh: Bool
+    let images: [WatchImage]
+}
+
+struct WatchImage: Encodable {
+    // A missing field denotes the whole capture.
+    let field: String?
+    let size: Int
+}
+
+func pngBytes(_ image: CGImage) -> Data? {
+    let bytes = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(bytes, UTType.png.identifier as CFString, 1, nil)
+    else { return nil }
+    CGImageDestinationAddImage(destination, image, nil)
+    return CGImageDestinationFinalize(destination) ? bytes as Data : nil
+}
+
+func writeWatchSample(_ observation: Observation, image: CGImage, profile: Profile,
+                      watched: Set<String>, whole: Bool, fresh: Bool, encoder: JSONEncoder) throws {
+    let changes = observation.changes.filter { $0.previous != nil && watched.contains($0.field) }
+    var images: [(WatchImage, Data)] = []
+    var remaining = 16 * 1024 * 1024
+    func append(_ image: CGImage, field: String?) {
+        guard let bytes = pngBytes(image), bytes.count <= remaining else { return }
+        images.append((WatchImage(field: field, size: bytes.count), bytes))
+        remaining -= bytes.count
+    }
+    if fresh || !changes.isEmpty {
+        for field in profile.fields {
+            if let crop = image.cropping(to: field.region.rect(in: image)) {
+                append(crop, field: field.id)
+            }
+        }
+        if whole { append(image, field: nil) }
+    }
+    let sample = WatchSample(observation: observation, changes: changes, fresh: fresh, images: images.map(\.0))
+    var line = try encoder.encode(sample)
+    line.append(10)
+    try FileHandle.standardOutput.write(contentsOf: line)
+    for (_, bytes) in images {
+        try FileHandle.standardOutput.write(contentsOf: bytes)
     }
 }
 
@@ -322,11 +374,21 @@ struct VisualSensor {
     private static func run(_ args: [String]) async throws {
         switch args.first {
         case "capture" where (3...4).contains(args.count),
-             "capture-window" where (4...5).contains(args.count):
-            guard let count = Int(args[2]), count >= 0 else { throw SensorError("Invalid frame count.") }
-            let windowBundle = args[0] == "capture-window" ? args[3] : nil
+             "capture-window" where (4...5).contains(args.count),
+             "watch-window" where args.count >= 5:
+            let watching = args[0] == "watch-window"
+            guard let count = watching ? 0 : Int(args[2]), count >= 0 else { throw SensorError("Invalid frame count.") }
+            let windowBundle = watching ? args[2] : args[0] == "capture-window" ? args[3] : nil
             let archiveIndex = windowBundle == nil ? 3 : 4
             let profile = try loadProfile(args[1])
+            let whole = watching && args[3] == "whole"
+            let watched = watching ? Set(args.dropFirst(4)) : []
+            if watching {
+                guard (whole || args[3] == "crops"), watched.isSubset(of: Set(profile.fields.map(\.id))),
+                      fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK) != -1 else {
+                    throw SensorError("Invalid watcher fields, image mode, or command input.")
+                }
+            }
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             let filter: SCContentFilter
             let configuration: SCStreamConfiguration
@@ -353,12 +415,23 @@ struct VisualSensor {
                 filter = SCContentFilter(display: display, excludingWindows: [])
                 configuration = captureConfiguration(width: Double(display.width), height: Double(display.height))
             }
-            var sensor = try Sensor(profile: profile, archivePath: args.count > archiveIndex ? args[archiveIndex] : nil)
+            var sensor = try Sensor(profile: profile,
+                                    archivePath: !watching && args.count > archiveIndex ? args[archiveIndex] : nil)
             var frame = 1
             while count == 0 || frame <= count {
                 let start = DispatchTime.now().uptimeNanoseconds
+                var command: UInt8 = 0
+                let fresh = watching && Darwin.read(STDIN_FILENO, &command, 1) == 1
                 let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-                try sensor.accept(image, frame: frame, capturedAt: Date(), captureMs: elapsedMs(since: start))
+                let captureMs = elapsedMs(since: start)
+                let capturedAt = Date()
+                if watching {
+                    let observation = try sensor.observe(image, frame: frame, capturedAt: capturedAt, captureMs: captureMs)
+                    try writeWatchSample(observation, image: image, profile: profile, watched: watched,
+                                         whole: whole, fresh: fresh, encoder: sensor.encoder)
+                } else {
+                    try sensor.accept(image, frame: frame, capturedAt: capturedAt, captureMs: captureMs)
+                }
                 frame += 1
                 if count == 0 || frame <= count {
                     let remainingMs = Double(sensor.profile.intervalMs) - elapsedMs(since: start)
@@ -400,6 +473,7 @@ struct VisualSensor {
                 Usage:
                   visual-sensor capture PROFILE FRAME_COUNT [ARCHIVE_ROOT]
                   visual-sensor capture-window PROFILE FRAME_COUNT BUNDLE_ID [ARCHIVE_ROOT]
+                  visual-sensor watch-window PROFILE BUNDLE_ID crops|whole FIELD [FIELD ...]
                   visual-sensor replay PROFILE IMAGE [IMAGE ...]
                   visual-sensor inspect ARCHIVE_ROOT SESSION FRAME OUTPUT.png [PROFILE FIELD]
                 A frame count of 0 runs until stopped.
