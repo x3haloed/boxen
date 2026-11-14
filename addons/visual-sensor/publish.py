@@ -25,11 +25,16 @@ def main():
     parser.add_argument("peer")
     parser.add_argument("latest_source")
     parser.add_argument("--ordered-source")
+    parser.add_argument("--ordered-field", action="append", default=[],
+                        help="Send confirmed changes for this field to the ordered source (repeatable)")
     parser.add_argument("--boxen", default="boxen")
     parser.add_argument("--report-age", action="store_true")
     args = parser.parse_args()
     if args.ordered_source == args.latest_source:
         parser.error("latest and ordered sources must be distinct")
+    if args.ordered_field and not args.ordered_source:
+        parser.error("--ordered-field requires --ordered-source")
+    ordered_fields = set(args.ordered_field)
 
     def events(action, **fields):
         command = [args.boxen, "events", args.address, args.peer,
@@ -69,7 +74,11 @@ def main():
                             # A new capture session cannot establish what happened in between.
                             lost_changes += 1
                         last_frame = (session, frame)
-                        transitions = [change for change in sample["changes"] if "previous" in change]
+                        transitions = [
+                            change for change in sample["changes"]
+                            if "previous" in change
+                            and (not ordered_fields or change["field"] in ordered_fields)
+                        ]
                         if transitions:
                             payload = dict(schema=sample["schema"], profile=sample["profile"],
                                            session=session, frame=frame, changes=transitions)

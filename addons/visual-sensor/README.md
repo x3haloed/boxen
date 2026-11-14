@@ -56,9 +56,9 @@ The local sensor owns capture, OCR, tracking, and short-lived evidence. JSON Lin
 ```sh
 visual-sensor capture-window addons/visual-sensor/wow.json 0 com.blizzard.worldofwarcraft |
   python3 addons/visual-sensor/publish.py HOST:PORT PEER_PUBLIC_KEY LATEST_SOURCE_ID \
-    --ordered-source ORDERED_SOURCE_ID
+    --ordered-source ORDERED_SOURCE_ID --ordered-field quest-objectives
 ```
 
-The publisher drains sensor stdout independently of network requests. It keeps one replaceable snapshot and discards snapshots older than three seconds before attempting delivery. Network delay after that point can add to receipt age. Compare `observed_at_ms` and `received_at_ms` on synchronized hosts, or use `--report-age` for local capture-to-acknowledgment timing. The ordered worker queues up to 32 records of confirmed changes, excluding initial acquisitions. A `publisher_gap` record identifies known discarded records or gaps in the incoming frame stream. Pending data lives in memory and is lost if the publisher exits. After an uncertain response, the publisher checks the source's accepted sequence before continuing. Capture session and frame identify each sample independently of publication sequence.
+The publisher drains sensor stdout independently of network requests. It keeps one replaceable snapshot and discards snapshots older than three seconds before attempting delivery. Network delay after that point can add to receipt age. Compare `observed_at_ms` and `received_at_ms` on synchronized hosts, or use `--report-age` for local capture-to-acknowledgment timing. The ordered worker queues up to 32 records of confirmed changes, excluding initial acquisitions. Repeat `--ordered-field` to select specific fields, such as quest objectives while position remains in the latest snapshot. A `publisher_gap` record identifies known discarded records or gaps in the incoming frame stream. Pending data lives in memory and is lost if the publisher exits. After an uncertain response, the publisher checks the source's accepted sequence before continuing. Capture session and frame identify each sample independently of publication sequence.
 
 A profile can specialize a game or application without adding its behavior to the Boxen daemon. Activation remains a subscription decision. Remote image evidence lookup and capture backends beyond macOS remain future work.
