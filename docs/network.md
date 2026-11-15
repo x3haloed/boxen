@@ -110,14 +110,14 @@ historical recipient.
 The existing correspondence journal owns outgoing acceptance, destination mailbox
 intake and delivery receipts. There is no second network inbox database. A source
 accepts an immutable message and its destination route in one journal record
-before acknowledging it. It retains at most 256 pending network sends. A
-dedicated worker wakes on durable enqueue or a due retry, independently of
-membership synchronization, and dispatches batches of up to eight. A failed
-peer transport delays further sends to that destination until the failed
-message's retry deadline. Skipped messages keep their existing receipts.
-The destination delay is process-local and the attempted message's retry
-deadline is durable. Transfers and sends run serially within the worker, so
-a request already blocked on the transport can still delay other destinations.
+before acknowledging it. It retains at most 256 pending network sends. Four
+workers wake on durable enqueue or a due retry, independently of membership
+synchronization. Each carries one delivery at a time, including its attachment
+transfers, and each destination can occupy only one worker. A failed peer
+transport delays further sends to that destination until the failed message's
+retry deadline. Skipped messages keep their existing receipts. The destination
+delay is process-local and the attempted message's retry deadline is durable.
+If four destinations occupy all workers, further destinations wait for a slot.
 Unknown location, full pending storage or failed retention reports nonacceptance.
 
 Source-side `delivery.status: queued` means **saved on the accepting machine,
@@ -172,13 +172,19 @@ queues a backlog for an impaired destination and sends at a fixed rate to a
 healthy destination through recovery. The impaired link closes TCP connections
 by default. `--fault stalled` holds the connection open without forwarding it
 until recovery. The two daemon peers still perform Noise authentication.
-The same command accepts the portable `.com` artifact.
+`--fault attachment-stalled` retains the first attachment chunk and stalls
+the next write. The test checks that the attachment-bearing message waits for
+the retained original and verifies the exact delivered bytes after recovery.
+`--fault healthy` provides a comparison with both links healthy. Use
+`--outage 14 --require-timeout` on a stall case to require evidence that a
+mail attempt reached the transport timeout before recovery. The same command
+accepts the portable `.com` artifact.
 
 The benchmark checks exact inbox membership and measures durable source
 acceptance, durable destination acceptance, and the retained sender receipt
 from filtered diagnostic events on the same clock. It reports the healthy
-delivery p95, impaired backlog drain time, attempts, source CPU and resident
-memory, and individual timings. It runs without model credentials or installed
+delivery p95, impaired backlog drain time, attempts, source CPU, sampled peak
+resident memory, and individual timings. It runs without model credentials or installed
 services. Run one trial at a time and alternate baseline and candidate binaries
 under the same fault schedule. The regular network smoke test covers restart,
 storage errors, and acknowledgment loss separately.

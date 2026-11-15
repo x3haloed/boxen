@@ -118,6 +118,19 @@ struct Inner {
     residents: HashSet<String>,
     receipts: HashMap<String, Value>,
     cursors: HashMap<String, Value>,
+    network: NetworkDispatch,
+}
+#[derive(Default)]
+struct NetworkDispatch {
+    in_flight: HashSet<String>,
+    deferred: HashMap<String, u64>,
+    store_retry_at: u64,
+}
+pub struct NetworkDelivery {
+    pub message: Message,
+    pub destination: String,
+    pub receipt: Value,
+    pub active: usize,
 }
 pub struct DeliveryOutcome<'a> {
     pub result: Option<&'a Value>,
@@ -181,6 +194,7 @@ impl Mailboxes {
                         residents: HashSet::new(),
                         receipts: HashMap::new(),
                         cursors: HashMap::new(),
+                        network: NetworkDispatch::default(),
                     }),
                 })
             }
@@ -211,6 +225,7 @@ impl Mailboxes {
             residents: HashSet::new(),
             receipts: HashMap::new(),
             cursors: HashMap::new(),
+            network: NetworkDispatch::default(),
         };
         let mut reader = BufReader::new(File::open(&path)?);
         let mut complete = 0;
@@ -573,38 +588,46 @@ impl Mailboxes {
             None => Ok(None),
         }
     }
-    pub fn wait_network_pending(&self, deferred_peers: &HashMap<String, u64>) -> Vec<Message> {
+    pub fn wait_network_pending(&self) -> NetworkDelivery {
         let mut inner = self.inner.lock().unwrap();
         loop {
             let now = jobs::now();
-            let mut ready = Vec::new();
+            inner.network.deferred.retain(|_, due| *due > now);
             let mut next_due = None;
-            for message in &inner.messages {
-                let Some(receipt) = inner.receipts.get(&message.id).filter(|receipt| {
-                    receipt["transport"] == "boxen_network" && receipt["status"] == "queued"
-                }) else {
-                    continue;
-                };
-                let peer_due = receipt["destination_machine"]
-                    .as_str()
-                    .and_then(|peer| deferred_peers.get(peer))
-                    .copied()
-                    .unwrap_or(0);
-                let due = receipt["next_attempt_at"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .max(peer_due);
-                if due > now {
-                    next_due = Some(next_due.map_or(due, |earliest: u64| earliest.min(due)));
-                    continue;
+            if inner.network.store_retry_at > now {
+                next_due = Some(inner.network.store_retry_at);
+            } else {
+                let ready = inner.messages.iter().find_map(|message| {
+                    let receipt = inner.receipts.get(&message.id).filter(|receipt| {
+                        receipt["transport"] == "boxen_network" && receipt["status"] == "queued"
+                    })?;
+                    let destination = receipt["destination_machine"].as_str()?;
+                    if inner.network.in_flight.contains(destination) {
+                        return None;
+                    }
+                    let due = receipt["next_attempt_at"].as_u64().unwrap_or(0).max(
+                        inner
+                            .network
+                            .deferred
+                            .get(destination)
+                            .copied()
+                            .unwrap_or(0),
+                    );
+                    if due > now {
+                        next_due = Some(next_due.map_or(due, |earliest: u64| earliest.min(due)));
+                        return None;
+                    }
+                    Some((message.clone(), destination.to_owned(), receipt.clone()))
+                });
+                if let Some((message, destination, receipt)) = ready {
+                    inner.network.in_flight.insert(destination.clone());
+                    return NetworkDelivery {
+                        message,
+                        destination,
+                        receipt,
+                        active: inner.network.in_flight.len(),
+                    };
                 }
-                ready.push(message.clone());
-                if ready.len() == 8 {
-                    break;
-                }
-            }
-            if !ready.is_empty() {
-                return ready;
             }
             inner = match next_due {
                 Some(due) => {
@@ -619,20 +642,29 @@ impl Mailboxes {
             };
         }
     }
-    pub fn network_outcome(&self, id: &str, outcome: Value) -> Result<()> {
-        self.check()?;
+    pub fn network_outcome(
+        &self,
+        delivery: &NetworkDelivery,
+        outcome: &Value,
+        defer_until: Option<u64>,
+    ) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        if !inner
-            .receipts
-            .get(id)
-            .is_some_and(|r| r["transport"] == "boxen_network" && r["status"] == "queued")
-        {
-            return Err("network delivery is not pending".into());
-        }
-        Self::append(
+        let id = &delivery.message.id;
+        let result = Self::append(
             &mut inner,
             json!({"kind":"connector_receipt","id":id,"receipt":outcome}),
-        )
+        );
+        if result.is_err() {
+            inner.network.store_retry_at = jobs::now() + 5_000;
+        } else if let Some(due) = defer_until {
+            inner
+                .network
+                .deferred
+                .insert(delivery.destination.clone(), due);
+        }
+        inner.network.in_flight.remove(&delivery.destination);
+        self.network_changed.notify_all();
+        result
     }
     pub fn participant_message(
         &self,
