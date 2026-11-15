@@ -8,6 +8,7 @@ use crate::{
 use fs2::FileExt;
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     fs::{self, File, OpenOptions},
     path::PathBuf,
     sync::Arc,
@@ -293,6 +294,50 @@ pub fn merge(state: &State, remote: &str, input: Value) -> Result<Value> {
 }
 pub fn start(state: Arc<State>, jobs: Arc<crate::jobs::Jobs>, port: u16) {
     *jobs.network.lock().unwrap() = Some(state.clone());
+    let delivery_state = state.clone();
+    let delivery_jobs = jobs.clone();
+    std::thread::spawn(move || {
+        logging::record(
+            Level::Debug,
+            Target::Peer,
+            "network.outbox_worker_started",
+            Context::default(),
+            || Value::Null,
+            || Value::Null,
+        );
+        let mut deferred_peers = HashMap::new();
+        loop {
+            let now = crate::jobs::now();
+            deferred_peers.retain(|_, due| *due > now);
+            let messages = delivery_jobs
+                .mailboxes
+                .wait_network_pending(&deferred_peers);
+            logging::record(
+                Level::Debug,
+                Target::Peer,
+                "network.outbox_dispatch",
+                Context::default(),
+                || json!({"messages":messages.len()}),
+                || Value::Null,
+            );
+            if let Err(e) = deliver(
+                &delivery_state,
+                &delivery_jobs,
+                messages,
+                &mut deferred_peers,
+            ) {
+                logging::record(
+                    Level::Error,
+                    Target::Peer,
+                    "network.outbox_failed",
+                    Context::default(),
+                    || json!({"error":e.to_string(),"retry_ms":5_000}),
+                    || Value::Null,
+                );
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        }
+    });
     std::thread::spawn(move || {
         let mut failures = std::collections::HashMap::<String, (u32, Instant)>::new();
         let mut prior_issues = Value::Null;
@@ -384,16 +429,6 @@ pub fn start(state: Arc<State>, jobs: Arc<crate::jobs::Jobs>, port: u16) {
                     || json!({"error":e.to_string()}),
                     || Value::Null,
                 ),
-            }
-            if let Err(e) = deliver(&state, &jobs) {
-                logging::record(
-                    Level::Error,
-                    Target::Peer,
-                    "network.outbox_failed",
-                    Context::default(),
-                    || json!({"error":e.to_string()}),
-                    || Value::Null,
-                );
             }
             std::thread::sleep(Duration::from_secs(5));
         }
@@ -512,18 +547,30 @@ pub fn route(
         }
     }
 }
-pub fn deliver(state: &State, jobs: &crate::jobs::Jobs) -> Result<()> {
-    for message in jobs.mailboxes.network_pending(crate::jobs::now()) {
-        let old = jobs
-            .mailboxes
-            .receipt(&message.id)
-            .ok_or("network delivery receipt missing")?;
+fn deliver(
+    state: &State,
+    jobs: &crate::jobs::Jobs,
+    messages: Vec<crate::mailbox::Message>,
+    deferred_peers: &mut HashMap<String, u64>,
+) -> Result<()> {
+    for message in messages {
         let destination = message
             .network
             .as_ref()
             .and_then(|n| n["destination_machine"].as_str())
             .ok_or("network destination missing")?;
+        if deferred_peers
+            .get(destination)
+            .is_some_and(|due| *due > crate::jobs::now())
+        {
+            continue;
+        }
+        let old = jobs
+            .mailboxes
+            .receipt(&message.id)
+            .ok_or("network delivery receipt missing")?;
         let attempt = old["attempts"].as_u64().unwrap_or(0).saturating_add(1);
+        let mut transport_failed = false;
         let result = (|| -> Result<Value> {
             state.require_trust(destination)?;
             let peer = state
@@ -534,15 +581,13 @@ pub fn deliver(state: &State, jobs: &crate::jobs::Jobs) -> Result<()> {
             if peer.address.is_empty() {
                 return Err("destination endpoint is not known".into());
             }
-            jobs.attachments.transfer(&message.attachments, |request| {
+            let mut request = |request| {
                 crate::protocol::request(state, &peer.address, destination, request)
-            })?;
-            let receipt = crate::protocol::request(
-                state,
-                &peer.address,
-                destination,
-                json!({"op":"network_mail","message":message}),
-            )?;
+                    .inspect_err(|e| transport_failed = !e.is::<crate::protocol::Rejected>())
+            };
+            jobs.attachments
+                .transfer(&message.attachments, &mut request)?;
+            let receipt = request(json!({"op":"network_mail","message":message}))?;
             if receipt["id"] != message.id
                 || receipt["accepted_on"] != destination
                 || receipt["status"] != "accepted"
@@ -553,21 +598,36 @@ pub fn deliver(state: &State, jobs: &crate::jobs::Jobs) -> Result<()> {
         })();
         let mut receipt = old.clone();
         receipt["attempts"] = json!(attempt);
-        match result {
+        let peer_retry_at = match result {
             Ok(accepted) => {
                 receipt["status"] = json!("accepted");
                 receipt["accepted_on"] = accepted["accepted_on"].clone();
                 receipt["destination_sequence"] = accepted["sequence"].clone();
                 receipt["last_error"] = Value::Null;
+                None
             }
             Err(error) => {
                 receipt["last_error"] = json!(error.to_string());
-                receipt["next_attempt_at"] =
-                    json!(crate::jobs::now() + 1000 * (1u64 << attempt.min(6)));
+                let due = crate::jobs::now() + 1000 * (1u64 << attempt.min(6));
+                receipt["next_attempt_at"] = json!(due);
+                transport_failed.then_some(due)
             }
-        }
+        };
         jobs.mailboxes
             .network_outcome(&message.id, receipt.clone())?;
+        if let Some(due) = peer_retry_at {
+            // Queued siblings keep their own receipts. The failed message's deadline
+            // governs the next connection attempt to this destination in this process.
+            deferred_peers.insert(destination.to_owned(), due);
+            logging::record(
+                Level::Debug,
+                Target::Peer,
+                "network.outbox_peer_deferred",
+                Context::peer(destination),
+                || json!({"message_id":message.id,"next_attempt_at":due}),
+                || Value::Null,
+            );
+        }
         logging::record(
             if receipt["status"] == "accepted" {
                 Level::Info

@@ -11,7 +11,8 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
-    sync::Mutex,
+    sync::{Condvar, Mutex},
+    time::Duration,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,6 +128,7 @@ pub struct DeliveryOutcome<'a> {
 pub struct Mailboxes {
     machine: String,
     inner: Mutex<Inner>,
+    network_changed: Condvar,
     issue: Option<String>,
 }
 impl Mailboxes {
@@ -168,6 +170,7 @@ impl Mailboxes {
                 );
                 Ok(Self {
                     machine,
+                    network_changed: Condvar::new(),
                     issue: Some(issue),
                     inner: Mutex::new(Inner {
                         file: None,
@@ -248,6 +251,7 @@ impl Mailboxes {
         );
         Ok(Self {
             machine,
+            network_changed: Condvar::new(),
             issue: None,
             inner: Mutex::new(inner),
         })
@@ -470,6 +474,9 @@ impl Mailboxes {
             event["local_delivery"] = json!({"transport":"guest_chat","status":"accepted","external_id":message.id,"at":message.accepted_at});
         }
         Self::append(&mut inner, event)?;
+        if destination.is_some() {
+            self.network_changed.notify_one();
+        }
         logging::record(
             Level::Info,
             Target::State,
@@ -566,21 +573,51 @@ impl Mailboxes {
             None => Ok(None),
         }
     }
-    pub fn network_pending(&self, at: u64) -> Vec<Message> {
-        let inner = self.inner.lock().unwrap();
-        inner
-            .messages
-            .iter()
-            .filter(|m| {
-                inner.receipts.get(&m.id).is_some_and(|r| {
-                    r["transport"] == "boxen_network"
-                        && r["status"] == "queued"
-                        && r["next_attempt_at"].as_u64().unwrap_or(0) <= at
-                })
-            })
-            .take(8)
-            .cloned()
-            .collect()
+    pub fn wait_network_pending(&self, deferred_peers: &HashMap<String, u64>) -> Vec<Message> {
+        let mut inner = self.inner.lock().unwrap();
+        loop {
+            let now = jobs::now();
+            let mut ready = Vec::new();
+            let mut next_due = None;
+            for message in &inner.messages {
+                let Some(receipt) = inner.receipts.get(&message.id).filter(|receipt| {
+                    receipt["transport"] == "boxen_network" && receipt["status"] == "queued"
+                }) else {
+                    continue;
+                };
+                let peer_due = receipt["destination_machine"]
+                    .as_str()
+                    .and_then(|peer| deferred_peers.get(peer))
+                    .copied()
+                    .unwrap_or(0);
+                let due = receipt["next_attempt_at"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .max(peer_due);
+                if due > now {
+                    next_due = Some(next_due.map_or(due, |earliest: u64| earliest.min(due)));
+                    continue;
+                }
+                ready.push(message.clone());
+                if ready.len() == 8 {
+                    break;
+                }
+            }
+            if !ready.is_empty() {
+                return ready;
+            }
+            inner = match next_due {
+                Some(due) => {
+                    // Retry deadlines are wall-clock times. Recheck pending deadlines after
+                    // at most five seconds so a forward clock change is noticed promptly.
+                    self.network_changed
+                        .wait_timeout(inner, Duration::from_millis((due - now).min(5_000)))
+                        .unwrap()
+                        .0
+                }
+                None => self.network_changed.wait(inner).unwrap(),
+            };
+        }
     }
     pub fn network_outcome(&self, id: &str, outcome: Value) -> Result<()> {
         self.check()?;

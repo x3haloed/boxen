@@ -110,15 +110,23 @@ historical recipient.
 The existing correspondence journal owns outgoing acceptance, destination mailbox
 intake and delivery receipts. There is no second network inbox database. A source
 accepts an immutable message and its destination route in one journal record
-before acknowledging it. It retains at most 256 pending network sends, dispatching
-bounded batches of eight with per-message retry deadlines. Unknown location,
-full pending storage or failed retention reports nonacceptance.
+before acknowledging it. It retains at most 256 pending network sends. A
+dedicated worker wakes on durable enqueue or a due retry, independently of
+membership synchronization, and dispatches batches of up to eight. A failed
+peer transport delays further sends to that destination until the failed
+message's retry deadline. Skipped messages keep their existing receipts.
+The destination delay is process-local and the attempted message's retry
+deadline is durable. Transfers and sends run serially within the worker, so
+a request already blocked on the transport can still delay other destinations.
+Unknown location, full pending storage or failed retention reports nonacceptance.
 
 Source-side `delivery.status: queued` means **saved on the accepting machine,
 awaiting destination acknowledgment**. `accepted` with `accepted_on` means the
 destination retained it in the recipient's mailbox. Neither means activation,
 attention, comprehension or reply. `messaging status` exposes the current receipt,
-attempt count, next retry and bounded failure cause. `mailbox_status` includes the
+attempt count, per-message retry deadline and bounded failure cause. A live
+destination delay can defer a queued message past its own deadline.
+`mailbox_status` includes the
 pending network count. Source outgoing copies are excluded from inbox projection.
 
 The receiver validates the authenticated source, local recipient and exact retained
@@ -155,3 +163,22 @@ of the Linux rotation. Platform checks include notification/blocking behavior an
 idle CPU. Existing runtime, messaging, scheduler, context and desktop suites retain
 their effects/provenance tests with shared machine-operator access expectations;
 identity-scoped runtime and connector capabilities remain distinct.
+
+## Delivery performance benchmark
+
+`python3 scripts/mail-delivery-bench.py target/release/boxen` measures
+cross-machine mail on three isolated daemons on one POSIX host. The sender
+queues a backlog for an impaired destination and sends at a fixed rate to a
+healthy destination through recovery. The impaired link closes TCP connections
+by default. `--fault stalled` holds the connection open without forwarding it
+until recovery. The two daemon peers still perform Noise authentication.
+The same command accepts the portable `.com` artifact.
+
+The benchmark checks exact inbox membership and measures durable source
+acceptance, durable destination acceptance, and the retained sender receipt
+from filtered diagnostic events on the same clock. It reports the healthy
+delivery p95, impaired backlog drain time, attempts, source CPU and resident
+memory, and individual timings. It runs without model credentials or installed
+services. Run one trial at a time and alternate baseline and candidate binaries
+under the same fault schedule. The regular network smoke test covers restart,
+storage errors, and acknowledgment loss separately.
