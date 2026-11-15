@@ -99,6 +99,12 @@ Gaps stop that observation and reconnect from the last applied sequence. Actual
 transport failures remain visible and retry after backoff; silence does not imply
 completion. Stale events from a replaced viewer generation are ignored.
 
+Messages reuses the measured layout of offscreen completed runs once their
+terminal sequence has been replayed. The scroll area keeps their space and
+draws them when they come into view or are targeted by an anchor. Changes in
+width, display scale, or the latest-reply control cause remeasurement. Activity
+and runs still receiving events use their existing render paths.
+
 Observation uses a bounded lossless channel and at most 16 current streams.
 Finite eight-second stream leases bound detached readers, renewing immediately
 from the last losslessly published sequence. Routine renewal is not presented as
@@ -151,6 +157,16 @@ used 0.10 CPU seconds over 10.034 wall seconds (about 1% of one core), with
 history, not a large-history performance claim. The shipped native window also
 loaded an existing Mac Mini conversation through the running daemon without
 submitting a production workload.
+
+For larger histories, `python3 scripts/desktop-history-bench.py --runs 800`
+loads synthetic journals into an isolated daemon, opens the thread through
+the desktop observer, and drives the real conversation panel with egui input.
+The report separates catalog time, time to project and display the latest
+response, full lossless replay, and p95 CPU frame time during replay and settled
+typing. It also exercises an earlier-message anchor, a view switch, and a
+resize before jumping to the latest response. Pass `--binary` to exercise an
+actual portable daemon. Frame times include layout and tessellation and exclude
+OS input dispatch, GPU presentation, and native window compositing.
 
 ## Project work
 

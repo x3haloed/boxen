@@ -667,7 +667,30 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             for run in &runs {
                 let id = run["record"]["spec"]["id"].as_str().unwrap_or("");
                 let tag = run_key(&key.peer, id);
-                ui.push_id(&tag, |ui| {
+                // Completed Messages blocks are static once replay reaches the terminal
+                // sequence. Activity can contain independently expanding controls.
+                let layout = (!activity && terminal(run))
+                    .then(|| {
+                        let seq = data.transcripts.get(&tag)?.seq;
+                        (seq >= run["last_seq"].as_u64()?).then(|| view::MessageLayout {
+                            sequence: seq,
+                            width: ui.available_width(),
+                            pixels_per_point: ui.ctx().pixels_per_point(),
+                            latest_reply: latest_reply
+                                .as_deref()
+                                .and_then(|anchor| anchor.split_once(':'))
+                                .is_some_and(|(run, _)| run == id),
+                        })
+                    })
+                    .flatten();
+                if let Some(bounds) =
+                    layout.and_then(|layout| data.views.get(key)?.offscreen_run(ui, id, layout))
+                {
+                    ui.advance_cursor_after_rect(bounds);
+                    continue;
+                }
+                let origin = ui.next_widget_position();
+                let response = ui.push_id(&tag, |ui| {
                     if activity
                         && let Some(machine) = run["machine"].as_str().filter(|m| *m != key.peer)
                     {
@@ -768,6 +791,11 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                         }
                     }
                 });
+                if let Some(layout) = layout
+                    && let Some(view) = data.views.get_mut(key)
+                {
+                    view.measure_run(id, layout, origin, response.response.rect);
+                }
             }
         },
     );

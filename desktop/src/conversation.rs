@@ -15,6 +15,47 @@ pub struct View {
     anchor: Option<String>,
     latest: bool,
     at_latest: bool,
+    message_layouts: HashMap<String, (MessageLayout, egui::Rect)>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct MessageLayout {
+    pub sequence: u64,
+    pub width: f32,
+    pub pixels_per_point: f32,
+    pub latest_reply: bool,
+}
+
+impl View {
+    pub fn offscreen_run(
+        &self,
+        ui: &egui::Ui,
+        id: &str,
+        layout: MessageLayout,
+    ) -> Option<egui::Rect> {
+        if self
+            .anchor
+            .as_deref()
+            .and_then(|anchor| anchor.split_once(':'))
+            .is_some_and(|(run, _)| run == id)
+        {
+            return None;
+        }
+        let (previous, bounds) = self.message_layouts.get(id)?;
+        let bounds = bounds.translate(ui.next_widget_position().to_vec2());
+        (*previous == layout && !bounds.intersects(ui.clip_rect().expand(96.))).then_some(bounds)
+    }
+
+    pub fn measure_run(
+        &mut self,
+        id: &str,
+        layout: MessageLayout,
+        origin: egui::Pos2,
+        bounds: egui::Rect,
+    ) {
+        self.message_layouts
+            .insert(id.into(), (layout, bounds.translate(-origin.to_vec2())));
+    }
 }
 pub fn header(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey) -> bool {
     let mut activity = data.saved.activity_views.contains(key);

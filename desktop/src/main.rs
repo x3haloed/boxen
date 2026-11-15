@@ -8,6 +8,8 @@ mod field;
 mod menu;
 mod model;
 mod new_conversation;
+#[cfg(test)]
+mod performance;
 mod thread_view;
 mod work;
 mod workspace;
