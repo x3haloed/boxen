@@ -99,7 +99,7 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
             backoff = (backoff * 2).min(15);
         } else {
             backoff = 1;
-            thread::sleep(Duration::from_millis(250));
+            thread::sleep(Duration::from_secs(1));
         }
     }
 }

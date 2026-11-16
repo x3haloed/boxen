@@ -88,6 +88,12 @@ Each part is retained before acknowledgment. Boxen and the client assemble and
 verify the original bytes before accepting the associated message. Incomplete
 staging expires after 31 days and completed originals remain in local storage.
 
+The client and host runner use immediate Pub/Sub pulls, with a one-second
+pause between successful sync passes. This keeps outgoing messages and presence
+probes moving while the incoming subscription is empty. Offline still means no
+fresh resident presence has arrived within 45 seconds; a cloud connection alone
+does not establish resident availability.
+
 Use updated builds of the host runner and native client together for file
 transfer. A text-only client can consume a Pub/Sub delivery it cannot display.
 

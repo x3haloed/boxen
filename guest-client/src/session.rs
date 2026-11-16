@@ -83,7 +83,7 @@ impl Session {
                 drop(state);
                 if result.is_ok() {
                     retry = Duration::from_secs(1);
-                    thread::sleep(Duration::from_millis(250));
+                    thread::sleep(Duration::from_secs(1));
                 } else {
                     permission_check = None;
                     thread::sleep(retry);

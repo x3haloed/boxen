@@ -441,11 +441,20 @@ impl Connection {
             received_messages: Vec<Delivery>,
         }
         let url = format!("{}:pull", self.subscription);
-        let batch = self.post::<Batch>("pull", url.clone(), json!({"maxMessages":6}));
+        // This bounded, single-worker loop also publishes queued chat and presence.
+        // Immediate pulls avoid repeatedly abandoning long polls at the HTTP timeout;
+        // both callers pace empty polls, so waiting never stalls those other duties.
+        let batch = self.post::<Batch>(
+            "pull",
+            url.clone(),
+            json!({"maxMessages":6,"returnImmediately":true}),
+        );
         let batch = match batch {
-            Err(error) if error.is::<InvalidResponse>() => {
-                self.post::<Batch>("pull", url, json!({"maxMessages":1}))
-            }
+            Err(error) if error.is::<InvalidResponse>() => self.post::<Batch>(
+                "pull",
+                url,
+                json!({"maxMessages":1,"returnImmediately":true}),
+            ),
             result => result,
         };
         match batch {

@@ -260,6 +260,7 @@ enum Raw {
         sym: u32,
         text: String,
         dead: bool,
+        modifiers: u64,
     },
     KeyUp(u32),
     Button {
@@ -618,6 +619,28 @@ fn button(core: &Core, code: u32, down: bool) {
     core.key(code, down);
 }
 
+// Each key event carries the authoritative AppKit modifier snapshot. FlagsChanged
+// may be absent after focus changes or for synthesized keyboard input.
+fn sync_modifiers(core: &Core, flags: u64) {
+    for (mask, left, right) in [
+        (1 << 17, KEY_LEFTSHIFT, KEY_RIGHTSHIFT),
+        (1 << 18, KEY_LEFTCTRL, KEY_RIGHTCTRL),
+        (1 << 19, KEY_LEFTALT, KEY_RIGHTALT),
+        (1 << 20, KEY_LEFTMETA, KEY_RIGHTMETA),
+    ] {
+        let active = flags & mask != 0;
+        if !active {
+            for code in [left, right] {
+                if core.key_down(code) {
+                    core.key(code, false);
+                }
+            }
+        } else if !core.key_down(left) && !core.key_down(right) {
+            core.key(left, true);
+        }
+    }
+}
+
 // ---- CVDisplayLink: the vblank source AND the ring producer -------------------------------
 extern "C" fn link_callback(
     link: *mut core::ffi::c_void,
@@ -683,7 +706,9 @@ fn produce(sh: &Shared, link: *mut core::ffi::c_void, ticks: u32) {
                 sym,
                 text,
                 dead,
+                modifiers,
             } => {
+                sync_modifiers(core, modifiers);
                 core.set_dead_flag(dead);
                 core.key_press_sym(code, sym, &text, now);
             }
@@ -949,6 +974,7 @@ impl Pump {
                         sym,
                         text: if cmd { String::new() } else { text },
                         dead,
+                        modifiers: nsmods,
                     });
                 }
                 11 => {
@@ -994,7 +1020,10 @@ impl Pump {
                     if ty == 1 {
                         self.push(Raw::LeftDown(ret_point(ev, sel("locationInWindow"))));
                     } else {
-                        self.push(Raw::Button { code, down: matches!(ty, 3 | 25) });
+                        self.push(Raw::Button {
+                            code,
+                            down: matches!(ty, 3 | 25),
+                        });
                     }
                     send1(self.app, self.sel_send_event, ev);
                 }
@@ -1586,6 +1615,42 @@ mod tests {
             out.push(ev);
         }
         out
+    }
+
+    #[test]
+    fn key_event_flags_restore_missing_modifiers_before_shortcuts() {
+        let core = Core::new();
+        sync_modifiers(&core, 1 << 20);
+        core.key_press_sym(47, keysym::from_char('v').unwrap(), "", 0);
+        let ev = events(&core);
+        assert!(
+            ev.iter()
+                .any(|e| { e.kind == EVENT_COPYPASTE && e.action == CP_PASTE })
+        );
+        sync_modifiers(&core, 1 << 17);
+        core.key_press_sym(KEY_ENTER, 0, "", 0);
+        let ev = events(&core);
+        let enter = ev
+            .iter()
+            .find(|e| e.kind == EVENT_BUTTONS && e.button(KEY_ENTER))
+            .unwrap();
+        assert!(enter.button(KEY_LEFTSHIFT));
+        assert!(!enter.button(KEY_LEFTMETA));
+        sync_modifiers(&core, 0);
+        assert!(!core.key_down(KEY_LEFTSHIFT));
+    }
+
+    #[test]
+    fn key_event_flags_preserve_modifier_sides_and_mouse_buttons() {
+        let core = Core::new();
+        core.key(KEY_RIGHTSHIFT, true);
+        core.key(BTN_LEFT, true);
+        sync_modifiers(&core, 1 << 17);
+        assert!(core.key_down(KEY_RIGHTSHIFT));
+        assert!(!core.key_down(KEY_LEFTSHIFT));
+        sync_modifiers(&core, 0);
+        assert!(!core.key_down(KEY_RIGHTSHIFT));
+        assert!(core.key_down(BTN_LEFT));
     }
 
     #[test]
