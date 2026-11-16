@@ -113,6 +113,20 @@ def work(prompt):
             pass
         notification("serverRequest/resolved", {"requestId": "approval-1"})
     answer = "Fixture result"
+    if prompt.startswith("EXECUTION_HISTORY_PROOF:"):
+        retained = pathlib.Path.cwd().parent.parent / "attachments" / prompt.split(":", 1)[1]
+        assert retained.read_bytes() == b"fixture Codex attachment execution-proof"
+        answer = "historical attachment readable"
+    if prompt == "EXECUTION_PROOF":
+        effect = pathlib.Path("execution-proof.json")
+        observed = {"account": os.environ.get("USER") or os.environ.get("USERNAME"),
+                    "uid": os.geteuid() if hasattr(os, "geteuid") else None,
+                    "home": str(pathlib.Path.home()), "cwd": str(pathlib.Path.cwd())}
+        if sys.platform == "darwin":
+            import subprocess
+            observed["session"] = subprocess.check_output(["/bin/launchctl", "managername"], text=True).strip()
+        effect.write_text(json.dumps(observed), encoding="utf-8")
+        answer = json.dumps(observed)
     if prompt == "WORKSPACE_MOVE_FIXTURE":
         response, history = invoke("boxen_thread_files", {"action":"list"}, 100)
         assert response["success"] and len(history["directories"]) == 2

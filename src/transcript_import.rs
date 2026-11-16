@@ -119,6 +119,7 @@ impl Jobs {
                 imported_at: at,
             };
             let record = Record {
+                execution: None,
                 automatic_cwd: false,
                 after: None,
                 execution_change: None,

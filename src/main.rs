@@ -13,6 +13,7 @@ mod codex_executable;
 mod context;
 mod discord_connector;
 mod events;
+mod execution;
 mod guest_chat;
 mod guest_pubsub;
 mod inference;

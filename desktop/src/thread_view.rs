@@ -571,7 +571,19 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                     ui.label("Running");
                 }
                 Some("waiting" | "blocked") => {
-                    ui.label("Waiting for input");
+                    let tag = run_key(
+                        &key.peer,
+                        last["record"]["spec"]["id"].as_str().unwrap_or(""),
+                    );
+                    let detail = data
+                        .transcripts
+                        .get(&tag)
+                        .and_then(|transcript| transcript.status.as_ref())
+                        .filter(|status| status["status"] == last["status"])
+                        .and_then(|status| status["detail"].as_str())
+                        .filter(|detail| !detail.is_empty())
+                        .unwrap_or("Waiting for input");
+                    ui.label(detail);
                 }
                 Some("failed") => {
                     ui.label("Run failed");
@@ -590,6 +602,50 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     });
     let live_id = running.as_deref().unwrap_or("");
     let live_tag = run_key(&key.peer, live_id);
+    if let Some(last) = last {
+        let tag = run_key(
+            &key.peer,
+            last["record"]["spec"]["id"].as_str().unwrap_or(""),
+        );
+        let execution = data
+            .transcripts
+            .get(&tag)
+            .and_then(|transcript| transcript.execution.as_ref())
+            .unwrap_or(&last["record"]["execution"]);
+        if execution.is_object() {
+            ui.collapsing("Execution context", |ui| {
+                ui.label(format!("Machine · {}", dest.label));
+                ui.label(format!(
+                    "Account · {}",
+                    execution["account"].as_str().unwrap_or("Unknown")
+                ));
+                ui.label(format!(
+                    "Session · {}",
+                    execution["session"].as_str().unwrap_or("Unknown")
+                ));
+                let privileges = match execution["elevated"].as_bool() {
+                    Some(true) => "Elevated",
+                    Some(false) => "Standard user",
+                    None => "Unknown",
+                };
+                ui.label(format!("Privileges · {privileges}"));
+                ui.label(format!(
+                    "Directory · {}",
+                    execution["cwd"]
+                        .as_str()
+                        .or_else(|| last["record"]["spec"]["cwd"].as_str())
+                        .unwrap_or("Unknown")
+                ));
+                if let Some(available) = execution["desktop_available"].as_bool() {
+                    ui.label(if available {
+                        "Desktop session available"
+                    } else {
+                        "Desktop session unavailable"
+                    });
+                }
+            });
+        }
+    }
     if let Some(error) = data.watches.get(&live_tag).and_then(|w| w.error.as_ref()) {
         ui.label(format!("Reconnecting to activity · {error}"));
     }

@@ -131,6 +131,27 @@ impl Store {
         }
         Ok(())
     }
+    pub fn prepare_execution(
+        &self,
+        files: &[Attachment],
+        execution: &crate::execution::Execution,
+    ) -> Result<()> {
+        if files.is_empty() || execution.mode != crate::execution::Mode::UserSession {
+            return Ok(());
+        }
+        execution.own_managed_path(&self.root)?;
+        for file in files {
+            file.validate()?;
+            let path = self.path(file);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_file() => execution.own_managed_path(&path)?,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
     pub fn context(&self, files: &[Attachment]) -> String {
         if files.is_empty() {
             return String::new();

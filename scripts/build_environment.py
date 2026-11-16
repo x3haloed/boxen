@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
 
@@ -17,6 +18,12 @@ def environment(root):
             flags.append(f'--remap-path-prefix={spelling}={replacement}')
     if sys.platform == 'win32':
         flags.append('-Clink-arg=/PDBALTPATH:boxen.pdb')
+    if sys.platform == 'darwin':
+        flags.append(f'-Clink-arg=-Wl,-oso_prefix,{pathlib.Path.home()}/')
+        mappings = [f'-ffile-prefix-map={source}={replacement}' for source, replacement in roots]
+        for variable in ['CFLAGS', 'CXXFLAGS']:
+            env[variable] = shlex.join(shlex.split(env.get(variable, '')) + mappings)
+        env['CC_SHELL_ESCAPED_FLAGS'] = '1'
     env.pop('RUSTFLAGS', None)
     env['CARGO_ENCODED_RUSTFLAGS'] = '\x1f'.join(flags)
     return env

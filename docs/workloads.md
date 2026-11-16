@@ -4,6 +4,68 @@ An anonymous Boxen thread can execute through Codex app-server on a paired LAN m
 
 The executing daemon owns the run. It retains each ordered event before publishing it. Viewer connections subscribe to that sequence and do not own execution lifetime. Streaming uses condition-variable notification rather than periodic progress polling; quiet connections receive heartbeat batches. Backend-exposed summaries are shown when available, without inventing thinking text when the backend supplies none.
 
+## Execution account and operating-system session
+
+Each newly accepted run captures its subprocess execution context. On macOS,
+a root daemon selects the owner of its data directory and launches Codex and
+built-in shell commands in that account's login session. An interactive user
+daemon uses its own account and session. An unprivileged background daemon
+inherits its existing service context. Linux and Windows currently inherit
+their daemon's execution context.
+
+The optional private `BOXEN_HOME/execution.json` configures the host selection:
+
+```json
+{"mode":"user_session","account":"example-owner"}
+```
+
+`mode` accepts `auto` (the default), `user_session` or `inherit`. An account
+override names the enrolled macOS owner. A privileged launcher can enter that
+owner's session. A root-owned data directory acquires that owner's identity
+before its first run is accepted. An account differing from an existing
+non-root directory owner rejects selection. An unprivileged launcher can use its own existing
+interactive session. `inherit` explicitly selects the daemon context, including
+its privileges. A root-owned macOS data directory requires a configured user
+account or explicit `inherit`. Account switching on other operating systems
+remains future work.
+
+Account and session selection are captured before acceptance. Exact-ID retries
+return the original run even after host settings change. A user-session run
+waits for its configured account to log in and supports cancellation during
+that wait. Steering remains queued for the runtime. Before launch, a subprocess
+probe verifies the account and session and retains an `execution_context`
+event in the existing run journal. Session loss during execution can still
+interrupt platform services or the runtime, producing ordinary retained failure
+or interruption evidence.
+
+Automatic working directories, retained request attachments and selected run
+journals receive ownership suitable for the selected account. Caller-selected
+working directories use their existing filesystem permissions. The daemon
+continues owning run acceptance, inference transport, messaging, media retention
+and independent observation adapters under its service context. Full access
+operates within the selected subprocess account's OS permissions. Application
+privacy permissions and credential-store availability require their own checks.
+Before a managed session resumes, a root launcher can repair ownership of its
+recorded root-owned native history file inside the selected Codex home. Native
+session identifiers and retained content continue through the same backend.
+
+The authenticated `runtime_info.execution` response reports daemon and workload
+contexts separately. Run records contain their captured `execution` selection,
+and journal events contain verified account/session observations. Model input
+includes that observed context. Desktop exposes an expandable **Execution
+context** detail and displays the retained reason while a run waits. Historical
+runs without context evidence retain their original records.
+
+`scripts/execution-smoke.py BINARY` exercises account-owned file effects,
+attachments, Codex and built-in shell execution, pinned retries, invalid-policy
+rejection and restart. On macOS, running the smoke test as root with
+`--account LOGGED_IN_ACCOUNT` exercises the actual service-to-login-session
+boundary. `--unavailable-account ACCOUNT_WITHOUT_A_LOGIN_SESSION` additionally
+checks waiting and cancellation. These options configure disposable test state.
+The controlled check runs against native and actual APE artifacts and belongs to
+the Linux regression rotation. Live credential access and native GUI permissions
+remain separate runtime checks.
+
 ## Usage
 
 Start each daemon with `boxen serve`. Use `--codex /absolute/path/to/codex` or `BOXEN_CODEX` when needed. Boxen can locate the bundled ChatGPT macOS CLI, executables on PATH, standalone `~/.local/bin/codex` / `~/.cargo/bin/codex`, and common native npm installations for the executing OS and architecture (including Linux x86-64). Explicit paths remain supported. The executing machine uses its own existing Codex sign-in and configuration. Credentials are not copied from the requesting machine.

@@ -115,6 +115,7 @@ mod tests {
         let id = state::random_hex().unwrap();
         state::private_dir(&path.join(&id)).unwrap();
         let record = Record {
+            execution: None,
             automatic_cwd: false,
             after: None,
             execution_change: None,
@@ -221,6 +222,8 @@ pub struct Event {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Record {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<crate::execution::Execution>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub automatic_cwd: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -249,9 +252,13 @@ pub struct Record {
 }
 impl Record {
     pub fn execution_context(&self) -> String {
-        self.execution_change.as_ref().map_or_else(String::new, |change| {
+        let mut context = self.execution.as_ref().map_or_else(String::new, |execution| {
+            format!("\nBoxen's workload subprocess execution context is {}. This host-local account and operating-system session determine subprocess file ownership, credential-store access and desktop availability. OS permissions apply independently to each application. The daemon owns retained journals, messaging and media retention.\n", serde_json::to_string(execution).unwrap_or_default())
+        });
+        context.push_str(&self.execution_change.as_ref().map_or_else(String::new, |change| {
             format!("\nBoxen changed this conversation's execution settings between runs. Shell and relative file paths now use the current working directory. Files in an earlier working directory remain at their recorded location. The boxen_thread_files tool, when registered, lists earlier directories and retained request attachments. It retrieves a workspace file as it exists at retrieval time or opens a retained attachment original on the current machine. This metadata is supplied by Boxen. {change}")
-        })
+        }));
+        context
     }
 
     pub fn observation_context(&self) -> String {
@@ -392,6 +399,19 @@ impl Run {
     }
     pub fn cancellation_requested(&self) -> bool {
         self.inner.lock().unwrap().cancel_requested
+    }
+    pub fn runtime_context(&self) -> String {
+        let inner = self.inner.lock().unwrap();
+        let mut record = inner.snapshot.record.clone();
+        if let Some(event) = inner
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.kind == "execution_context")
+        {
+            record.execution = serde_json::from_value(event.data.clone()).ok();
+        }
+        record.execution_context()
     }
     pub fn retained_events(&self, kind: &str) -> Vec<Event> {
         self.inner
@@ -637,6 +657,30 @@ pub struct History {
     pub native_import: Option<thread_import::Provenance>,
 }
 impl History {
+    pub fn native_session_path(&self, id: &str) -> Option<PathBuf> {
+        if let Some(imported) = &self.native_import
+            && imported.backend_thread_id == id
+            && let Some(path) = imported.metadata["path"].as_str()
+        {
+            return Some(PathBuf::from(path));
+        }
+        self.runs.iter().rev().find_map(|run| {
+            run.inner
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .rev()
+                .find_map(|event| {
+                    let thread = &event.data["params"]["thread"];
+                    (event.kind == "backend"
+                        && event.data["method"] == "thread/started"
+                        && thread["id"] == id)
+                        .then(|| thread["path"].as_str().map(PathBuf::from))
+                        .flatten()
+                })
+        })
+    }
     pub fn journal_directory(&self) -> &std::path::Path {
         &self.directory
     }
@@ -1204,7 +1248,11 @@ impl Jobs {
         result
     }
     pub fn runtime_info(&self) -> Value {
-        json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]})
+        let mut info = json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]});
+        if let Some(home) = self.directory.parent() {
+            info["execution"] = crate::execution::Execution::host_info(home);
+        }
+        info
     }
 
     pub(crate) fn artifact_root(&self) -> &std::path::Path {
@@ -2430,12 +2478,20 @@ impl Jobs {
         let runtime_policy = crate::runtime_policy::Policy::load(
             self.directory.parent().ok_or("run directory has no home")?,
         )?;
+        let home = self.directory.parent().ok_or("run directory has no home")?;
+        let execution = crate::execution::Execution::capture(home)?;
+        execution.own_managed_path(home)?;
         if automatic_cwd {
             self.resolve_working_directory(&spec.thread_id, &requested_cwd, true)?;
+            execution.own_managed_path(&home.join("threads"))?;
+            execution.own_managed_path(Path::new(&spec.cwd))?;
         }
+        self.attachments
+            .prepare_execution(&spec.attachments, &execution)?;
         let path = self.directory.join(&spec.id);
         state::private_dir(&path)?;
         let record = Record {
+            execution: Some(execution),
             automatic_cwd,
             after: after.map(str::to_owned),
             execution_change,
@@ -2505,19 +2561,39 @@ impl Jobs {
         let binary = self.codex_path.clone();
         let jobs = self.clone();
         std::thread::spawn(move || {
-            let result = if spec.backend == "openrouter" {
-                crate::inference::execute(&spec, run.clone(), receiver, jobs.clone(), history)
-            } else {
-                codex::execute(
-                    &binary,
-                    &spec,
-                    resume,
-                    run.clone(),
-                    receiver,
-                    jobs.clone(),
-                    history,
-                )
-            };
+            let result = (|| -> Result<()> {
+                if let Some(execution) = &run.snapshot().record.execution {
+                    execution.own_managed_path(&jobs.directory)?;
+                    for previous in &history.runs {
+                        jobs.attachments.prepare_execution(
+                            &previous.snapshot().record.spec.attachments,
+                            execution,
+                        )?;
+                        execution.own_run_history(
+                            &jobs.directory.join(&previous.snapshot().record.spec.id),
+                        )?;
+                    }
+                    execution.own_run_history(&jobs.directory.join(&spec.id))?;
+                    run.diagnostic(Level::Info, "execution.storage_prepared",
+                        || json!({"account":execution.account,"uid":execution.uid,"prior_runs":history.runs.len(),"automatic_cwd":automatic_cwd}), || Value::Null);
+                    if !execution.prepare(&run)? {
+                        return Ok(());
+                    }
+                }
+                if spec.backend == "openrouter" {
+                    crate::inference::execute(&spec, run.clone(), receiver, jobs.clone(), history)
+                } else {
+                    codex::execute(
+                        &binary,
+                        &spec,
+                        resume,
+                        run.clone(),
+                        receiver,
+                        jobs.clone(),
+                        history,
+                    )
+                }
+            })();
             if let Err(error) = result {
                 run.diagnostic(
                     Level::Error,

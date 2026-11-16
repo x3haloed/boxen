@@ -108,6 +108,8 @@ pub struct ToolDetail {
 #[derive(Default)]
 pub struct Transcript {
     pub seq: u64,
+    pub execution: Option<Value>,
+    pub status: Option<Value>,
     pub rows: Vec<Row>,
     pub rejected_updates: HashSet<String>,
     positions: BTreeMap<String, usize>,
@@ -148,6 +150,12 @@ impl Transcript {
         }
         let data = &event["data"];
         let kind = event["kind"].as_str().unwrap_or("");
+        if kind == "execution_context" {
+            self.execution = Some(data.clone());
+        }
+        if kind == "status" {
+            self.status = Some(data.clone());
+        }
         let text = |key: &str| data[key].as_str().unwrap_or("").to_owned();
         match kind {
             "activation_input" => self.put(format!("event-{seq}"),"Activation input",text("text"),false),
@@ -319,6 +327,18 @@ pub fn display(value: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn execution_context_replay_preserves_the_observed_account_and_session() {
+        let mut transcript = Transcript::default();
+        assert!(transcript.execution.is_none());
+        let observed = json!({"account":"owner","uid":1001,"elevated":false,"session":"Aqua","desktop_available":true,"cwd":"/fixture"});
+        let event = json!({"seq":1,"kind":"execution_context","data":observed});
+        transcript.apply(&event).unwrap();
+        transcript.apply(&event).unwrap();
+        assert_eq!(transcript.execution, Some(observed));
+        assert_eq!(transcript.seq, 1);
+        assert!(transcript.rows.is_empty());
+    }
     #[test]
     fn backend_requests_survive_replay_and_clear_on_answer_or_resolution() {
         for method in [

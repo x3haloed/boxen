@@ -92,6 +92,13 @@ the existing authenticated control path after an explicit response action.
 Replay preserves pending requests. An answered or backend-resolved request loses
 its active controls.
 
+The expandable **Execution context** detail shows the latest run's machine,
+account, session, privileges, working directory and observed desktop-session
+availability. Waiting runs display their retained reason, including a missing
+configured login session. These values come from run records and replayed
+execution events. The [host execution policy](workloads.md#execution-account-and-operating-system-session)
+controls selection independently of the desktop.
+
 The presentation is deliberately simple: selectable text, exposed thinking,
 tool activity/output, status and incidents. Rich Markdown, rendered attachments,
 schema-specific form widgets, resident management, scheduling and observation-source controls are

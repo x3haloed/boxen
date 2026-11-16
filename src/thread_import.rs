@@ -3,7 +3,7 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::Read;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::time::Instant;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -88,7 +88,17 @@ impl Jobs {
             return Ok(old);
         }
         // Native I/O never holds the workload admission/transition mutex.
-        let mut reader = NativeReader::open(&self.codex_path, owner)?;
+        let execution = crate::execution::Execution::capture(
+            self.directory.parent().ok_or("run directory has no home")?,
+        )?;
+        if execution.desktop_available == Some(false)
+            && execution.mode == crate::execution::Mode::UserSession
+        {
+            return Err(
+                "native history import awaits the configured account's macOS login session".into(),
+            );
+        }
+        let mut reader = NativeReader::open(&self.codex_path, owner, &execution)?;
         let mut metadata = reader.request(
             "thread/read",
             json!({"threadId":spec.backend_thread_id,"includeTurns":false}),
@@ -147,6 +157,7 @@ impl Jobs {
                 .saturating_add(1),
         );
         let record = Record {
+            execution: None,
             automatic_cwd: false,
             after: None,
             execution_change: None,
@@ -327,9 +338,9 @@ struct NativeReader {
     owner: String,
 }
 impl NativeReader {
-    fn open(binary: &str, owner: &str) -> Result<Self> {
+    fn open(binary: &str, owner: &str, execution: &crate::execution::Execution) -> Result<Self> {
         let mut child = crate::codex_executable::launch(binary, crate::platform::host_os(),
-            |selected| Command::new(&selected.path)
+            |selected| execution.command(&selected.path)
                 .args(["app-server", "--listen", "stdio://"])
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn(),
             |selected, retry| logging::record(Level::Debug, Target::Runtime,

@@ -559,6 +559,15 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 } = &mut action
                 {
                     jobs.attachments.require(attachments)?;
+                    if let Some(execution) = &run.snapshot().record.execution {
+                        jobs.attachments.prepare_execution(attachments, execution)?;
+                        run.diagnostic(
+                            Level::Debug,
+                            "execution.attachments_prepared",
+                            || json!({"account":execution.account,"attachments":attachments.len()}),
+                            || Value::Null,
+                        );
+                    }
                     *file_context = jobs.attachments.context(attachments);
                 }
                 run.control(action)?;

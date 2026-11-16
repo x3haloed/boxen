@@ -379,6 +379,17 @@ pub fn execute(
 ) -> Result<()> {
     let residents = jobs.residents.clone();
     let record = run.snapshot().record;
+    if let (Some(execution), Some(id)) = (&record.execution, &resume)
+        && let Some(path) = history.native_session_path(id)
+    {
+        execution.own_native_session(&path, id)?;
+        run.diagnostic(
+            Level::Info,
+            "execution.native_session_prepared",
+            || json!({"account":execution.account,"backend_thread_id":id}),
+            || Value::Null,
+        );
+    }
     let browser = crate::browser_tools::for_run(&jobs, &record).inspect_err(|error| {
         run.diagnostic(
             Level::Error,
@@ -408,7 +419,7 @@ pub fn execute(
     {
         trigger_context.push_str(&format!("\nRecovery incident: {recovery}\nPrevious tool effects may already have occurred. This new request does not replay those effects."));
     }
-    let execution_context = record.execution_context();
+    let execution_context = run.runtime_context();
     let resident = record.resident;
     if promoted {
         trigger_context.push_str(&format!("\nResident attachment (Boxen-authored runtime context, separate from the message authors and the saved native instructions):\n{}",residents.instructions(resident.as_ref().unwrap())));
@@ -450,7 +461,10 @@ pub fn execute(
     let mut child = crate::codex_executable::launch(
         binary, crate::platform::host_os(),
         |selected| {
-            let mut command = Command::new(&selected.path);
+            let mut command = record.execution.as_ref().map_or_else(
+                || Command::new(&selected.path),
+                |execution| execution.command(&selected.path),
+            );
             if let Some(bridge) = &bridge {
                 command.env(crate::resident_bridge::TOKEN_ENV, &bridge.token);
             }

@@ -464,6 +464,13 @@ impl Desktop {
                         continue;
                     }
                     let transcript = self.data.transcripts.entry(id.clone()).or_default();
+                    if transcript.execution.is_none()
+                        && let Some(selected) = batch["snapshot"]["record"]["execution"].as_object()
+                    {
+                        let mut selected = Value::Object(selected.clone());
+                        selected["cwd"] = batch["snapshot"]["record"]["spec"]["cwd"].clone();
+                        transcript.execution = Some(selected);
+                    }
                     let mut failed = None;
                     for event in batch["events"].as_array().into_iter().flatten() {
                         if let Err(e) = transcript.apply(event) {

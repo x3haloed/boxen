@@ -414,7 +414,10 @@ fn shell(
         c.args(["/C", &input.command]);
         c
     } else {
-        let mut c = Command::new("/bin/sh");
+        let mut c = run.snapshot().record.execution.as_ref().map_or_else(
+            || Command::new("/bin/sh"),
+            |execution| execution.command("/bin/sh"),
+        );
         c.args(["-c", &input.command]);
         c
     };
@@ -603,7 +606,7 @@ pub fn execute(
     let record = run.snapshot().record;
     let trigger_context = record.trigger_context();
     let observation_context = record.observation_context();
-    let execution_context = record.execution_context();
+    let execution_context = run.runtime_context();
     let resident = record.resident;
     if let Some(recovery) = &record.recovery {
         run.append("recovery_notice", recovery.clone())?;
@@ -621,7 +624,7 @@ pub fn execute(
     }
     let mut view = context::View::new(history.settings(spec), &history.source(&run))?;
     let mut system = format!(
-        "This is Boxen's built-in agent runtime on machine {} ({}/{}). The working directory is {}. Shell execution has Full access to this host and available credentials. Tools describe their effects. Tool results marked unknown do not establish whether an effect occurred; repeating an effectful call can duplicate its effects.",
+        "This is Boxen's built-in agent runtime on machine {} ({}/{}). The working directory is {}. Shell execution has Full access under the selected host account's operating-system permissions and credential context. Tools describe their effects. Tool results marked unknown do not establish whether an effect occurred; repeating an effectful call can duplicate its effects.",
         run.snapshot()
             .record
             .resident
