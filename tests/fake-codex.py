@@ -94,6 +94,19 @@ def work(prompt):
     notification("item/reasoning/summaryTextDelta", {"itemId": "thought", "delta": "Checking the remote workspace."})
     notification("item/started", {"item": {"id": "command", "type": "commandExecution", "command": "fixture command", "status": "inProgress"}})
     notification("item/commandExecution/outputDelta", {"itemId": "command", "delta": "first output\n"})
+    if prompt.startswith("ELICITATION_"):
+        expected = prompt.removeprefix("ELICITATION_").lower()
+        emit({"id": 0, "method": "mcpServer/elicitation/request", "params": {
+            "threadId": thread, "turnId": "fixture-turn", "serverName": "fixture",
+            "message": "Allow Computer Use to use Example App?", "mode": "form",
+            "requestedSchema": {"type": "object", "properties": {}},
+            "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_name": "get_app_state",
+                      "tool_params_display": [{"display_name": "App", "value": "Example App"}]}}})
+        with response_ready:
+            assert response_ready.wait_for(lambda: 0 in responses, timeout=20), "elicitation was not answered"
+            result = responses.pop(0)
+        assert result == {"action": expected, "content": {} if expected == "accept" else None}, result
+        notification("serverRequest/resolved", {"requestId": 0})
     if "APPROVAL" in prompt:
         emit({"id": "approval-1", "method": "item/commandExecution/requestApproval", "params": {"threadId": thread, "turnId": "fixture-turn", "command": "fixture command", "itemId": "command"}})
         while not approved.wait(0.02) and not cancel.is_set():

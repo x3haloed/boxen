@@ -248,7 +248,7 @@ impl Transcript {
                         p["delta"].as_str().unwrap_or("").into(),
                         true,
                     );
-                } else if !data["id"].is_null() && (method.contains("requestApproval") || method.contains("requestUserInput")) {
+                } else if !data["id"].is_null() {
                     self.put(
                         format!("event-{seq}"),
                         "Backend input requested",
@@ -256,6 +256,13 @@ impl Transcript {
                         false,
                     );
                     self.rows[self.positions[&format!("event-{seq}")]].request = Some(data.clone());
+                } else if method == "serverRequest/resolved" {
+                    for row in &mut self.rows {
+                        if row.request.as_ref().is_some_and(|r| r["id"] == p["requestId"]) {
+                            row.request = None;
+                            row.label = "Backend input resolved".into();
+                        }
+                    }
                 } else if matches!(method, "turn/plan/updated" | "turn/diff/updated" | "error") {
                     self.put(format!("event-{seq}"), method, display(p), false);
                 }
@@ -312,6 +319,33 @@ pub fn display(value: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn backend_requests_survive_replay_and_clear_on_answer_or_resolution() {
+        for method in [
+            "mcpServer/elicitation/request",
+            "item/commandExecution/requestApproval",
+            "item/tool/requestUserInput",
+            "future/input/request",
+        ] {
+            let mut transcript = Transcript::default();
+            let request = json!({"seq":1,"kind":"backend","data":{"id":0,"method":method,"params":{"message":"Allow access to Example App?"}}});
+            transcript.apply(&request).unwrap();
+            transcript.apply(&request).unwrap();
+            assert_eq!(transcript.rows.len(), 1);
+            assert_eq!(transcript.rows[0].request.as_ref().unwrap()["id"], 0);
+            transcript.apply(&json!({"seq":2,"kind":"backend","data":{"method":"serverRequest/resolved","params":{"requestId":"another-request"}}})).unwrap();
+            assert!(transcript.rows[0].request.is_some());
+            transcript.apply(&json!({"seq":3,"kind":"backend","data":{"method":"serverRequest/resolved","params":{"requestId":0}}})).unwrap();
+            assert!(transcript.rows[0].request.is_none());
+            assert_eq!(transcript.rows[0].label, "Backend input resolved");
+            let mut answered = Transcript::default();
+            answered.apply(&request).unwrap();
+            answered
+                .apply(&json!({"seq":2,"kind":"request_answered","data":{"request_id":0}}))
+                .unwrap();
+            assert!(answered.rows[0].request.is_none());
+        }
+    }
     #[test]
     fn activation_and_import_roles_remain_distinct_from_delivered_mail() {
         let mut t = Transcript::default();

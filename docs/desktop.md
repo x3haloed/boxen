@@ -83,9 +83,18 @@ A peer address locates an already-pinned identity; it grants no new trust.
   a run is active. **⌘/Ctrl + Enter**
   submits; cancellation is a separate control.
 
+Pending backend requests appear in Messages and Activity with their original
+question and response controls. Command approvals and MCP permission requests
+offer Approve, Decline and Cancel. MCP requests show the server and supplied
+parameter labels; nonempty forms expose their schema and a JSON values editor.
+Other backend requests remain visible with a JSON response editor. Replies use
+the existing authenticated control path after an explicit response action.
+Replay preserves pending requests. An answered or backend-resolved request loses
+its active controls.
+
 The presentation is deliberately simple: selectable text, exposed thinking,
 tool activity/output, status and incidents. Rich Markdown, rendered attachments,
-backend input forms, resident management, scheduling and observation-source controls are
+schema-specific form widgets, resident management, scheduling and observation-source controls are
 not part of this desktop slice. The temporary web client still exposes those
 implemented daemon controls. Framework choice does not settle future visual UX.
 
@@ -143,6 +152,10 @@ cursor replay, repeated transparent stream renewal, final response and exact-ID
 retry. Tests shorten the observation lease to 500 ms so several renewals occur
 inside one controlled backend workload. The backend is `tests/fake-codex.py`;
 these checks do not claim real-model inference evidence.
+The same boundary test replays MCP permission requests, clicks each response
+through the desktop renderer, sends it across the paired transport, and checks
+the backend's exact response and resolved state. Projection tests also cover
+numeric request ID zero, repeated replay and backend-side resolution.
 
 Native UI checks additionally exercise preview/pin, palette search/Enter,
 message submission with live remote activity, moving conversation and list panes

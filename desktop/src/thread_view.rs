@@ -958,7 +958,8 @@ fn backend_request(
     let method = req["method"].as_str().unwrap_or("");
     let p = &req["params"];
     ui.push_id((&row.id, run), |ui| {
-        ui.strong(if method.contains("requestApproval") {
+        let elicitation = method == "mcpServer/elicitation/request";
+        ui.strong(if method.contains("requestApproval") || elicitation {
             "Approval requested"
         } else {
             "Input requested"
@@ -969,7 +970,63 @@ fn backend_request(
         if let Some(reason) = p["reason"].as_str() {
             ui.label(reason);
         }
-        if method.contains("requestApproval") {
+        if let Some(message) = p["message"].as_str() {
+            ui.label(message);
+        }
+        if elicitation {
+            if let Some(server) = p["serverName"].as_str() {
+                ui.weak(format!("MCP server · {server}"));
+            }
+            for parameter in p["_meta"]["tool_params_display"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let name = parameter["display_name"].as_str().unwrap_or("Parameter");
+                let value = crate::model::display(&parameter["value"]);
+                ui.label(format!("{name} · {value}"));
+            }
+            if let Some(url) = p["url"].as_str() {
+                ui.hyperlink(url);
+            }
+            let mut content = Some(Value::Null);
+            if p["mode"] != "url" {
+                if p["requestedSchema"]["type"] == "object"
+                    && p["requestedSchema"]["properties"]
+                        .as_object()
+                        .is_some_and(|properties| properties.is_empty())
+                {
+                    content = Some(json!({}));
+                } else {
+                    ui.collapsing("Requested form schema", |ui| {
+                        ui.monospace(crate::model::display(&p["requestedSchema"]));
+                    });
+                    content = backend_json_input(ui, "Form values (JSON)");
+                }
+            }
+            ui.horizontal_wrapped(|ui| {
+                for (label, action) in [
+                    ("Approve", "accept"),
+                    ("Decline", "decline"),
+                    ("Cancel", "cancel"),
+                ] {
+                    let enabled = action != "accept" || content.is_some();
+                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                        let values = if action == "accept" {
+                            content.clone()
+                        } else {
+                            None
+                        };
+                        actions.push(Action::Respond(
+                            key.clone(),
+                            run.into(),
+                            req["id"].clone(),
+                            json!({"action":action,"content":values}),
+                        ));
+                    }
+                }
+            });
+        } else if method.contains("requestApproval") {
             ui.horizontal_wrapped(|ui| {
                 for (label, decision) in [
                     ("Approve", "accept"),
@@ -1013,6 +1070,213 @@ fn backend_request(
                     json!({"answers":answers}),
                 ));
             }
+        } else {
+            ui.monospace(crate::model::display(req));
+            let result = backend_json_input(ui, "Response (JSON)");
+            if ui
+                .add_enabled(result.is_some(), egui::Button::new("Reply"))
+                .clicked()
+            {
+                actions.push(Action::Respond(
+                    key.clone(),
+                    run.into(),
+                    req["id"].clone(),
+                    result.expect("enabled for valid JSON"),
+                ));
+            }
         }
     });
+}
+
+fn backend_json_input(ui: &mut egui::Ui, label: &str) -> Option<Value> {
+    let field = ui.make_persistent_id(label);
+    let mut text = ui
+        .data_mut(|data| data.get_temp::<String>(field))
+        .unwrap_or_default();
+    ui.label(label);
+    ui.add(
+        egui::TextEdit::multiline(&mut text)
+            .code_editor()
+            .desired_rows(3),
+    );
+    let result = serde_json::from_str(&text);
+    if !text.is_empty()
+        && let Err(error) = &result
+    {
+        ui.label(format!("Invalid JSON · {error}"));
+    }
+    ui.data_mut(|data| data.insert_temp(field, text));
+    result.ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Transcript;
+
+    fn click_request(transcript: &Transcript, label: &str) -> Action {
+        use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
+        let ctx = egui::Context::default();
+        let key = ThreadKey {
+            peer: "peer".into(),
+            id: "thread".into(),
+        };
+        let frame = |events| {
+            let mut actions = vec![];
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0., 0.), vec2(800., 600.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    for row in &transcript.rows {
+                        if row.request.is_some() {
+                            backend_request(ui, row, &key, "run", &mut actions);
+                        }
+                    }
+                },
+            );
+            (output, actions)
+        };
+        let (output, actions) = frame(vec![]);
+        assert!(actions.is_empty(), "Rendering or replay answered a request");
+        let text: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| {
+                if let egui::epaint::Shape::Text(text) = &shape.shape {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            text.iter()
+                .any(|text| text.galley.job.text == "Allow Computer Use to use Example App?")
+        );
+        let position = text
+            .iter()
+            .find(|text| text.galley.job.text == label)
+            .map(|text| text.pos + text.galley.size() / 2.)
+            .expect("visible response button");
+        frame(vec![
+            Event::PointerMoved(position),
+            Event::PointerButton {
+                pos: position,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        let (_, mut actions) = frame(vec![Event::PointerButton {
+            pos: position,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert_eq!(actions.len(), 1);
+        actions.remove(0)
+    }
+
+    #[test]
+    fn elicitation_buttons_emit_exact_protocol_responses() {
+        for (label, expected) in [
+            ("Approve", "accept"),
+            ("Decline", "decline"),
+            ("Cancel", "cancel"),
+        ] {
+            let mut transcript = Transcript::default();
+            transcript.apply(&json!({"seq":1,"kind":"backend","data":{"id":0,"method":"mcpServer/elicitation/request","params":{"serverName":"fixture","message":"Allow Computer Use to use Example App?","mode":"form","requestedSchema":{"type":"object","properties":{}}}}})).unwrap();
+            let Action::Respond(key, run, request_id, result) = click_request(&transcript, label)
+            else {
+                panic!("response action")
+            };
+            assert_eq!(key.peer, "peer");
+            assert_eq!(run, "run");
+            assert_eq!(request_id, 0);
+            assert_eq!(
+                result,
+                json!({"action":expected,"content":if expected == "accept" {Some(json!({}))} else {None}})
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "scripts/desktop-smoke.py supplies private paired daemons"]
+    fn real_daemon_boundary_elicitation() {
+        use crate::client::{Bus, Client, Update};
+        use crate::model::Destination;
+        use std::{
+            sync::{Arc, atomic::AtomicBool},
+            time::Duration,
+        };
+        let home = std::path::PathBuf::from(std::env::var_os("BOXEN_GUI_TEST_HOME").unwrap());
+        let client = Client::new(std::env::var("BOXEN_GUI_TEST_URL").unwrap(), &home).unwrap();
+        let destination: Destination =
+            serde_json::from_str(&std::env::var("BOXEN_GUI_TEST_DEST").unwrap()).unwrap();
+        for (label, expected) in [
+            ("Approve", "ACCEPT"),
+            ("Decline", "DECLINE"),
+            ("Cancel", "CANCEL"),
+        ] {
+            let id = crate::new_id();
+            client.operation(&destination, json!({"op":"start","spec":{"id":id,"thread_id":id,"backend":"codex","model":"fixture","prompt":format!("ELICITATION_{expected}")}})).unwrap();
+            let bus = Bus::new(egui::Context::default());
+            client.watch(
+                destination.clone(),
+                id.clone(),
+                0,
+                0,
+                bus.publisher(),
+                Arc::new(AtomicBool::new(false)),
+            );
+            let mut transcript = Transcript::default();
+            let mut answered = false;
+            let mut resolved = false;
+            loop {
+                match bus.rx.recv_timeout(Duration::from_secs(15)).unwrap() {
+                    Update::Batch(_, _, batch) => {
+                        for event in batch["events"].as_array().unwrap() {
+                            transcript.apply(event).unwrap();
+                            if event["data"]["method"] == "serverRequest/resolved" {
+                                resolved = true;
+                            }
+                        }
+                        if !answered && transcript.rows.iter().any(|row| row.request.is_some()) {
+                            let Action::Respond(_, _, request_id, result) =
+                                click_request(&transcript, label)
+                            else {
+                                panic!("response action")
+                            };
+                            client.control(
+                                destination.clone(),
+                                id.clone(),
+                                json!({"type":"respond","request_id":request_id,"result":result}),
+                                bus.publisher(),
+                            );
+                            answered = true;
+                        }
+                        if batch["done"] == true {
+                            break;
+                        }
+                    }
+                    Update::Controlled(_, _, _, result) => {
+                        assert_eq!(result.unwrap()["accepted"], true);
+                    }
+                    Update::WatchError(_, _, error) => panic!("{error}"),
+                    _ => {}
+                }
+            }
+            assert!(answered && resolved);
+            assert!(transcript.rows.iter().all(|row| row.request.is_none()));
+            assert_eq!(
+                client
+                    .operation(&destination, json!({"op":"get","id":id}))
+                    .unwrap()["status"],
+                "completed"
+            );
+        }
+    }
 }
