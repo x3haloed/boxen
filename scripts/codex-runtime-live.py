@@ -33,8 +33,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-codex-live-') as temp:
             p=subprocess.Popen(command+['--data-dir',str(paths[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',args.codex],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
             processes.append(p);lines=[p.stdout.readline() for _ in range(3)];assert 'Local controls:' in lines[-1], 'test daemon did not start';tokens.append(lines[-1].strip().split('#')[1])
         target={'peer':keys[1],'address':f'127.0.0.1:{peers[1]}'}
-        def api(op,watch=False):
-            request=urllib.request.Request(f'http://127.0.0.1:{uis[0]}/api/'+('watch' if watch else 'operation'),data=json.dumps({**target,'request':op}).encode(),headers={'Authorization':'Bearer '+tokens[0],'Content-Type':'application/json'})
+        def api(op,watch=False,local=False):
+            request=urllib.request.Request(f'http://127.0.0.1:{uis[0]}/api/'+('watch' if watch else 'operation'),data=json.dumps({**({'peer':keys[0],'address':''} if local else target),'request':op}).encode(),headers={'Authorization':'Bearer '+tokens[0],'Content-Type':'application/json'})
             response=urllib.request.urlopen(request,timeout=150)
             return response if watch else json.load(response)
         def collect(run):
@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-codex-live-') as temp:
         reply=send(f'Please reply explicitly to this message with body exactly {marker}, using its reply_to address and linking in_reply_to. No other correspondence is requested.')
         activation=api({'op':'resident_activate','id':r['id'],'activation_id':secrets.token_hex(32),'directions':'The protocol test asks for one explicit reply to the message requesting it. Final narration remains private.'})
         events+=collect(activation)
-        inbox=lambda:api({'op':'client_inbox','client_id':client})['messages']
+        inbox=lambda:api({'op':'client_inbox','client_id':client},local=True)['messages']
         delivered=inbox();assert len(delivered)==1 and delivered[0]['body']==marker and delivered[0]['in_reply_to']==reply['id'],delivered
         silent=api({'op':'resident_activate','id':r['id'],'activation_id':secrets.token_hex(32),'directions':f'This activation requests no outgoing correspondence. Please finish with a private line containing {marker}.'})
         events+=collect(silent);assert inbox()==delivered

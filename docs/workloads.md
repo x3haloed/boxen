@@ -1,5 +1,9 @@
 # Remote workloads and live streaming
 
+The [agent-facing work interface](agent-work.md) exposes machine discovery,
+ordinary remote requests, retained progress, controls and evidence retrieval
+through runtime tools.
+
 An anonymous Boxen thread can execute through Codex app-server on a paired LAN machine. Its thinking summaries, agent text, tool lifecycle, command output, file changes, backend input requests, and completion state stream through the local daemon into the browser. Local execution uses the same run/event contract and renderer.
 
 The executing daemon owns the run. It retains each ordered event before publishing it. Viewer connections subscribe to that sequence and do not own execution lifetime. Streaming uses condition-variable notification rather than periodic progress polling; quiet connections receive heartbeat batches. Backend-exposed summaries are shown when available, without inventing thinking text when the backend supplies none.

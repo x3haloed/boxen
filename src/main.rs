@@ -39,6 +39,7 @@ mod scheduler;
 mod state;
 mod tool_approvals;
 mod web;
+mod work_tools;
 
 use logging::{Context, Level, Target};
 use state::State;

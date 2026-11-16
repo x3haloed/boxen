@@ -1250,6 +1250,9 @@ impl Jobs {
     }
     pub fn runtime_info(&self) -> Value {
         let mut info = json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]});
+        info["platform"] =
+            json!({"os":crate::platform::host_os(),"architecture":std::env::consts::ARCH});
+        info["agent_work"] = json!({"tools":["boxen_machines","boxen_work","boxen_thread_files"],"transport":"existing_authenticated_peer_operations","native_registration":"per_run_mcp"});
         if let Some(home) = self.directory.parent() {
             info["execution"] = crate::execution::Execution::host_info(home);
         }

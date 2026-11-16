@@ -247,6 +247,30 @@ impl Store {
             _ => Err("unknown attachment operation".into()),
         }
     }
+    pub(crate) fn receive(
+        &self,
+        file: &Attachment,
+        mut request: impl FnMut(Value) -> Result<Value>,
+    ) -> Result<PathBuf> {
+        let mut status = self.operation(&json!({"action":"status","file":file}))?;
+        while status["complete"] != true {
+            let offset = status["next"]
+                .as_u64()
+                .filter(|n| *n <= file.size)
+                .ok_or("invalid workspace transfer position")?;
+            let chunk =
+                request(json!({"op":"attachment","action":"read","file":file,"offset":offset}))?;
+            status = self.operation(
+                &json!({"action":"write","file":file,"offset":offset,"data":chunk["data"]}),
+            )?;
+            if status["next"] != chunk["next"]
+                || (status["next"] == offset && status["complete"] != true)
+            {
+                return Err("workspace transfer did not reach its retained offset".into());
+            }
+        }
+        self.verify(file)
+    }
     pub fn transfer(
         &self,
         files: &[Attachment],
@@ -312,8 +336,7 @@ pub(crate) fn capture(
                 return Err(error);
             }
         };
-        if (status["complete"] != true && end == offset)
-            || (status["complete"] != true && status["next"] != end as u64)
+        if (status["complete"] != true && (end == offset || status["next"] != end as u64))
             || (status["complete"] == true && status["next"] != file.size)
         {
             return Err("attachment capture did not reach its retained offset".into());

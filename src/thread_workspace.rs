@@ -8,9 +8,11 @@ pub(crate) fn tool() -> Value {
     json!({
         "type":"function",
         "name":"boxen_thread_files",
-        "description":"This tool lists working directories recorded by accepted runs in this anonymous conversation. Pull retrieves a named relative file from a recorded run's machine and returns a local path to retained bytes. The original is read at pull time. An unavailable host, directory, or file returns an error. List includes retained request attachments. Attachment takes a run_id and digest and returns a local path to the retained original.",
+        "description":"This tool lists recorded workspaces and retrieves evidence files. machine accepts a discovered name/id; thread_id selects an anonymous work conversation. A run_id alone selects its conversation and follows its retained destination when known. With no selection, list reads this conversation. pull takes run_id and a relative path, retains and verifies the bytes on this executing machine, and returns a locally readable path. The original is read at pull time. An unavailable host, directory or file returns an error. attachment opens a retained original request attachment by run_id and digest on this machine.",
         "inputSchema":{"type":"object","properties":{
             "action":{"type":"string","enum":["list","pull","attachment"]},
+            "machine":{"type":"string"},
+            "thread_id":{"type":"string"},
             "run_id":{"type":"string"},
             "path":{"type":"string"},
             "digest":{"type":"string"},
@@ -165,26 +167,7 @@ impl Jobs {
                 .address;
             let receive = |request| crate::protocol::request(&network, &address, &machine, request);
             let file: Attachment = serde_json::from_value(receive(offer)?)?;
-            let mut status = self
-                .attachments
-                .operation(&json!({"action":"status","file":file}))?;
-            while status["complete"] != true {
-                let offset = status["next"]
-                    .as_u64()
-                    .filter(|n| *n <= file.size)
-                    .ok_or("invalid workspace transfer position")?;
-                let chunk = receive(
-                    json!({"op":"attachment","action":"read","file":file,"offset":offset}),
-                )?;
-                status = self.attachments.operation(
-                    &json!({"action":"write","file":file,"offset":offset,"data":chunk["data"]}),
-                )?;
-                if status["next"] != chunk["next"]
-                    || (status["next"] == offset && status["complete"] != true)
-                {
-                    return Err("workspace transfer did not reach its retained offset".into());
-                }
-            }
+            self.attachments.receive(&file, receive)?;
             file
         };
         Ok(json!({"path":self.attachments.verify(&file)?,"file":file,

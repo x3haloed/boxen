@@ -332,10 +332,13 @@ impl Rpc {
         {
             let result = if message["params"]["threadId"].as_str() != self.thread.as_deref() {
                 Err("continuity request came from a different backend thread".into())
-            } else if message["params"]["tool"] == "boxen_thread_files" && self.resident.is_none() {
-                self.jobs.workspace_files(
-                    &self.run.snapshot().record.spec.thread_id,
-                    &message["params"]["arguments"],
+            } else if message["params"]["tool"] == "boxen_thread_files" {
+                crate::work_tools::call(
+                    &self.jobs,
+                    &self.run,
+                    message["params"]["callId"].as_str().unwrap_or("missing"),
+                    "boxen_thread_files",
+                    message["params"]["arguments"].clone(),
                 )
             } else if matches!(
                 message["params"]["tool"].as_str(),
@@ -480,7 +483,10 @@ pub fn execute(
             resident.as_ref().unwrap().clone(),
         )?)
     } else {
-        None
+        Some(crate::resident_bridge::Bridge::start_work(
+            jobs.clone(),
+            run.clone(),
+        )?)
     };
     let mut launch = crate::infrastructure::Attempt::new(
         "runtime",
@@ -561,9 +567,27 @@ pub fn execute(
     run.append("backend_execution_policy", json!({"sandbox":"danger-full-access","approval_policy":"on-request","approvals_reviewer":"user"}))?;
     run.diagnostic(Level::Info, "backend.execution_policy", || json!({"sandbox":"danger-full-access","approval_policy":"on-request","approvals_reviewer":"user"}), || Value::Null);
     if let Some(bridge) = &bridge {
-        params["config"] = json!({"mcp_servers.boxen_resident":bridge.config()});
-        run.append("resident_bridge_approval_policy", json!({"server":"boxen_resident","default_tools_approval_mode":"approve","scope":"activation"}))?;
-        run.diagnostic(Level::Info, "backend.resident_bridge_approval_policy", || json!({"server":"boxen_resident","default_tools_approval_mode":"approve","scope":"activation"}), || Value::Null);
+        let server = if promoted {
+            "boxen_resident"
+        } else {
+            "boxen_work"
+        };
+        let scope = if promoted { "activation" } else { "run" };
+        params["config"] = json!({format!("mcp_servers.{server}"):bridge.config()});
+        run.append(
+            if promoted {
+                "resident_bridge_approval_policy"
+            } else {
+                "work_bridge_approval_policy"
+            },
+            json!({"server":server,"default_tools_approval_mode":"approve","scope":scope}),
+        )?;
+        run.diagnostic(
+            Level::Info,
+            "backend.resident_bridge_approval_policy",
+            || json!({"server":server,"default_tools_approval_mode":"approve","scope":scope}),
+            || Value::Null,
+        );
     }
     if let Some(browser) = &browser {
         params["config"]["mcp_servers.boxen_browser"] = browser.config();
@@ -659,25 +683,37 @@ pub fn execute(
         );
     }
     rpc.thread = Some(thread.clone());
-    if promoted {
+    if bridge.is_some() {
+        let server = if promoted {
+            "boxen_resident"
+        } else {
+            "boxen_work"
+        };
         let status = rpc.request(
             "mcpServerStatus/list",
-            json!({"threadId":thread,"serverName":"boxen_resident","detail":"toolsAndAuthOnly"}),
+            json!({"threadId":thread,"serverName":server,"detail":"toolsAndAuthOnly"}),
         )?;
         let ready = status["data"].as_array().into_iter().flatten().any(|s| {
-            s["name"] == "boxen_resident"
-                && s["tools"].get("boxen_continuity").is_some()
-                && s["tools"].get("boxen_send_message").is_some()
+            s["name"] == server
+                && s["tools"].get("boxen_machines").is_some()
+                && s["tools"].get("boxen_work").is_some()
+                && (!promoted
+                    || (s["tools"].get("boxen_continuity").is_some()
+                        && s["tools"].get("boxen_send_message").is_some()))
         });
         if !ready {
             return Err(
-                "promoted native session did not expose its Boxen MCP tools; no turn was started"
+                "The native session did not expose its run-scoped Boxen work tools; no turn was started"
                     .into(),
             );
         }
         run.append(
-            "resident_bridge_ready",
-            json!({"backend_thread_id":thread,"server":"boxen_resident"}),
+            if promoted {
+                "resident_bridge_ready"
+            } else {
+                "work_bridge_ready"
+            },
+            json!({"backend_thread_id":thread,"server":server}),
         )?;
     }
     if let Some(browser) = &browser {

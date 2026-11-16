@@ -73,6 +73,19 @@ class Provider(http.server.BaseHTTPRequestHandler):
                 elif direction=='INTERRUPT_RESIDENT' and tools:emit(frame({'content':'interrupted private text'}));return
                 elif reply and not tools:call('boxen_send_message',{'to':reply['reply_to'],'subject':'Selective reply','body':'EXPLICIT_DELIVERY','in_reply_to':reply['id']})
                 else:text('PRIVATE_ONLY' if direction!='EMPTY' else '')
+            elif prompt=='AGENT_WORK':
+                exposed={t['function']['name'] for t in body['tools']}
+                assert {'boxen_machines','boxen_work','boxen_thread_files'} <= exposed
+                if not tools:call('boxen_machines',{'machine':'local'})
+                elif len(tools)==1:
+                    assert json.loads(tools[-1]['content'])['machines'][0]['reachable']
+                    call('boxen_work',{'action':'request','request_id':'built-in-child','backend':'openrouter','model':'fixture','prompt':'CHILD_REQUEST'})
+                else:
+                    value=json.loads(tools[-1]['content'])
+                    if value.get('done'):
+                        assert value['response']=='CHILD_RESPONSE',value
+                        text('BUILT_IN_WORK_COMPLETE')
+                    else:call('boxen_work',{'action':'read','request_id':'built-in-child','after':value.get('next_after',0),'wait_ms':20000})
             elif prompt=='CHILD_REQUEST':text('CHILD_RESPONSE')
             elif prompt=='FOLLOWUP':
                 assert any(m.get('reasoning_details') for m in messages if m['role']=='assistant')
@@ -147,6 +160,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
     try:
         assert api({'op':'runtime_info'})['backends'][1]['configured']
         log=directory/'runtime-log.jsonl';api({'op':'log_file','path':str(log),'filter':{'targets':['runtime'],'events':['inference.']}})
+        coordination=start('AGENT_WORK');assert collect(coordination)[1]['status']=='completed'
+        assert result(coordination)['response']=='BUILT_IN_WORK_COMPLETE'
+        print('PASS built-in agent discovery and ordinary child work through the shared tool authority')
         ordinary=start('WAIT_EFFECT');early=until(ordinary,'assistant_delta');assert not early['done']
         events,done=collect(ordinary);assert done['status']=='completed',done
         assert result(ordinary)['response']=='ORDINARY_RESPONSE'

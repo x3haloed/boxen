@@ -34,6 +34,12 @@ impl Bridge {
         {
             return Err("resident bridge scope does not match the accepted activation".into());
         }
+        Self::start_scoped(jobs, run, Some(resident))
+    }
+    pub fn start_work(jobs: Arc<Jobs>, run: Arc<Run>) -> Result<Self> {
+        Self::start_scoped(jobs, run, None)
+    }
+    fn start_scoped(jobs: Arc<Jobs>, run: Arc<Run>, resident: Option<Resident>) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let token = state::random_hex()?;
@@ -43,7 +49,7 @@ impl Bridge {
         run.diagnostic(
             Level::Info,
             "resident_bridge.started",
-            || json!({"address":address.to_string()}),
+            || json!({"address":address.to_string(),"scope":if resident.is_some(){"resident"}else{"work"}}),
             || Value::Null,
         );
         let thread = std::thread::spawn(move || {
@@ -51,7 +57,7 @@ impl Bridge {
                 if stopping.load(Ordering::Acquire) {
                     break;
                 }
-                let result = serve(&mut stream, &secret, &jobs, &run, &resident);
+                let result = serve(&mut stream, &secret, &jobs, &run, resident.as_ref());
                 if let Err(error) = result {
                     run.diagnostic(
                         Level::Warn,
@@ -135,7 +141,7 @@ fn serve(
     token: &str,
     jobs: &Arc<Jobs>,
     run: &Arc<Run>,
-    resident: &Resident,
+    resident: Option<&Resident>,
 ) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -234,8 +240,11 @@ fn serve(
         ),
         "ping" => Ok(json!({})),
         "tools/list" => {
-            let mut tools = agent_tools::resident_tools();
-            tools.extend(agent_tools::observation_tools());
+            let mut tools = crate::work_tools::tools();
+            if resident.is_some() {
+                tools.extend(agent_tools::resident_tools());
+                tools.extend(agent_tools::observation_tools());
+            }
             for tool in &mut tools {
                 tool.as_object_mut().unwrap().remove("type");
             }
@@ -265,15 +274,13 @@ fn remaining(deadline: Instant) -> Result<Duration> {
 fn call(
     jobs: &Arc<Jobs>,
     run: &Arc<Run>,
-    resident: &Resident,
+    resident: Option<&Resident>,
     id: &Value,
     params: &Value,
 ) -> Result<Value> {
     let snapshot = run.snapshot();
     if terminal(&snapshot.status) {
-        return Err(
-            "activation has ended; its resident bridge no longer accepts tool effects".into(),
-        );
+        return Err("The run has ended; its bridge no longer accepts tool effects".into());
     }
     let call_id = format!("mcp:{id}");
     if call_id.len() > 512 {
@@ -306,12 +313,16 @@ fn call(
         json!({"call_id":call_id,"params":params}),
     )?;
     let args = params["arguments"].clone();
-    let result = if matches!(tool, "boxen_observations" | "boxen_adapter") {
+    let result = if crate::work_tools::is_tool(tool) {
+        crate::work_tools::call(jobs, run, &call_id, tool, args)
+    } else if resident.is_none() {
+        Err("This run-scoped bridge exposes the machine and work tools".into())
+    } else if matches!(tool, "boxen_observations" | "boxen_adapter") {
         agent_tools::observation_tool(jobs, run, &call_id, tool, args)
     } else {
         agent_tools::resident_tool(
             jobs,
-            resident,
+            resident.expect("resident scope checked"),
             &snapshot.record.spec.id,
             &call_id,
             tool,

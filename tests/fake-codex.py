@@ -24,10 +24,12 @@ responses = {}
 response_ready = threading.Condition()
 resident_context = None
 promoted_bridge = None
+work_bridge = None
 
-def mcp_call(method,params=None,ident=1):
+def mcp_call(method,params=None,ident=1,bridge=None):
+    bridge=bridge or promoted_bridge or work_bridge
     payload={'jsonrpc':'2.0','id':ident,'method':method,'params':params or {}}
-    r=urllib.request.Request(promoted_bridge['url'],data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+os.environ[promoted_bridge['bearer_token_env_var']]})
+    r=urllib.request.Request(bridge['url'],data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+os.environ[bridge['bearer_token_env_var']]})
     with urllib.request.urlopen(r,timeout=15) as response:return json.load(response)
 
 def bridge_rejection_checks():
@@ -53,8 +55,8 @@ def bridge_rejection_checks():
         probe('GET' if auth else 'POST','/wrong' if auth else '/mcp',auth,b'x'*64,delayed=True)
     probe('POST','/mcp',False,b'x'*64,delayed=True,stalled=True)
 
-def invoke(tool, arguments, number):
-    if promoted_bridge:
+def invoke(tool, arguments, number, dynamic=False):
+    if not dynamic and (promoted_bridge or (work_bridge and tool in ('boxen_machines','boxen_work','boxen_thread_files'))):
         response=mcp_call('tools/call',{'name':tool,'arguments':arguments},ident=number)
         assert 'result' in response,response
         repeated=mcp_call('tools/call',{'name':tool,'arguments':arguments},ident=number)
@@ -128,6 +130,42 @@ def work(prompt):
             pass
         notification("serverRequest/resolved", {"requestId": "approval-1"})
     answer = "Fixture result"
+    if prompt.startswith("WORK_INTERFACE:"):
+        values = {}
+        counter = 10000
+        def resolve_refs(value):
+            if isinstance(value, dict) and set(value)=={'$ref'}:
+                parts=value['$ref'].split('.')
+                found=values[parts[0]]
+                for part in parts[1:]:found=found[int(part)] if isinstance(found,list) else found[part]
+                return found
+            if isinstance(value,dict):return {k:resolve_refs(v) for k,v in value.items()}
+            if isinstance(value,list):return [resolve_refs(v) for v in value]
+            return value
+        for step in json.loads(prompt.split(':',1)[1]):
+            args=resolve_refs(step['args'])
+            for attempt in range(100):
+                counter+=1
+                response,value=invoke(step['tool'],args,counter,dynamic=step.get('dynamic',False))
+                assert response['success'] != step.get('error',False) or step.get('allow_error',False),(step,value)
+                if step.get('until_request'):
+                    pending=[e for e in value.get('events',[]) if 'request_id' in e]
+                    if pending:value['backend_request_id']=pending[-1]['request_id'];break
+                elif not step.get('until_done') or value.get('done'):break
+                args['after']=value['next_after'];args['wait_ms']=20000
+            else:raise AssertionError('work did not finish')
+            for path,expected in step.get('expect',{}).items():
+                found=value
+                for part in path.split('.'):found=found[int(part)] if isinstance(found,list) else found[part]
+                assert found==resolve_refs(expected),(path,found,expected,value)
+            if step.get('save'):values[step['save']]=value
+        pathlib.Path('work-interface-results.json').write_text(json.dumps(values))
+        answer='WORK_INTERFACE_COMPLETE'
+    if prompt == 'WORK_LONG':
+        answer='🐈'*50000
+    if prompt == 'WORK_CHILD':
+        pathlib.Path('evidence.txt').write_text('retained remote evidence 🐈')
+        answer='WORK_CHILD_COMPLETE'
     if prompt.startswith("EXECUTION_HISTORY_PROOF:"):
         retained = pathlib.Path.cwd().parent.parent / "attachments" / prompt.split(":", 1)[1]
         assert retained.read_bytes() == b"fixture Codex attachment execution-proof"
@@ -296,6 +334,11 @@ for line in sys.stdin:
                 assert error.code==401,error.code
             initialized=mcp_call('initialize',{'protocolVersion':'2025-03-26','capabilities':{},'clientInfo':{'name':'fixture','version':'1'}})
             assert initialized['result']['capabilities']['tools']
+        if 'mcp_servers.boxen_work' in request['params'].get('config',{}):
+            work_bridge=request['params']['config']['mcp_servers.boxen_work']
+            assert work_bridge['default_tools_approval_mode']=='approve'
+            denied=mcp_call('tools/call',{'name':'boxen_continuity','arguments':{'action':'read'}},ident=9998)
+            assert denied['result']['isError'], 'anonymous bridge exposed identity tools'
         if import_root:
             assert method=='thread/resume', 'imported native thread was silently replaced'
             assert request['params']['threadId']==native_import_id
@@ -362,9 +405,9 @@ for line in sys.stdin:
             files = json.loads(parts[0]["text"].rsplit("are not included in this input. ", 1)[1])
             assert pathlib.Path(files[0]["path"]).read_bytes().startswith(b"fixture Codex attachment ")
         result = {"turnId": "fixture-turn"}
-    elif method == 'mcpServerStatus/list' and promoted_bridge:
+    elif method == 'mcpServerStatus/list' and (promoted_bridge or work_bridge):
         listed=mcp_call('tools/list')['result']['tools']
-        result={'data':[{'name':'boxen_resident','tools':{t['name']:t for t in listed}}]}
+        result={'data':[{'name':'boxen_resident' if promoted_bridge else 'boxen_work','tools':{t['name']:t for t in listed}}]}
     else:
         raise AssertionError(method)
     emit({"id": request["id"], "result": result})
