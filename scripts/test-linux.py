@@ -21,7 +21,7 @@ import tarfile
 import tempfile
 import time
 
-SUITES = ["platform", "smoke", "execution", "network", "workload", "transcript-import", "thread-import", "resident-promotion", "recovery", "resident", "resident-class", "mailbox",
+SUITES = ["platform", "smoke", "execution", "tool-approvals", "network", "workload", "transcript-import", "thread-import", "resident-promotion", "recovery", "resident", "resident-class", "mailbox",
           "logging", "infrastructure", "scheduler", "events", "messaging", "guest-chat", "inference-runtime", "inference-health", "compaction", "media", "attachments", "thread-move", "inference-probe"]
 
 

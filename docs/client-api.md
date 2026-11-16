@@ -31,6 +31,8 @@ Operations:
 | `{"op":"control","id":"RUN_ID","action":{"type":"steer","text":"..."}}` | `{"accepted":true}` |
 | `{"op":"control","id":"RUN_ID","action":{"type":"cancel"}}` | `{"accepted":true}` |
 | `{"op":"control","id":"RUN_ID","action":{"type":"respond","request_id":"BACKEND_REQUEST_ID","result":{}}}` | `{"accepted":true}` |
+| `{"op":"tool_approvals","args":{"action":"get"}}` | Host-wide `computer_use` and `browser_use` booleans |
+| `{"op":"tool_approvals","args":{"action":"set","computer_use":false}}` | Persisted settings; omitted booleans retain their values |
 
 `start` is for identity-less threads; direct resident starts are rejected. Resident correspondence and independent activation use the [mailbox API](mailboxes.md). `SPEC` contains `id`, `thread_id`, `backend` (`codex` or `openrouter`), `cwd` (an absolute destination-local directory, or omitted/empty for an automatic working area), `model` (omitted/empty for the configured default), and `prompt`. Generate a lowercase 64-character hex run ID before sending, and preserve it with the exact spec until acceptance is known. For a new conversation use that same ID as `thread_id`; follow-ups use the existing thread ID with a new run ID. Repeating the same ID, owner, and exact spec is idempotent. A different spec under that ID is rejected. Catalog discovery by ID can reconcile a response lost after acceptance. A response timeout is not a rejection and must not trigger a new run ID.
 

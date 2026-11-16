@@ -11,6 +11,7 @@ mod new_conversation;
 #[cfg(test)]
 mod performance;
 mod thread_view;
+mod tool_approvals;
 mod work;
 mod workspace;
 use client::{Bus, Client, Pending, Update, run_key};
@@ -63,6 +64,7 @@ struct Observing {
 }
 #[derive(Default)]
 struct Data {
+    tool_approvals: tool_approvals::State,
     work: work::State,
     views: HashMap<ThreadKey, conversation::View>,
     preparing: HashMap<attachments::Target, attachments::Preparation>,
@@ -230,6 +232,7 @@ impl Desktop {
             menu::Command::ShowWork => self.data.saved.workspace.show_work(),
             menu::Command::Palette if !self.data.new_thread_dialog => self.open_palette(),
             menu::Command::Palette => {}
+            menu::Command::ToolApprovals => self.data.tool_approvals.open(),
         }
     }
     fn open_palette(&mut self) {
@@ -417,6 +420,9 @@ impl Desktop {
     fn updates(&mut self) {
         while let Ok(update) = self.bus.rx.try_recv() {
             match update {
+                Update::ToolApprovals(machine, result) => {
+                    self.data.tool_approvals.received(machine, result)
+                }
                 Update::Mail(update) => self.mail_update(update),
                 Update::Discovered(result) => match result {
                     Ok(status) => self.discovered(status),
@@ -1465,6 +1471,14 @@ impl eframe::App for Desktop {
         self.data.saved.workspace.dock = dock;
         for action in actions {
             self.action(action)
+        }
+        if let Some(client) = &self.client
+            && let Some((destination, args)) = self
+                .data
+                .tool_approvals
+                .show(&ctx, &self.data.saved.destinations)
+        {
+            client.tool_approvals(destination, args, self.bus.publisher());
         }
         if self.connection {
             let mut open = true;

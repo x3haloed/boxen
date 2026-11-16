@@ -757,6 +757,7 @@ impl History {
 }
 
 pub struct Jobs {
+    pub tool_approvals: crate::tool_approvals::Store,
     pub attachments: crate::attachments::Store,
     pub network: Mutex<Option<Arc<crate::state::State>>>,
     directory: PathBuf,
@@ -1342,6 +1343,9 @@ impl Jobs {
             .canonicalize()?
             .join("attachments");
         let jobs = Arc::new(Self {
+            tool_approvals: crate::tool_approvals::Store::new(
+                attachment_root.with_file_name("tool-approvals.json"),
+            ),
             attachments: crate::attachments::Store::new(attachment_root),
             network: Mutex::new(None),
             definitions,

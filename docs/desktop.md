@@ -5,6 +5,12 @@ execution, pairing, ownership and retained history still belong to the documente
 [client API](client-api.md). The daemon's portable executable is unchanged.
 The embedded web client remains available for capabilities outside this slice.
 
+Settings → Tool approvals provides independent automatic Computer Use and Browser
+Use toggles for each connected executing machine. Both default to on. The daemon
+owns their persisted values and applies changes to subsequent permission requests
+in active conversations. Settings requests run off the render thread; failed
+reads or writes remain visible with a retry control.
+
 ## Build and launch
 
 ```sh

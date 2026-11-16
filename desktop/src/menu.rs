@@ -6,6 +6,7 @@ pub(crate) enum Command {
     Reconnect,
     ShowWork,
     Palette,
+    ToolApprovals,
 }
 
 impl Command {
@@ -15,6 +16,7 @@ impl Command {
             Self::Reconnect => "Reconnect Daemon",
             Self::ShowWork => "Show Work",
             Self::Palette => "Command Palette…",
+            Self::ToolApprovals => "Tool approvals…",
         }
     }
 }
@@ -22,6 +24,7 @@ impl Command {
 const GROUPS: &[(&str, &[Command])] = &[
     ("File", &[Command::NewThread, Command::Reconnect]),
     ("View", &[Command::ShowWork, Command::Palette]),
+    ("Settings", &[Command::ToolApprovals]),
 ];
 
 pub(crate) fn in_window(ui: &mut egui::Ui, ready: bool) -> Option<Command> {

@@ -94,6 +94,21 @@ def work(prompt):
     notification("item/reasoning/summaryTextDelta", {"itemId": "thought", "delta": "Checking the remote workspace."})
     notification("item/started", {"item": {"id": "command", "type": "commandExecution", "command": "fixture command", "status": "inProgress"}})
     notification("item/commandExecution/outputDelta", {"itemId": "command", "delta": "first output\n"})
+    if prompt.startswith("TOOL_APPROVALS:"):
+        for index, case in enumerate(json.loads(prompt.split(":", 1)[1])):
+            request_id = 0 if index == 0 else f"tool-permission-{index}"
+            emit({"id": request_id, "method": "mcpServer/elicitation/request", "params": {
+                "threadId": thread, "turnId": "fixture-turn", "serverName": "cua_repl",
+                "message": "Allow the fixture tool?", "mode": "form",
+                "requestedSchema": {"type": "object", "properties": {}},
+                "_meta": {"codex_approval_kind": case.get("kind", "mcp_tool_call"),
+                          "connector_id": case["connector"], "tool_name": "fixture_action"}}})
+            with response_ready:
+                assert response_ready.wait_for(lambda: request_id in responses, timeout=25), "permission was not answered"
+                result = responses.pop(request_id)
+            action = case.get("action", "accept")
+            assert result == {"action": action, "content": {} if action == "accept" else None}, result
+            notification("serverRequest/resolved", {"requestId": request_id})
     if prompt.startswith("ELICITATION_"):
         expected = prompt.removeprefix("ELICITATION_").lower()
         emit({"id": 0, "method": "mcpServer/elicitation/request", "params": {
@@ -107,7 +122,7 @@ def work(prompt):
             result = responses.pop(0)
         assert result == {"action": expected, "content": {} if expected == "accept" else None}, result
         notification("serverRequest/resolved", {"requestId": 0})
-    if "APPROVAL" in prompt:
+    if "APPROVAL" in prompt and not prompt.startswith("TOOL_APPROVALS:"):
         emit({"id": "approval-1", "method": "item/commandExecution/requestApproval", "params": {"threadId": thread, "turnId": "fixture-turn", "command": "fixture command", "itemId": "command"}})
         while not approved.wait(0.02) and not cancel.is_set():
             pass

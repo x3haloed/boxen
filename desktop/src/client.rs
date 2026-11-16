@@ -36,6 +36,7 @@ pub struct SubmitError {
 }
 
 pub enum Update {
+    ToolApprovals(String, Result<Value, String>),
     Mail(crate::correspondence::MailUpdate),
     Files(crate::attachments::FileUpdate),
     Steered(crate::model::ThreadKey, Result<Value, String>, bool),
@@ -80,6 +81,13 @@ impl Publisher {
     }
 }
 impl Client {
+    pub fn tool_approvals(&self, destination: Destination, args: Value, publisher: Publisher) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            let result = client.operation(&destination, json!({"op":"tool_approvals","args":args}));
+            publisher.send(Update::ToolApprovals(destination.key, result));
+        });
+    }
     pub fn new(origin: String, home: &Path) -> Result<Self, String> {
         // A local capability is never transmitted to a peer or an arbitrary URL.
         let authority = origin

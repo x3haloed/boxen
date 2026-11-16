@@ -4,6 +4,35 @@ An anonymous Boxen thread can execute through Codex app-server on a paired LAN m
 
 The executing daemon owns the run. It retains each ordered event before publishing it. Viewer connections subscribe to that sequence and do not own execution lifetime. Streaming uses condition-variable notification rather than periodic progress polling; quiet connections receive heartbeat batches. Backend-exposed summaries are shown when available, without inventing thinking text when the backend supplies none.
 
+## Computer and browser permission approvals
+
+Computer Use and Browser Use have separate host-wide automatic approval settings.
+Both default to enabled. Settings → Tool approvals in Desktop selects the executing
+machine and changes either toggle through the authenticated `tool_approvals` API.
+The daemon persists them in `BOXEN_HOME/tool-approvals.json`; an absent file or
+omitted field uses the enabled default. Atomic replacement of this file also
+changes settings. Each arriving permission request reads the current setting,
+including requests in already-running or resumed conversations.
+
+When enabled, the daemon answers matching Codex MCP tool permission requests with
+`accept` and empty form content. Computer Use identifies itself as `computer-use`;
+Browser Use identifies itself as `browser-use`. Decisions cover every permission
+request for the enabled category. Disabled categories expose the existing manual
+approval controls. Authentication forms that request credentials or codes retain
+their input contract. OS permission dialogs have their own platform behavior.
+
+The run journal retains the original request, `tool_approval_decision`, and
+`request_answered` with its automatic category. Diagnostic events expose automatic
+answers, manual routing and unavailable settings. Malformed settings leave the
+request available for manual response and retain `tool_approval_error`; a repaired
+file applies to subsequent requests. Enabling a toggle affects new arriving
+requests. An earlier request already awaiting a manual answer keeps that answer
+path. Journal replay never sends another approval response.
+
+`scripts/tool-approvals-smoke.py` exercises the real authenticated peer path with
+controlled backend requests, separate toggles, live changes, manual responses,
+restart, retained answers and invalid-setting recovery.
+
 ## Execution account and operating-system session
 
 Each newly accepted run captures its subprocess execution context. On macOS,

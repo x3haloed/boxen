@@ -37,6 +37,7 @@ mod residents;
 mod runtime_policy;
 mod scheduler;
 mod state;
+mod tool_approvals;
 mod web;
 
 use logging::{Context, Level, Target};

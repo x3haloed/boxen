@@ -273,6 +273,40 @@ impl Rpc {
             return Ok(());
         }
         self.run.append("backend", message.clone())?;
+        if !self.cancel_requested {
+            match self.jobs.tool_approvals.automatic(&message) {
+                Ok(Some(category)) => {
+                    self.run.append("tool_approval_decision", json!({"request_id":message["id"],"category":category,"automatic":true,"action":"accept"}))?;
+                    self.run.diagnostic(
+                        Level::Info,
+                        "tool_approval.accepted",
+                        || json!({"request_id":message["id"],"category":category,"automatic":true}),
+                        || Value::Null,
+                    );
+                    self.write(
+                        json!({"id":message["id"],"result":{"action":"accept","content":{}}}),
+                    )?;
+                    self.run.append(
+                        "request_answered",
+                        json!({"request_id":message["id"],"automatic":true,"category":category}),
+                    )?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.run.append(
+                        "tool_approval_error",
+                        json!({"request_id":message["id"],"detail":error.to_string()}),
+                    )?;
+                    self.run.diagnostic(
+                        Level::Warn,
+                        "tool_approval.settings_unavailable",
+                        || json!({"request_id":message["id"],"error":error.to_string()}),
+                        || Value::Null,
+                    );
+                }
+                Ok(None) => {}
+            }
+        }
         if method == "item/tool/call"
             && message.get("id").is_some()
             && matches!(
