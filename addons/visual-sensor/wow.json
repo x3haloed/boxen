@@ -7,8 +7,9 @@
       "region": {"x": 0.856, "y": 0.275, "width": 0.144, "height": 0.33},
       "ocrScale": 3,
       "accurateOCR": true,
-      "pattern": "(?m)^[^0-9\\r\\n]*(\\d{1,3} */ *\\d{1,3} +[\\p{L}][\\p{L}0-9 '’.-]{1,70}) *$",
+      "pattern": "(?m)^[^\\p{L}0-9/\\r\\n]*(\\d{1,3} */ *\\d{1,3} +[\\p{L}][\\p{L}0-9 '’.-]{1,70}) *$",
       "matchAll": true,
+      "validateCounter": true,
       "confirmations": 2
     },
     {

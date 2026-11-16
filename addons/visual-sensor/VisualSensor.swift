@@ -39,6 +39,7 @@ struct FieldConfig: Decodable {
     let ocrScale: Int?
     let accurateOCR: Bool?
     let matchAll: Bool?
+    let validateCounter: Bool?
     let rejectHorizontalEdgeText: Bool?
 }
 
@@ -56,6 +57,12 @@ struct FieldState: Encodable {
     let valueFrame: Int?
     let confidence: Float?
     let ocrReused: Bool
+    let rows: [OCRRow]
+    let possibleClipping: Bool
+    let carried: Bool
+    let heldSamples: Int?
+    let heldMs: Int64?
+    let confirmationSamples: Int
 }
 
 struct Change: Encodable {
@@ -79,9 +86,25 @@ struct Observation: Encodable {
     let changes: [Change]
 }
 
-struct Reading {
-    let value: String
+struct OCRRow: Encodable {
+    struct Bounds: Encodable {
+        let x: Double
+        let y: Double
+        let width: Double
+        let height: Double
+    }
+
+    let text: String
+    let bounds: Bounds
     let confidence: Float
+    let possibleClipping: Bool
+}
+
+struct Reading {
+    let value: String?
+    let rows: [OCRRow]
+
+    var confidence: Float? { rows.map(\.confidence).min() }
 }
 
 struct Field {
@@ -93,6 +116,7 @@ struct Field {
     var consecutive = 0
     var value: String?
     var valueFrame: Int?
+    var valueAtMs: Int64?
 
     init(_ config: FieldConfig) throws {
         guard config.region.isValid, !config.id.isEmpty, config.id.utf8.count <= 64,
@@ -105,7 +129,7 @@ struct Field {
         pattern = try config.pattern.map { try NSRegularExpression(pattern: $0) }
     }
 
-    mutating func process(_ image: CGImage, frame: Int) throws -> (FieldState, Change?) {
+    mutating func process(_ image: CGImage, frame: Int, capturedAtMs: Int64) throws -> (FieldState, Change?) {
         guard let crop = image.cropping(to: config.region.rect(in: image)) else {
             throw SensorError("Field region could not be cropped.")
         }
@@ -118,20 +142,21 @@ struct Field {
         }
 
         var change: Change?
-        if let reading = lastReading {
-            if reading.value == pending {
+        if let reading = lastReading?.value {
+            if reading == pending {
                 consecutive = min(consecutive + 1, config.confirmations ?? 1)
             } else {
-                pending = reading.value
+                pending = reading
                 consecutive = 1
             }
 
             if consecutive >= (config.confirmations ?? 1) {
-                if reading.value != value {
-                    change = Change(field: config.id, previous: value, value: reading.value)
+                if reading != value {
+                    change = Change(field: config.id, previous: value, value: reading)
                 }
-                value = reading.value
+                value = reading
                 valueFrame = frame
+                valueAtMs = capturedAtMs
             }
         } else {
             pending = nil
@@ -139,17 +164,23 @@ struct Field {
         }
 
         let status: String
-        if lastReading == nil {
+        if lastReading?.value == nil {
             status = "unreadable"
-        } else if pending != value {
+        } else if valueFrame != frame {
             status = "confirming"
         } else {
             status = "observed"
         }
 
+        let rows = lastReading?.rows ?? []
         return (FieldState(id: config.id, status: status, value: value,
                            candidate: status == "confirming" ? pending : nil, valueFrame: valueFrame,
-                           confidence: lastReading?.confidence, ocrReused: reused), change)
+                           confidence: lastReading?.confidence, ocrReused: reused,
+                           rows: rows, possibleClipping: rows.contains(where: \.possibleClipping),
+                           carried: valueFrame.map { $0 != frame } ?? false,
+                           heldSamples: valueFrame.map { frame - $0 },
+                           heldMs: valueAtMs.map { max(0, capturedAtMs - $0) },
+                           confirmationSamples: consecutive), change)
     }
 
     private func recognize(_ crop: CGImage) throws -> Reading? {
@@ -157,19 +188,18 @@ struct Field {
         request.recognitionLevel = config.accurateOCR == true ? .accurate : .fast
         request.usesLanguageCorrection = false
         try VNImageRequestHandler(cgImage: ocrImage(crop)).perform([request])
-        let observations = (request.results ?? []).prefix(64)
-        // Vision boxes use normalized image coordinates, including after upscaling.
-        let lines = observations.compactMap { observation -> VNRecognizedText? in
-            if config.rejectHorizontalEdgeText == true,
-               observation.boundingBox.minX <= 0.02 || observation.boundingBox.maxX >= 0.98 {
-                return nil
-            }
-            return observation.topCandidates(1).first
+        // Vision uses a lower-left origin. Published bounds are crop-relative with an upper-left origin.
+        let rows = (request.results ?? []).prefix(24).compactMap { observation -> OCRRow? in
+            guard let candidate = observation.topCandidates(1).first else { return nil }
+            let box = observation.boundingBox
+            return OCRRow(text: String(candidate.string.unicodeScalars.prefix(96)),
+                          bounds: .init(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height),
+                          confidence: candidate.confidence,
+                          possibleClipping: box.minX <= 0.02 || box.maxX >= 0.98)
         }
-        let text = String(lines.map(\.string).joined(separator: "\n").prefix(2048))
-        guard !text.isEmpty, let confidence = lines.map(\.confidence).min() else { return nil }
-
-        guard let pattern else { return Reading(value: text, confidence: confidence) }
+        let included = rows.filter { config.rejectHorizontalEdgeText != true || !$0.possibleClipping }
+        let text = String(included.map(\.text).joined(separator: "\n").unicodeScalars.prefix(2048))
+        guard let pattern else { return Reading(value: text.isEmpty ? nil : text, rows: rows) }
         let textRange = NSRange(text.startIndex..., in: text)
         let matches = config.matchAll == true
             ? pattern.matches(in: text, range: textRange)
@@ -177,10 +207,17 @@ struct Field {
         let values = matches.compactMap { match -> String? in
             let matchRange = match.range(at: match.numberOfRanges > 1 ? 1 : 0)
             guard let range = Range(matchRange, in: text), !range.isEmpty else { return nil }
-            return String(text[range])
+            let value = String(text[range])
+            if config.validateCounter == true {
+                let parts = value.split(separator: "/", maxSplits: 1)
+                guard parts.count == 2,
+                      let done = Int(parts[0].trimmingCharacters(in: .whitespaces)),
+                      let total = Int(parts[1].trimmingCharacters(in: .whitespaces).prefix(while: \.isNumber)),
+                      total > 0, done <= total else { return nil }
+            }
+            return value
         }
-        guard !values.isEmpty else { return nil }
-        return Reading(value: values.joined(separator: "\n"), confidence: confidence)
+        return Reading(value: values.isEmpty ? nil : values.joined(separator: "\n"), rows: rows)
     }
 
     private func ocrImage(_ image: CGImage) -> CGImage {
@@ -273,17 +310,18 @@ struct Sensor {
 
     mutating func observe(_ image: CGImage, frame: Int, capturedAt: Date, captureMs: Double) throws -> Observation {
         let start = DispatchTime.now().uptimeNanoseconds
+        let capturedAtMs = Int64(capturedAt.timeIntervalSince1970 * 1000)
         var states: [FieldState] = []
         var changes: [Change] = []
         for index in fields.indices {
-            let (state, change) = try fields[index].process(image, frame: frame)
+            let (state, change) = try fields[index].process(image, frame: frame, capturedAtMs: capturedAtMs)
             states.append(state)
             if let change { changes.append(change) }
         }
         let processingMs = elapsedMs(since: start)
         try archive?.store(image, frame: frame)
         return Observation(session: session, profile: profile.id, frame: frame,
-                                      capturedAtUnixMs: Int64(capturedAt.timeIntervalSince1970 * 1000),
+                                      capturedAtUnixMs: capturedAtMs,
                                       width: image.width, height: image.height,
                                       captureMs: captureMs, processingMs: processingMs,
                                       evidenceRetained: archive != nil, fields: states, changes: changes)

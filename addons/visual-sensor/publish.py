@@ -10,7 +10,7 @@ import threading
 import time
 
 MAX_PENDING_CHANGES = 32
-MAX_LINE = 32 * 1024
+MAX_LINE = 128 * 1024
 MAX_PAYLOAD = 8 * 1024
 MAX_SNAPSHOT_AGE_MS = 3000
 
@@ -27,13 +27,21 @@ def main():
     parser.add_argument("--ordered-source")
     parser.add_argument("--ordered-field", action="append", default=[],
                         help="Send confirmed changes for this field to the ordered source (repeatable)")
+    parser.add_argument("--ordered-sustain-ms", type=int, default=0,
+                        help="Delay ordered publication until the field is still observed after this interval")
     parser.add_argument("--boxen", default="boxen")
     parser.add_argument("--report-age", action="store_true")
+    parser.add_argument("--evidence-origin", help="HTTPS watcher origin visible from the consumer")
+    parser.add_argument("--evidence-curl-config", help="Private curl config path on the consumer host")
     args = parser.parse_args()
     if args.ordered_source == args.latest_source:
         parser.error("latest and ordered sources must be distinct")
-    if args.ordered_field and not args.ordered_source:
-        parser.error("--ordered-field requires --ordered-source")
+    if (args.ordered_field or args.ordered_sustain_ms) and not args.ordered_source:
+        parser.error("ordered change selection requires --ordered-source")
+    if not 0 <= args.ordered_sustain_ms <= 30_000:
+        parser.error("--ordered-sustain-ms ranges from 0 to 30000")
+    if args.evidence_origin and not args.evidence_origin.startswith("https://"):
+        parser.error("The evidence origin must use HTTPS")
     ordered_fields = set(args.ordered_field)
 
     def events(action, **fields):
@@ -54,14 +62,26 @@ def main():
 
     def read_samples():
         nonlocal latest, lost_changes, last_frame, finished, last_input
+        candidates = {}
         try:
             while line := sys.stdin.buffer.readline(MAX_LINE + 1):
                 if len(line) > MAX_LINE:
-                    raise ValueError("sensor record exceeds 32 KiB")
+                    raise ValueError("sensor record exceeds 128 KiB")
                 sample = json.loads(line)
                 if sample["schema"] != "boxen.visual.v1" or sample["evidenceRetained"]:
                     raise ValueError("publisher expects archive-free boxen.visual.v1 records")
                 session, frame = sample["session"], sample["frame"]
+                evidence = sample.get("remoteEvidence")
+                if evidence is not None and args.evidence_origin:
+                    evidence["origin"] = args.evidence_origin.rstrip("/")
+                    if args.evidence_curl_config:
+                        evidence["curlConfig"] = args.evidence_curl_config
+                if len(json.dumps(sample, ensure_ascii=False).encode()) > MAX_PAYLOAD:
+                    sample["fields"] = [
+                        {key: value for key, value in field.items() if key != "rows"}
+                        for field in sample["fields"]
+                    ]
+                    sample["ocrRowsOmitted"] = True
                 packet = dict(id=f"{session}:{frame}", observed_at_ms=sample["capturedAtUnixMs"],
                               payload=sample)
                 with ready:
@@ -69,23 +89,46 @@ def main():
                     latest = packet
                     if args.ordered_source:
                         if last_frame and last_frame[0] == session:
-                            lost_changes += max(0, frame - last_frame[1] - 1)
+                            gap = max(0, frame - last_frame[1] - 1)
+                            lost_changes += gap
+                            if gap:
+                                candidates.clear()
                         elif last_frame:
                             # A new capture session cannot establish what happened in between.
                             lost_changes += 1
+                            candidates.clear()
                         last_frame = (session, frame)
                         transitions = [
                             change for change in sample["changes"]
                             if "previous" in change
                             and (not ordered_fields or change["field"] in ordered_fields)
                         ]
-                        if transitions:
-                            payload = dict(schema=sample["schema"], profile=sample["profile"],
-                                           session=session, frame=frame, changes=transitions)
+                        payload = {key: sample[key] for key in (
+                            "schema", "profile", "session", "frame", "capturedAtUnixMs",
+                            "remoteEvidence", "serviceReceivedAtUnixMs"
+                        ) if key in sample}
+                        selected = {}
+                        if args.ordered_sustain_ms:
+                            for change in transitions:
+                                candidates[change["field"]] = (packet["id"], payload, change)
+                            for field in sample["fields"]:
+                                candidate = candidates.get(field["id"])
+                                if candidate is None:
+                                    continue
+                                ident, original, change = candidate
+                                age = packet["observed_at_ms"] - original["capturedAtUnixMs"]
+                                if age > 60_000 or (field["status"] == "observed" and field["value"] != change["value"]):
+                                    del candidates[field["id"]]
+                                elif age >= args.ordered_sustain_ms and field["status"] == "observed":
+                                    selected[f"{ident}:{field['id']}"] = dict(original, changes=[change])
+                                    del candidates[field["id"]]
+                        elif transitions:
+                            selected[packet["id"]] = dict(payload, changes=transitions)
+                        for ident, item in selected.items():
                             if len(changes) == MAX_PENDING_CHANGES:
                                 changes.popleft()
                                 lost_changes += 1
-                            changes.append(dict(packet, payload=payload))
+                            changes.append(dict(id=ident, observed_at_ms=item["capturedAtUnixMs"], payload=item))
                     ready.notify_all()
         except (KeyError, ValueError, TypeError) as error:
             failures.append(error)

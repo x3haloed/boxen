@@ -657,6 +657,7 @@ impl Events {
             return Vec::new();
         }
         let mut result = Vec::new();
+        let mut seen = HashSet::new();
         let mut subs: Vec<_> = g
             .data
             .subscriptions
@@ -665,14 +666,35 @@ impl Events {
             .collect();
         subs.sort_by_key(|s| (s.last_presented_ms, s.spec.id.clone()));
         for s in subs {
-            if let Some(b) = Self::batch(&g.data, s) {
+            if let Some(mut b) = Self::batch(&g.data, s) {
+                let source = (&s.spec.source, b["source_generation"].as_u64());
+                let observations = b["observations"].as_array_mut().expect("observation array");
+                observations.retain(|item| !seen.contains(&(source, item["seq"].as_u64())));
                 if size(&result) + size(&b) > 32768 {
                     break;
+                }
+                for item in b["observations"].as_array().expect("observation array") {
+                    seen.insert((source, item["seq"].as_u64()));
                 }
                 result.push(b);
             }
         }
         result
+    }
+
+    pub fn subscription_batch(&self, owner: &str, id: &str) -> Result<Vec<Value>> {
+        let g = self.inner.lock().unwrap();
+        let sub = g
+            .data
+            .subscriptions
+            .get(id)
+            .filter(|sub| sub.owner == owner)
+            .ok_or("subscription is unavailable or owned by another peer")?;
+        Ok(if g.unavailable.is_none() {
+            Self::batch(&g.data, sub).into_iter().collect()
+        } else {
+            Vec::new()
+        })
     }
     pub fn acknowledge(&self, owner: &str, batches: &[Value], waking: bool) -> Result<()> {
         if batches.is_empty() {
@@ -1334,6 +1356,34 @@ mod tests {
     }
     fn push(e: &Events, owner: &str, source: &Source, n: u64) {
         e.publish(owner,&source.spec.id,source.generation,Some(n),json!({"protocol":"boxen-adapter-v1","observations":[{"id":n.to_string(),"observed_at_ms":n,"payload":{"value":n}}]})).unwrap();
+    }
+    #[test]
+    fn overlapping_subscriptions_share_a_run_item_but_keep_independent_reads() {
+        let (root, events, owner, source, first) = fixture("ordered");
+        let mut spec = first.spec.clone();
+        spec.id = state::random_hex().unwrap();
+        let second = events.subscribe(&owner, spec).unwrap();
+        push(&events, &owner, &source, 1);
+        for sub in [&first, &second] {
+            events.ready(&owner, &sub.spec.id).unwrap();
+            let preview = events.subscription_batch(&owner, &sub.spec.id).unwrap();
+            assert_eq!(preview[0]["observations"][0]["seq"], 1);
+        }
+        let batches = events.batches(&owner, first.spec.target.id());
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            batches
+                .iter()
+                .map(|batch| batch["observations"].as_array().unwrap().len())
+                .sum::<usize>(),
+            1
+        );
+        events.acknowledge(&owner, &batches, false).unwrap();
+        for sub in [first, second] {
+            assert_eq!(events.subscription(&owner, &sub.spec.id).unwrap().cursor, 1);
+        }
+        drop(events);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn independent_positions_cadence_and_latest_gap_are_explicit() {

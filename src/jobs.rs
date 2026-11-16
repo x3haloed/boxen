@@ -1066,7 +1066,7 @@ impl Jobs {
             },
             "update_source"|"update_subscription"=>{let _t=self.transitions.lock().unwrap();self.observations.update(owner,if action=="update_source"{"source"}else{"subscription"},args["id"].as_str().ok_or("id required")?,&args["patch"])},
             "publish"=>self.observations.publish(owner,args["id"].as_str().ok_or("source id required")?,args["generation"].as_u64().ok_or("source generation required")?,Some(args["sequence"].as_u64().ok_or("producer sequence required")?),args["response"].clone()),
-            "read"=>{let sub=self.observations.subscription(owner,args["id"].as_str().ok_or("subscription id required")?)?;Ok(json!({"batches":self.observations.batches(owner,sub.spec.target.id()).into_iter().filter(|b|b["subscription_id"]==sub.spec.id).collect::<Vec<_>>(),"presentation":"Read-only preview; positions advance only after input is retained in a workload journal."}))},
+            "read"=>Ok(json!({"batches":self.observations.subscription_batch(owner,args["id"].as_str().ok_or("subscription id required")?)?,"presentation":"Read-only preview; positions advance only after input is retained in a workload journal."})),
             _=>Err("observation actions are list, source, subscription, create_source, subscribe, update_source, update_subscription, publish, and read".into())
         }
         })();
@@ -1095,12 +1095,7 @@ impl Jobs {
             return Err("subscription belongs to a different thread".into());
         }
         self.observations.ready(&record.owner, id)?;
-        let batches: Vec<_> = self
-            .observations
-            .batches(&record.owner, &record.spec.thread_id)
-            .into_iter()
-            .filter(|b| b["subscription_id"] == id)
-            .collect();
+        let batches = self.observations.subscription_batch(&record.owner, id)?;
         run.append(
             "observation_batch",
             json!({"batches":batches,"call_id":call_id}),

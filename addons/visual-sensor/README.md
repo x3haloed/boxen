@@ -118,3 +118,45 @@ request is rate limited and waits for a new capture to fulfill it. The watcher
 restarts failed or stalled capture workers, keeping prior evidence available
 within the same retention limits. Restarting the watcher itself clears its RAM
 and changes the SSE epoch.
+
+### Reading and evidence metadata
+
+Each field includes bounded raw OCR rows, with text, recognizer confidence,
+possible clipping, and normalized crop-relative bounds (upper-left origin).
+The parsed candidate and last confirmed value have separate meanings.
+`carried`, `valueFrame`, `heldSamples`, and `heldMs` identify a value retained
+from an earlier reading. `confirmationSamples` counts consecutive matching
+parsed readings up to the configured confirmation threshold. An unreadable
+sample can still have OCR rows and a carried value. Invalid quest counter
+fractions remain in OCR rows and do not become parsed objectives.
+
+The legacy `evidenceRetained` field describes the local archive. HTTPS
+snapshots and change events have a separate `remoteEvidence` object with
+crop paths and the nominal expiration time. The byte cap can evict a crop
+earlier. The frame route is authoritative at lookup. Its HTTP 410 response
+includes `never_retained`, `expired`, `evicted`, or `unknown`. Availability
+bookkeeping retains at most 2048 recent frame records, so prior sessions and
+older frames can be unknown. A replayed event can outlive its image.
+
+### Resident intake
+
+The watcher can forward metadata on stdout with `--forward-jsonl`. Piping that
+output to `publish.py` lets Boxen and HTTPS clients consume the same capture
+session. Its bounded handoff has no image bytes. Ordered Boxen changes include
+capture time and crop references when the watcher supplied them.
+`--ordered-field` and `--ordered-sustain-ms` select which changes reach an
+ordered wake source. The latest snapshot and direct SSE remain inspectable. Large Boxen
+snapshots carry `ocrRowsOmitted` when raw rows would exceed the Boxen limit.
+The HTTPS snapshot still has those rows. The watcher adds service receipt
+time. Boxen separately records the observation receipt and subscription
+presentation position.
+
+`sse-intake.py` is an optional bridge for resident-core journals with the
+`events(id,input,state)` intake contract. It uses a private curl configuration,
+resumes using a cursor stored beside the journal, and admits a selected change
+after a subsequent observed snapshot confirms that it persisted. It admits
+at most one outstanding visual wake, retains no image bytes, and leaves other
+fields inspectable in the watcher. Its status file reports capture health,
+last collection, stream receipt, admission and any observed gap. The absolute
+expiry and a local stop file bound the listener across reconnects. The
+resident's existing runtime owns execution, image inspection and any reply.

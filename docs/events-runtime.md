@@ -85,13 +85,15 @@ stopped records. Definition reclamation/configurable capacity and larger-scale
 storage remain future work.
 
 Run acceptance retains exact batches in `record.json` before positions advance.
+Overlapping subscriptions present each source sequence once per run while retaining
+each subscription position and gap independently.
 The model input labels these as source-authored observations, distinct from the
 request author, instructions, and mail. A resident records activation reason `observations`, keeps private narration and
 explicit outgoing sends; a thread keeps normal request/response behavior. Busy
 targets wait without overlapping runs. Waking disabled still permits pending
 batches on a later ordinary activation.
 
-`read` previews already-ready input without advancing positions. The runtime tool
+`read` previews the requested subscription’s already-ready input without advancing positions or sharing the combined run budget. The runtime tool
 `boxen_observations` can explicitly prepare a current batch and retain it in an
 `observation_batch` journal event before advancing. This provides an explicit
 boundary inside an ongoing run. Presentation establishes prepared/retained input,

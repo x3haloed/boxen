@@ -9,9 +9,10 @@ from pathlib import Path
 import signal
 import ssl
 import subprocess
+import sys
 import threading
 import time
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 
 TTL = 120
@@ -20,17 +21,19 @@ SAMPLE_IMAGE_BYTES = 16 * 1024 * 1024
 STALE_AFTER = 20
 STARTUP_TIMEOUT = 90
 HISTORY = 64
+EVIDENCE_HISTORY = 2048
 MAX_CONNECTIONS = 12
 
 
 class Feed:
-    def __init__(self, command):
+    def __init__(self, command, forward=False):
         self.command = command
         self.changed = threading.Condition()
         self.epoch = uuid4().hex
         self.sequence = 0
         self.events = deque(maxlen=HISTORY)
         self.images = OrderedDict()
+        self.evidence = OrderedDict()
         self.image_bytes = 0
         self.snapshot = None
         self.last_sample = None
@@ -40,6 +43,20 @@ class Feed:
         self.started = 0
         self.next_fresh = 0
         self.stopping = False
+        self.forward = deque(maxlen=32) if forward else None
+
+    def forward_samples(self):
+        try:
+            while True:
+                with self.changed:
+                    self.changed.wait_for(lambda: self.forward or self.stopping)
+                    if self.stopping:
+                        return
+                    item = self.forward.popleft()
+                print(json.dumps(item, separators=(",", ":"), ensure_ascii=False), flush=True)
+        except OSError:
+            with self.changed:
+                self.forward = None
 
     def health(self):
         if self.process is None:
@@ -60,8 +77,31 @@ class Feed:
             _, (deadline, _, size, _) = next(iter(self.images.items()))
             if deadline > time.monotonic() and self.image_bytes <= IMAGE_BYTES:
                 break
-            self.images.popitem(last=False)
+            key, _ = self.images.popitem(last=False)
             self.image_bytes -= size
+            _, fields, expires = self.evidence[key]
+            self.evidence[key] = ("expired" if deadline <= time.monotonic() else "evicted", fields, expires)
+
+    def image_status(self, key, field):
+        record = self.evidence.get(key)
+        if record is None:
+            return "unknown"
+        status, fields, _ = record
+        return status if field in fields else "never_retained"
+
+    def evidence_view(self, key, whole):
+        self.reap()
+        record = self.evidence.get(key)
+        if record is None:
+            return {"state": "unknown"}
+        status, fields, expires = record
+        crops = [{"field": field, "path": f"/v1/frames/{key[0]}/{key[1]}/{quote(field, safe='')}",
+                  "freshPath": f"/v1/fresh/{quote(field, safe='')}"}
+                 for field in fields if field is not None]
+        has_whole = whole and None in fields
+        return {"state": status if crops or has_whole else "never_retained",
+                "expiresAtUnixMs": expires if crops or has_whole else None,
+                "crops": crops, "wholeFrame": has_whole}
 
     def read_samples(self, process):
         stream = process.stdout
@@ -84,18 +124,28 @@ class Feed:
                 images[item.get("field")] = body
 
             with self.changed:
+                observation["serviceReceivedAtUnixMs"] = time.time_ns() // 1_000_000
                 self.snapshot = observation
                 self.last_sample = time.monotonic()
                 captured = observation["capturedAtUnixMs"]
+                self.evidence[key] = ("available" if images else "never_retained", tuple(images),
+                                      time.time_ns() // 1_000_000 + TTL * 1000 if images else None)
                 if images:
                     deadline = self.last_sample + TTL
                     self.images[key] = (deadline, captured, total, images)
                     self.image_bytes += total
                     self.reap()
+                while len(self.evidence) > EVIDENCE_HISTORY:
+                    # Live evidence always has metadata even at the minimum sampling interval.
+                    old = next((key for key in self.evidence if key not in self.images), None)
+                    if old is None:
+                        break
+                    del self.evidence[old]
                 if sample["changes"]:
                     self.sequence += 1
                     event = {
                         "session": key[0], "frame": key[1], "capturedAtUnixMs": captured,
+                        "serviceReceivedAtUnixMs": observation["serviceReceivedAtUnixMs"],
                         "changes": sample["changes"], "crops": [field for field in images if field is not None],
                         "wholeFrame": None in images,
                         "evidenceTtlSeconds": TTL,
@@ -104,7 +154,17 @@ class Feed:
                 if sample["fresh"] and self.fresh is not None:
                     self.fresh["result"] = (key, captured, images)
                     self.fresh = None
+                if self.forward is not None:
+                    forwarded = self.snapshot_view(False)["snapshot"]
+                    self.forward.append(forwarded)
                 self.changed.notify_all()
+
+    def snapshot_view(self, whole):
+        snapshot = self.snapshot
+        if snapshot is not None:
+            key = (snapshot["session"], snapshot["frame"])
+            snapshot = dict(snapshot, remoteEvidence=self.evidence_view(key, whole))
+        return {"snapshot": snapshot, "health": self.health()}
 
     def supervise(self):
         while True:
@@ -130,7 +190,7 @@ class Feed:
             try:
                 self.read_samples(process)
             except (OSError, ValueError, KeyError, TypeError):
-                print("visual watcher: capture stream failed", flush=True)
+                print("visual watcher: capture stream failed", file=sys.stderr, flush=True)
             finally:
                 if process.poll() is None:
                     process.kill()
@@ -161,6 +221,8 @@ class Feed:
                 self.changed.wait(timeout=1)
 
     def start(self):
+        if self.forward is not None:
+            threading.Thread(target=self.forward_samples, daemon=True).start()
         threading.Thread(target=self.supervise, daemon=True).start()
         threading.Thread(target=self.maintain, daemon=True).start()
 
@@ -301,7 +363,7 @@ class WatchRequest(BaseHTTPRequestHandler):
             return
         if method == "GET" and path == ["snapshot"]:
             with feed.changed:
-                data = {"snapshot": feed.snapshot, "health": feed.health()}
+                data = feed.snapshot_view(scope == "whole")
             self.json_reply(200, data)
             return
         if (method == "GET" and len(path) in (3, 4) and path[0] == "frames"
@@ -328,10 +390,11 @@ class WatchRequest(BaseHTTPRequestHandler):
                 feed.reap()
                 stored = feed.images.get(key)
                 image = stored[3].get(field) if stored else None
+                status = feed.image_status(key, field)
             if image:
                 self.image_reply((key, stored[1], image))
             else:
-                self.json_reply(410, {"error": "evidence_expired_or_unavailable"})
+                self.json_reply(410, {"error": "evidence_unavailable", "availability": status})
             return
         self.json_reply(404, {"error": "route_unavailable"})
 
@@ -356,10 +419,10 @@ class WatchRequest(BaseHTTPRequestHandler):
 
         def send(kind, data, seq=None):
             event_id = f"id: {feed.epoch}:{seq}\n" if seq is not None else ""
-            self.wfile.write(f"{event_id}event: {kind}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n".encode())
+            self.wfile.write(f"{event_id}event: {kind}\ndata: {json.dumps(data, separators=(',', ':'), ensure_ascii=False)}\n\n".encode())
 
         def snapshot():
-            return {"snapshot": feed.snapshot, "health": feed.health()}
+            return feed.snapshot_view(scope == "whole")
 
         try:
             with feed.changed:
@@ -389,14 +452,17 @@ class WatchRequest(BaseHTTPRequestHandler):
                     send("snapshot", current)
                     cursor = oldest - 1
                 for seq, kind, event in pending:
-                    if kind == "change" and scope != "whole":
-                        event = dict(event, wholeFrame=False)
+                    if kind == "change":
+                        with feed.changed:
+                            evidence = feed.evidence_view((event["session"], event["frame"]), scope == "whole")
+                        event = dict(event, remoteEvidence=evidence,
+                                     wholeFrame=event["wholeFrame"] and scope == "whole")
                     send(kind, event, seq)
                     cursor = seq
                 health = current["health"]["state"]
                 if health != last_health or time.monotonic() >= heartbeat_at:
                     send("health", current["health"])
-                    if current["snapshot"] is not initial["snapshot"] and current["snapshot"] is not previous_snapshot:
+                    if current["snapshot"] != initial["snapshot"] and current["snapshot"] != previous_snapshot:
                         send("snapshot", current)
                         previous_snapshot = current["snapshot"]
                     last_health = health
@@ -412,6 +478,7 @@ def main():
     parser.add_argument("--credentials", type=Path, required=True)
     parser.add_argument("--cert")
     parser.add_argument("--key")
+    parser.add_argument("--forward-jsonl", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -424,7 +491,7 @@ def main():
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.minimum_version = ssl.TLSVersion.TLSv1_2
         tls.load_cert_chain(args.cert, args.key)
-    feed = Feed(command)
+    feed = Feed(command, forward=args.forward_jsonl)
     server = WatchServer((args.bind, args.port), feed, args.credentials, tls)
 
     def terminate(_signal, _frame):
