@@ -37,48 +37,60 @@ pub struct View {
 
 impl Session {
     pub fn open(config: &Path, data: &Path) -> Result<Self> {
-        let connection = Connection::open(config)?;
-        let channel = data.join(connection.scope_id());
-        let state = Arc::new(Mutex::new(Store::open(&channel)?));
-        let files = Arc::new(Mutex::new(BlobStore::new(channel.join("files"))?));
-        let worker_files = files.clone();
+        let (session, sync) = Self::prepare(Connection::open(config)?, data, false)?;
         // The macOS GUI backend takes over the original main thread. Start the
         // network thread before handing control to AppKit.
-        let weak = Arc::downgrade(&state);
         thread::Builder::new()
             .name("guest-pubsub".into())
-            .spawn(move || {
-                let mut connection = connection;
-                let mut permission_check = None;
-                let mut last_probe: Option<Instant> = None;
-                let mut pending = PendingMessages::default();
-                let mut retry = Duration::from_secs(1);
-                while let Some(state) = weak.upgrade() {
-                    let result = synchronize(
-                        &mut connection,
-                        &state,
-                        &worker_files,
-                        &mut permission_check,
-                        &mut last_probe,
-                        &mut pending,
-                    );
-                    state.lock().unwrap().set_status(if result.is_ok() {
-                        "Connected"
-                    } else {
-                        "Sync paused; retrying"
-                    });
-                    drop(state);
-                    if result.is_ok() {
-                        retry = Duration::from_secs(1);
-                        thread::sleep(Duration::from_millis(250));
-                    } else {
-                        permission_check = None;
-                        thread::sleep(retry);
-                        retry = (retry * 2).min(Duration::from_secs(15));
-                    }
+            .spawn(sync)?;
+        Ok(session)
+    }
+
+    pub fn prepare(
+        connection: Connection,
+        data: &Path,
+        verified: bool,
+    ) -> Result<(Self, impl FnOnce() + Send + use<>)> {
+        let channel = data.join(connection.scope_id());
+        let mut opened = Store::open(&channel)?;
+        if verified {
+            opened.set_status("Connected");
+        }
+        let state = Arc::new(Mutex::new(opened));
+        let files = Arc::new(Mutex::new(BlobStore::new(channel.join("files"))?));
+        let worker_files = files.clone();
+        let weak = Arc::downgrade(&state);
+        Ok((Self { state, files }, move || {
+            let mut connection = connection;
+            let mut permission_check = verified.then(Instant::now);
+            let mut last_probe: Option<Instant> = None;
+            let mut pending = PendingMessages::default();
+            let mut retry = Duration::from_secs(1);
+            while let Some(state) = weak.upgrade() {
+                let result = synchronize(
+                    &mut connection,
+                    &state,
+                    &worker_files,
+                    &mut permission_check,
+                    &mut last_probe,
+                    &mut pending,
+                );
+                state.lock().unwrap().set_status(if result.is_ok() {
+                    "Connected"
+                } else {
+                    "Sync paused; retrying"
+                });
+                drop(state);
+                if result.is_ok() {
+                    retry = Duration::from_secs(1);
+                    thread::sleep(Duration::from_millis(250));
+                } else {
+                    permission_check = None;
+                    thread::sleep(retry);
+                    retry = (retry * 2).min(Duration::from_secs(15));
                 }
-            })?;
-        Ok(Self { state, files })
+            }
+        }))
     }
 
     pub fn send(

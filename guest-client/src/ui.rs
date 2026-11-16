@@ -1,6 +1,7 @@
 use crate::{
     paint::{Canvas, Rect, Type},
     session::{Entry, Session},
+    setup::Installer,
 };
 use boxen_guest_transport::{
     Attachment, FILE_LIMIT, GUEST_BODY_LIMIT, MAX_FILES, Message, Presence, Result, hash_id, new_id,
@@ -31,11 +32,12 @@ const MINT: u32 = 0xffe2eee2;
 const TEXT_SIZE: i32 = 16;
 const LEADING: i32 = 22;
 
-pub fn run(session: Option<Session>) -> Result<()> {
+pub fn run(session: Option<Session>, installer: Option<Installer>) -> Result<()> {
     let mut gui = softer_gui::open("Boxen Guest Chat", "org.boxen.guest-client", 790, 650)
         .ok_or("Could not open the guest client window")?;
     let mut font = Type::load().map_err(|_| "Could not load guest chat typography")?;
     let mut chat = Chat::new(session);
+    chat.setup = installer.map(Setup::new);
     let mut event = Event::default();
     let mut buttons = [0; 8];
     let mut dirty = true;
@@ -54,7 +56,10 @@ pub fn run(session: Option<Session>) -> Result<()> {
             let rising = |code| event.button(code) && !held(&buttons, code);
             match event.kind {
                 EVENT_CLOSE => return Ok(()),
-                EVENT_TEXT if chat.preview.is_none() || chat.picker.is_some() => {
+                EVENT_TEXT
+                    if (chat.preview.is_none() || chat.picker.is_some())
+                        && !chat.checking_setup() =>
+                {
                     let text: String = event
                         .text()
                         .iter()
@@ -66,7 +71,10 @@ pub fn run(session: Option<Session>) -> Result<()> {
                         dirty = true;
                     }
                 }
-                EVENT_COPYPASTE if chat.preview.is_none() || chat.picker.is_some() => {
+                EVENT_COPYPASTE
+                    if (chat.preview.is_none() || chat.picker.is_some())
+                        && !chat.checking_setup() =>
+                {
                     let clipboard = gui.clipboard();
                     match event.action {
                         CP_PASTE => {
@@ -169,6 +177,22 @@ pub fn run(session: Option<Session>) -> Result<()> {
                                     KEY_PAGEUP => chat.picker.as_mut().unwrap().scroll(-8),
                                     KEY_PAGEDOWN => chat.picker.as_mut().unwrap().scroll(8),
                                     _ => chat.editor().key(key, shifted, shortcut),
+                                }
+                                dirty = true;
+                                buttons = event.bits;
+                                continue;
+                            }
+                            if chat.setup.is_some() {
+                                match key {
+                                    KEY_ENTER | 96 if shortcut => chat.connect_setup(),
+                                    KEY_ENTER | 96 if !chat.checking_setup() => {
+                                        chat.editor().insert("\n")
+                                    }
+                                    24 if shortcut => chat.pick(&mut gui),
+                                    _ if !chat.checking_setup() => {
+                                        chat.editor().key(key, shifted, shortcut)
+                                    }
+                                    _ => {}
                                 }
                                 dirty = true;
                                 buttons = event.bits;
@@ -319,6 +343,8 @@ enum Click {
     PickerParent,
     PickerConfirm,
     PickerCancel,
+    PasteDetails,
+    ConnectSetup,
 }
 
 struct Picker {
@@ -437,6 +463,31 @@ struct Chat {
     hits: Vec<(Rect, Click)>,
     focus: Option<Click>,
     picker: Option<Picker>,
+    setup: Option<Setup>,
+}
+
+struct Setup {
+    installer: Installer,
+    credential: Option<PathBuf>,
+    details: Draft,
+    checking: bool,
+    error: Option<String>,
+}
+
+impl Setup {
+    fn new(installer: Installer) -> Self {
+        Self {
+            installer,
+            credential: None,
+            details: Draft::default(),
+            checking: false,
+            error: None,
+        }
+    }
+
+    fn ready(&self) -> bool {
+        !self.checking && self.credential.is_some() && !self.details.text.trim().is_empty()
+    }
 }
 
 impl Chat {
@@ -465,10 +516,26 @@ impl Chat {
             hits: Vec::new(),
             focus: None,
             picker: None,
+            setup: None,
         }
     }
 
     fn refresh(&mut self) -> bool {
+        if let Some(setup) = &mut self.setup {
+            if setup.checking
+                && let Some(result) = setup.installer.result()
+            {
+                match result {
+                    Ok(session) => *self = Self::new(Some(session)),
+                    Err(error) => {
+                        setup.error = Some(error.to_string());
+                        setup.checking = false;
+                    }
+                }
+                return true;
+            }
+            return false;
+        }
         let Some(view) = self
             .session
             .as_ref()
@@ -532,15 +599,40 @@ impl Chat {
     }
 
     fn pick(&mut self, gui: &mut Gui) {
+        if self.checking_setup() {
+            return;
+        }
         if !gui.pick_files() {
             self.picker = Some(Picker::open(None));
         }
     }
 
     fn editor(&mut self) -> &mut Draft {
-        self.picker
-            .as_mut()
-            .map_or(&mut self.draft, |picker| &mut picker.input)
+        if let Some(picker) = &mut self.picker {
+            &mut picker.input
+        } else if let Some(setup) = &mut self.setup {
+            &mut setup.details
+        } else {
+            &mut self.draft
+        }
+    }
+
+    fn checking_setup(&self) -> bool {
+        self.setup.as_ref().is_some_and(|setup| setup.checking)
+    }
+
+    fn connect_setup(&mut self) {
+        let Some(setup) = self.setup.as_mut().filter(|setup| setup.ready()) else {
+            return;
+        };
+        let Some(path) = setup.credential.clone() else {
+            return;
+        };
+        setup.error = None;
+        match setup.installer.connect(setup.details.text.clone(), path) {
+            Ok(()) => setup.checking = true,
+            Err(error) => setup.error = Some(error.to_string()),
+        }
     }
 
     fn picker_confirm(&mut self) {
@@ -581,6 +673,18 @@ impl Chat {
         match event {
             FileEvent::Added(paths) => {
                 if paths.is_empty() {
+                    return;
+                }
+                if let Some(setup) = &mut self.setup {
+                    if !setup.checking {
+                        match paths.as_slice() {
+                            [path] => {
+                                setup.credential = Some(path.clone());
+                                setup.error = None;
+                            }
+                            _ => setup.error = Some("Choose one credential file.".into()),
+                        }
+                    }
                     return;
                 }
                 self.notice = None;
@@ -682,6 +786,16 @@ impl Chat {
     fn activate(&mut self, click: Click, gui: &mut Gui) {
         match click {
             Click::Pick => self.pick(gui),
+            Click::PasteDetails => {
+                if let Some(setup) = self.setup.as_mut().filter(|setup| !setup.checking)
+                    && let Some(text) = gui.clipboard().get()
+                {
+                    setup.details = Draft::default();
+                    setup.details.insert(&text.replace('\r', ""));
+                    setup.error = None;
+                }
+            }
+            Click::ConnectSetup => self.connect_setup(),
             Click::Send => self.send(),
             Click::Remove(index) if index < self.draft_files.len() => {
                 self.draft_files.remove(index);
@@ -718,8 +832,9 @@ impl Chat {
             Click::PickerConfirm => self.picker_confirm(),
             Click::PickerCancel => self.picker = None,
             Click::Composer => {
-                self.draft.caret = self.draft.text.len();
-                self.draft.anchor = self.draft.caret;
+                let editor = self.editor();
+                editor.caret = editor.text.len();
+                editor.anchor = editor.caret;
             }
             _ => {}
         }
@@ -730,6 +845,11 @@ impl Chat {
         self.hits.clear();
         canvas.fill(Rect::new(0, 0, width, height), PAPER);
         if width < 240 || height < 200 {
+            return;
+        }
+        if self.setup.is_some() {
+            self.draw_setup(canvas, font);
+            self.draw_layers(canvas, font);
             return;
         }
         let margin = if width > 560 { 28 } else { 14 };
@@ -775,6 +895,10 @@ impl Chat {
             card_height,
             editor_height,
         );
+        self.draw_layers(canvas, font);
+    }
+
+    fn draw_layers(&mut self, canvas: &mut Canvas, font: &mut Type) {
         if self.preview.is_some() {
             self.draw_preview(canvas, font);
         }
@@ -796,6 +920,155 @@ impl Chat {
             }
         } else {
             self.focus = None;
+        }
+    }
+
+    fn draw_setup(&mut self, canvas: &mut Canvas, font: &mut Type) {
+        let setup = self.setup.as_ref().expect("visible setup");
+        let width = (canvas.width - 32).min(550);
+        let height = (canvas.height - 24).min(482);
+        let pad = if height >= 405 { 24 } else { 13 };
+        let card = Rect::new(
+            (canvas.width - width) / 2,
+            (canvas.height - height) / 2,
+            width,
+            height,
+        );
+        let body = card.inset(pad);
+        canvas.round(card, 18, BORDER);
+        canvas.round(card.inset(1), 17, WHITE);
+        canvas.text(font, body.x, body.y, 27, "Connect to Boxen", INK);
+        let spaced = height >= 405;
+        if spaced {
+            canvas.text(
+                font,
+                body.x,
+                body.y + 37,
+                15,
+                "Use the credential file and connection details you received.",
+                MUTED,
+            );
+        }
+        let key_label_y = body.y + if spaced { 78 } else { 37 };
+        canvas.text(font, body.x, key_label_y, 15, "Credential file", INK);
+        let choose = Rect::new(body.x, key_label_y + 22, 119, 32);
+        button(
+            canvas,
+            font,
+            choose,
+            if setup.credential.is_some() {
+                "Change file"
+            } else {
+                "Choose file"
+            },
+            false,
+        );
+        let filename = setup
+            .credential
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map_or_else(
+                || "Choose or drop a JSON key".into(),
+                |name| name.to_string_lossy(),
+            );
+        let filename = font.ellipsis(&filename, body.w - choose.w - 12, 13);
+        canvas.text(
+            font,
+            choose.x + choose.w + 10,
+            choose.y + 8,
+            13,
+            &filename,
+            MUTED,
+        );
+        let label_y = choose.y + choose.h + if spaced { 21 } else { 9 };
+        canvas.text(font, body.x, label_y + 5, 15, "Connection details", INK);
+        let paste = Rect::new(body.x + body.w - 72, label_y, 72, 26);
+        button(canvas, font, paste, "Paste", false);
+        let connect = Rect::new(body.x + body.w - 112, body.y + body.h - 35, 112, 35);
+        let entry = Rect::new(
+            body.x,
+            label_y + 31,
+            body.w,
+            (connect.y - label_y - 73).max(24),
+        );
+        canvas.round(entry, 9, BORDER);
+        canvas.round(entry.inset(1), 8, PAPER);
+        let interior = entry.inset(10);
+        let content = if setup.details.text.is_empty() {
+            "project_id=…\npublish_topic=…\nreceive_subscription=…"
+        } else {
+            &setup.details.text
+        };
+        let rows = font.wrap(content, interior.w, 14);
+        let max_rows = (interior.h / 20).max(1) as usize;
+        let old_clip = canvas.clip;
+        canvas.clip = interior;
+        // Invitations fit in three lines. For longer input, keep the end
+        // visible so the user can see the text they just entered.
+        for (row, text) in rows
+            .iter()
+            .skip(rows.len().saturating_sub(max_rows))
+            .enumerate()
+        {
+            canvas.text(
+                font,
+                interior.x,
+                interior.y + row as i32 * 20,
+                14,
+                text,
+                if setup.details.text.is_empty() {
+                    MUTED
+                } else {
+                    INK
+                },
+            );
+        }
+        canvas.clip = old_clip;
+        button(
+            canvas,
+            font,
+            connect,
+            if setup.checking {
+                "Checking…"
+            } else {
+                "Connect"
+            },
+            setup.ready(),
+        );
+        if !setup.checking {
+            self.hits.extend([
+                (choose, Click::Pick),
+                (entry, Click::Composer),
+                (paste, Click::PasteDetails),
+            ]);
+        }
+        if setup.ready() {
+            self.hits.push((connect, Click::ConnectSetup));
+        }
+        if let Some(status) = setup.error.as_deref().or(setup
+            .checking
+            .then_some("Verifying access to Google Cloud…"))
+        {
+            let color = if setup.error.is_some() {
+                0xff9b4135
+            } else {
+                MUTED
+            };
+            for (row, line) in font
+                .wrap(status, body.w - connect.w - 12, 13)
+                .into_iter()
+                .take(3)
+                .enumerate()
+            {
+                canvas.text(
+                    font,
+                    body.x,
+                    connect.y - 8 + row as i32 * 15,
+                    13,
+                    &line,
+                    color,
+                );
+            }
         }
     }
 

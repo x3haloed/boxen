@@ -27,14 +27,14 @@ const RESPONSE_LIMIT: u64 = 15 * 1024 * 1024;
 const WIRE_LIMIT: usize = 2 * 1024 * 1024;
 pub const GUEST_BODY_LIMIT: usize = 8 * 1024;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Config {
-    project_id: String,
-    service_account_email: String,
-    credentials_file: PathBuf,
-    publish_topic: String,
-    receive_subscription: String,
+pub struct Config {
+    pub project_id: String,
+    pub service_account_email: String,
+    pub credentials_file: PathBuf,
+    pub publish_topic: String,
+    pub receive_subscription: String,
 }
 
 #[derive(Deserialize)]
@@ -238,6 +238,21 @@ impl Connection {
         let path = host_path(path);
         let config: Config =
             read_json(&path).map_err(|_| "could not read guest connection settings")?;
+        let key: KeyFile = read_json(&resolve_key_path(&path, &config.credentials_file))
+            .map_err(|_| "could not read guest service account credentials")?;
+        Self::from_key(&config, key)
+    }
+
+    /// Builds a connection from the exact bytes that first-run setup will save.
+    /// The account identity comes from the selected service-account file.
+    pub fn for_setup(config: &mut Config, credential: &[u8]) -> Result<Self> {
+        let key: KeyFile = serde_json::from_slice(credential)
+            .map_err(|_| "Choose a Google Cloud service-account JSON key.")?;
+        config.service_account_email = key.client_email.clone();
+        Self::from_key(config, key)
+    }
+
+    fn from_key(config: &Config, key: KeyFile) -> Result<Self> {
         if config.project_id.is_empty()
             || !config
                 .project_id
@@ -246,12 +261,12 @@ impl Connection {
             || !resource_id(&config.publish_topic)
             || !resource_id(&config.receive_subscription)
         {
-            return Err("invalid guest Pub/Sub resource identifiers".into());
+            return Err("Check the project, outgoing topic, and incoming subscription IDs.".into());
         }
-        let path = resolve_key_path(&path, &config.credentials_file);
-        let key: KeyFile =
-            read_json(&path).map_err(|_| "could not read guest service account credentials")?;
-        if key.kind != "service_account" || key.client_email != config.service_account_email {
+        if key.kind != "service_account"
+            || key.client_email.is_empty()
+            || key.client_email != config.service_account_email
+        {
             return Err("credential does not match the configured guest service account".into());
         }
         let pem = key
@@ -265,7 +280,7 @@ impl Connection {
             .map_err(|_| "could not decode the service account key")?;
         let rsa = signature::RsaKeyPair::from_pkcs8(&der)
             .map_err(|_| "invalid service account RSA key")?;
-        let project = config.project_id;
+        let project = &config.project_id;
         let topic = format!(
             "{PUBSUB}/projects/{project}/topics/{}",
             config.publish_topic.replace('%', "%25")

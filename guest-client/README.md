@@ -20,6 +20,24 @@ and run `cargo build --locked --release --features ape`. The artifact is
 Windows can launch a byte-identical copy with an `.exe` extension. On macOS,
 run `bash ./boxen-guest-client.com` from the directory containing the artifact.
 
+## Connect the desktop client
+
+Give the guest the app, their Google Cloud service-account JSON file, and one
+copyable block with their three connection details. These are the guest
+account's outgoing topic and incoming subscription.
+
+```text
+project_id=example-project
+publish_topic=outgoing-example
+receive_subscription=incoming-example
+```
+
+On first launch, choose or drop the JSON file, paste the block, and select
+**Connect**. The app checks both Pub/Sub permissions before saving setup and
+opening chat. It reads the service-account identity from the key and keeps a
+private copy in the local settings directory. Future launches reuse those
+settings. Launch with `--setup` to configure a replacement connection.
+
 ## Configure each endpoint
 
 In Google Cloud, enable Pub/Sub and IAM. Each service account receives
@@ -57,8 +75,8 @@ beginning of the chosen binding's journal, so reusing an old binding can
 publish historical resident replies into the channel. A fresh binding
 starts with an empty conversation.
 
-On the Mac, the default config is `~/.boxen-guest/guest-pubsub.json`.
-Start the client with the matching local configuration. It retains its journal
+The client normally stores configuration at `~/.boxen-guest/guest-pubsub.json`.
+It retains its journal
 in the `history` directory next to that configuration, or the directory chosen
 with `--data-dir PATH`. Use one active client per incoming subscription.
 
