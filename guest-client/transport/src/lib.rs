@@ -13,25 +13,28 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod files;
+pub use files::{Attachment, BlobStore, Chunk, FILE_LIMIT, MAX_FILES};
+
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 const PUBSUB: &str = "https://pubsub.googleapis.com/v1";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const SCOPE: &str = "https://www.googleapis.com/auth/pubsub";
-// One delivery at a time keeps the response bounded even for Pub/Sub's 10 MB
-// maximum message, which expands during Base64 encoding.
+// Six valid frames fit, including Base64 expansion. A single-message
+// fallback can still discard a malformed delivery up to Pub/Sub's 10 MB cap.
 const RESPONSE_LIMIT: u64 = 15 * 1024 * 1024;
-const WIRE_LIMIT: usize = 256 * 1024;
+const WIRE_LIMIT: usize = 2 * 1024 * 1024;
 pub const GUEST_BODY_LIMIT: usize = 8 * 1024;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Config {
-    project_id: String,
-    service_account_email: String,
-    credentials_file: PathBuf,
-    publish_topic: String,
-    receive_subscription: String,
+pub struct Config {
+    pub project_id: String,
+    pub service_account_email: String,
+    pub credentials_file: PathBuf,
+    pub publish_topic: String,
+    pub receive_subscription: String,
 }
 
 #[derive(Deserialize)]
@@ -62,6 +65,8 @@ pub struct Message {
     pub body: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachment_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<Attachment>,
 }
 
 impl Message {
@@ -71,6 +76,7 @@ impl Message {
             id,
             body,
             attachment_names,
+            files: Vec::new(),
         }
     }
 
@@ -81,7 +87,10 @@ impl Message {
                 .id
                 .bytes()
                 .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
-            || (self.body.trim().is_empty() && self.attachment_names.is_empty())
+            || (self.body.trim().is_empty()
+                && self.attachment_names.is_empty()
+                && self.files.is_empty())
+            || self.files.len() > MAX_FILES
             || self.attachment_names.len() > 8
             || self
                 .attachment_names
@@ -90,13 +99,104 @@ impl Message {
         {
             return Err("invalid guest message envelope".into());
         }
+        for file in &self.files {
+            file.validate()?;
+        }
         Ok(())
     }
 
     pub fn validate_guest_submission(&self) -> Result<()> {
         self.validate()?;
         if !self.attachment_names.is_empty() || self.body.len() > GUEST_BODY_LIMIT {
-            return Err("guest transport accepts text messages up to 8 KiB".into());
+            return Err("guest messages carry up to 8 KiB of text and verified attachments".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum Packet {
+    Message(Message),
+    Control(Control),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Control {
+    File(Chunk),
+    PresenceProbe {
+        sent_at: u64,
+    },
+    Presence {
+        sent_at: u64,
+        name: String,
+        state: Presence,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Presence {
+    Offline,
+    Ready,
+    Working,
+}
+
+pub fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+pub fn fresh_presence(sent_at: u64) -> bool {
+    let now = now_seconds();
+    sent_at <= now.saturating_add(15) && now.saturating_sub(sent_at) < 45
+}
+
+/// File parts and their message can arrive in either order. Keep an
+/// unacknowledged message available while parts arrive, without waiting for
+/// Pub/Sub to redeliver it. A process restart leaves delivery with Pub/Sub.
+#[derive(Default)]
+pub struct PendingMessages(std::collections::VecDeque<(String, Message)>);
+
+impl PendingMessages {
+    pub fn insert(&mut self, ack_id: String, message: Message) -> Result<()> {
+        if let Some((receipt, prior)) = self.0.iter_mut().find(|(_, prior)| prior.id == message.id)
+        {
+            if *prior != message {
+                return Err("conflicting pending guest message".into());
+            }
+            *receipt = ack_id;
+        } else if self.0.len() < 128 {
+            self.0.push_back((ack_id, message));
+        }
+        Ok(())
+    }
+
+    pub fn deliver(
+        &mut self,
+        connection: &mut Connection,
+        mut accept: impl FnMut(&Message) -> Result<bool>,
+    ) -> Result<()> {
+        for _ in 0..self.0.len() {
+            let (receipt, message) = self.0.front().expect("pending message");
+            match accept(message).and_then(|ready| {
+                if ready {
+                    connection.ack(std::slice::from_ref(receipt))?;
+                }
+                Ok(ready)
+            }) {
+                Ok(true) => {
+                    self.0.pop_front();
+                }
+                Ok(false) => self.0.rotate_left(1),
+                Err(error) => {
+                    self.0.rotate_left(1);
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
@@ -116,7 +216,7 @@ struct PubSubMessage {
 }
 
 impl Delivery {
-    pub fn decode(&self) -> Result<Message> {
+    pub fn decode(&self) -> Result<Packet> {
         // Reject an oversized encoded body before allocating its decoded bytes.
         if self.message.data.len() > WIRE_LIMIT.div_ceil(3) * 4 {
             return Err("oversized guest message".into());
@@ -125,9 +225,11 @@ impl Delivery {
         if bytes.len() > WIRE_LIMIT {
             return Err("oversized guest message".into());
         }
-        let message: Message = serde_json::from_slice(&bytes)?;
-        message.validate()?;
-        Ok(message)
+        let packet: Packet = serde_json::from_slice(&bytes)?;
+        if let Packet::Message(message) = &packet {
+            message.validate()?;
+        }
+        Ok(packet)
     }
 }
 
@@ -136,6 +238,21 @@ impl Connection {
         let path = host_path(path);
         let config: Config =
             read_json(&path).map_err(|_| "could not read guest connection settings")?;
+        let key: KeyFile = read_json(&resolve_key_path(&path, &config.credentials_file))
+            .map_err(|_| "could not read guest service account credentials")?;
+        Self::from_key(&config, key)
+    }
+
+    /// Builds a connection from the exact bytes that first-run setup will save.
+    /// The account identity comes from the selected service-account file.
+    pub fn for_setup(config: &mut Config, credential: &[u8]) -> Result<Self> {
+        let key: KeyFile = serde_json::from_slice(credential)
+            .map_err(|_| "Choose a Google Cloud service-account JSON key.")?;
+        config.service_account_email = key.client_email.clone();
+        Self::from_key(config, key)
+    }
+
+    fn from_key(config: &Config, key: KeyFile) -> Result<Self> {
         if config.project_id.is_empty()
             || !config
                 .project_id
@@ -144,12 +261,12 @@ impl Connection {
             || !resource_id(&config.publish_topic)
             || !resource_id(&config.receive_subscription)
         {
-            return Err("invalid guest Pub/Sub resource identifiers".into());
+            return Err("Check the project, outgoing topic, and incoming subscription IDs.".into());
         }
-        let path = resolve_key_path(&path, &config.credentials_file);
-        let key: KeyFile =
-            read_json(&path).map_err(|_| "could not read guest service account credentials")?;
-        if key.kind != "service_account" || key.client_email != config.service_account_email {
+        if key.kind != "service_account"
+            || key.client_email.is_empty()
+            || key.client_email != config.service_account_email
+        {
             return Err("credential does not match the configured guest service account".into());
         }
         let pem = key
@@ -163,7 +280,7 @@ impl Connection {
             .map_err(|_| "could not decode the service account key")?;
         let rsa = signature::RsaKeyPair::from_pkcs8(&der)
             .map_err(|_| "invalid service account RSA key")?;
-        let project = config.project_id;
+        let project = &config.project_id;
         let topic = format!(
             "{PUBSUB}/projects/{project}/topics/{}",
             config.publish_topic.replace('%', "%25")
@@ -257,10 +374,27 @@ impl Connection {
 
     pub fn publish(&mut self, message: &Message) -> Result<()> {
         message.validate()?;
-        let bytes = serde_json::to_vec(message)?;
-        if bytes.len() > WIRE_LIMIT {
-            return Err("oversized guest message".into());
+        self.publish_frame(message)
+    }
+
+    pub fn control(&mut self, packet: &Control) -> Result<()> {
+        self.publish_frame(packet)
+    }
+
+    fn publish_frame(&mut self, packet: &impl Serialize) -> Result<()> {
+        self.publish_frames(std::iter::once(packet))
+    }
+
+    fn publish_frames<S: Serialize>(&mut self, packets: impl IntoIterator<Item = S>) -> Result<()> {
+        let mut messages = Vec::new();
+        for packet in packets {
+            let bytes = serde_json::to_vec(&packet)?;
+            if bytes.len() > WIRE_LIMIT {
+                return Err("oversized guest message".into());
+            }
+            messages.push(json!({"data": STANDARD.encode(bytes)}));
         }
+        let count = messages.len();
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Published {
@@ -269,9 +403,11 @@ impl Connection {
         let published: Published = self.post(
             "publish",
             format!("{}:publish", self.topic),
-            json!({"messages":[{"data":STANDARD.encode(bytes)}]}),
+            json!({"messages":messages}),
         )?;
-        if published.message_ids.len() != 1 || published.message_ids[0].is_empty() {
+        if published.message_ids.len() != count
+            || published.message_ids.iter().any(String::is_empty)
+        {
             return Err("guest publication outcome is uncertain".into());
         }
         Ok(())
@@ -304,11 +440,15 @@ impl Connection {
             #[serde(default)]
             received_messages: Vec<Delivery>,
         }
-        match self.post::<Batch>(
-            "pull",
-            format!("{}:pull", self.subscription),
-            json!({"maxMessages":1}),
-        ) {
+        let url = format!("{}:pull", self.subscription);
+        let batch = self.post::<Batch>("pull", url.clone(), json!({"maxMessages":6}));
+        let batch = match batch {
+            Err(error) if error.is::<InvalidResponse>() => {
+                self.post::<Batch>("pull", url, json!({"maxMessages":1}))
+            }
+            result => result,
+        };
+        match batch {
             Ok(response) => Ok(response.received_messages),
             Err(error) if error.is::<PullTimeout>() => Ok(Vec::new()),
             Err(error) => Err(error),
@@ -361,7 +501,7 @@ impl Connection {
             .with_config()
             .limit(RESPONSE_LIMIT)
             .read_json()
-            .map_err(|_| format!("invalid Pub/Sub {operation} response").into())
+            .map_err(|_| InvalidResponse(operation).into())
     }
 }
 
@@ -375,6 +515,17 @@ impl std::fmt::Display for PullTimeout {
 }
 
 impl Error for PullTimeout {}
+
+#[derive(Debug)]
+struct InvalidResponse(&'static str);
+
+impl std::fmt::Display for InvalidResponse {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(fmt, "invalid Pub/Sub {} response", self.0)
+    }
+}
+
+impl Error for InvalidResponse {}
 
 fn request_failure(operation: &str, error: &ureq::Error) -> Box<dyn Error + Send + Sync> {
     match error {

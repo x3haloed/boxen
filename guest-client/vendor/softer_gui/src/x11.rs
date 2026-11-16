@@ -1,0 +1,943 @@
+//! X11 backend: a window presented from memfd-backed shared pixmaps via the
+//! Present extension, paced by PresentCompleteNotify's msc (a real vblank
+//! counter), with the refresh period queried exactly from RandR. Keyboard text
+//! comes from the server's XKB map through our own engine; pointer, smooth
+//! scroll and touchpad gestures from XInput 2.
+//!
+//! Threads: the pump thread owns the socket's READ side and all protocol state
+//! here; the app thread only writes requests (get_framebuffer/submit) through
+//! the connection's mutex-guarded writer.
+
+use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::*};
+use crate::event::*;
+use crate::shm::{next_pow2, ShmMem};
+use crate::sys;
+use crate::x11_conn::{rd16, rd32, rd64, Conn, Reader};
+use crate::xkb;
+
+// Core opcodes.
+const CREATE_WINDOW: u8 = 1;
+const MAP_WINDOW: u8 = 8;
+const INTERN_ATOM: u8 = 16;
+const CHANGE_PROPERTY: u8 = 18;
+const GET_PROPERTY: u8 = 20;
+const SET_SELECTION_OWNER: u8 = 22;
+const CONVERT_SELECTION: u8 = 24;
+const SEND_EVENT: u8 = 25;
+const FREE_PIXMAP: u8 = 54;
+const QUERY_EXTENSION: u8 = 98;
+
+// Atoms we intern once.
+struct Atoms { wm_protocols: u32, wm_delete: u32, net_wm_sync: u32, net_wm_sync_counter: u32, net_wm_state: u32, net_wm_fullscreen: u32, net_wm_name: u32, utf8_string: u32, net_wm_pid: u32, net_wm_icon: u32 }
+
+struct Ext { present: u8, shm: u8, sync: u8, xfixes: u8, randr: u8, rr_event: u8, xkb: u8, xkb_event: u8, xi: u8 }
+
+/// The CLIPBOARD selection as text. The app thread only writes requests; every
+/// answer is an event, so it arrives on the pump, which hands a paste back
+/// through `st`. We answer our own ConvertSelection like anyone else's, so there
+/// is no "do we still own it" state to keep in step with the server.
+struct Clip {
+    clipboard: u32, targets: u32, incr: u32, utf8: u32, text_plain: u32,
+    /// The property on our window that a paste is delivered into.
+    prop: u32,
+    st: Mutex<ClipState>,
+    cv: Condvar,
+}
+#[derive(Default)]
+struct ClipState {
+    /// What we serve while we own the selection.
+    text: Vec<u8>,
+    pending: bool,
+    got: Option<Vec<u8>>,
+}
+
+/// State both threads reach: the connection and the pixmap ids the pump matches idle notifies against.
+pub struct Shared {
+    pub conn: Conn,
+    win: u32,
+    ext: Ext,
+    sync_counter: u32,
+    sync_want: AtomicU64,
+    sync_done: AtomicU64,
+    /// (w<<32|h) of the ConfigureNotify that followed the pending sync request; 0 = not yet configured.
+    sync_size: AtomicU64,
+    /// Present serial of the frame that answers the sync request; the pump acks when it COMPLETES.
+    sync_ack_serial: AtomicU32,
+    pixmap: [AtomicU32; 2],
+    present_serial: AtomicU32,
+    clip: Clip,
+    debug: bool,
+}
+
+struct Buf { mem: ShmMem, seg: u32, pixmap: u32 }
+
+/// App-thread side: the swapchain.
+pub struct App {
+    sh: Arc<Shared>,
+    core: Arc<Core>,
+    /// Window size the frame being drawn was laid out for.
+    frame_w: u32, frame_h: u32,
+    side: u32,
+    generation: u64,
+    cur: usize,
+    bufs: [Option<Buf>; 2],
+}
+
+fn u16b(v: u16) -> [u8; 2] { v.to_le_bytes() }
+fn u32b(v: u32) -> [u8; 4] { v.to_le_bytes() }
+
+fn query_extension(conn: &Conn, r: &mut Reader, name: &[u8]) -> Option<(u8, u8, u8)> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&u16b(name.len() as u16)); b.extend_from_slice(&[0, 0]); b.extend_from_slice(name);
+    let seq = conn.req(QUERY_EXTENSION, 0, &b);
+    conn.flush();
+    let rep = r.wait_reply(seq)?;
+    if rep[8] == 0 { return None; }
+    Some((rep[9], rep[10], rep[11]))
+}
+fn intern_atom(conn: &Conn, r: &mut Reader, name: &[u8]) -> u32 {
+    let mut b = Vec::new();
+    b.extend_from_slice(&u16b(name.len() as u16)); b.extend_from_slice(&[0, 0]); b.extend_from_slice(name);
+    let seq = conn.req(INTERN_ATOM, 0, &b);
+    conn.flush();
+    r.wait_reply(seq).map(|p| rd32(&p, 8)).unwrap_or(0)
+}
+fn change_property(conn: &Conn, win: u32, prop: u32, ty: u32, format: u8, data: &[u8]) {
+    change_property_mode(conn, win, prop, ty, format, 0, data)   // 0 = Replace
+}
+/// mode: 0 Replace, 1 Prepend, 2 Append.
+fn change_property_mode(conn: &Conn, win: u32, prop: u32, ty: u32, format: u8, mode: u8, data: &[u8]) {
+    let mut b = Vec::new();
+    b.extend_from_slice(&u32b(win)); b.extend_from_slice(&u32b(prop)); b.extend_from_slice(&u32b(ty));
+    b.push(format); b.extend_from_slice(&[0, 0, 0]);
+    b.extend_from_slice(&u32b((data.len() / (format as usize / 8)) as u32));
+    b.extend_from_slice(data);
+    conn.req(CHANGE_PROPERTY, mode, &b);
+}
+/// One Replace then Appends. A server need only accept 256 KiB per request
+/// without BIG-REQUESTS; 64 KiB chunks stay clear of that for any size. Empty
+/// data writes one empty Replace, which leaves a zero-length property.
+fn change_property_chunked(conn: &Conn, win: u32, prop: u32, ty: u32, format: u8, data: &[u8]) {
+    const CHUNK: usize = 64 * 1024;
+    let (mut off, mut mode) = (0usize, 0u8);
+    loop {
+        let end = (off + CHUNK).min(data.len());
+        change_property_mode(conn, win, prop, ty, format, mode, &data[off..end]);
+        mode = 2;
+        off = end;
+        if off >= data.len() { break; }
+    }
+}
+
+impl Shared {
+    /// Take the CLIPBOARD selection and serve `text` from it until another client takes over.
+    pub fn clipboard_set(&self, text: &str) -> bool {
+        let c = &self.clip;
+        if c.clipboard == 0 { return false; }
+        c.st.lock().unwrap().text = text.as_bytes().to_vec();
+        // Time 0 is CurrentTime: a stale timestamp would make the server ignore the request.
+        let mut b = Vec::new();
+        b.extend_from_slice(&u32b(self.win)); b.extend_from_slice(&u32b(c.clipboard)); b.extend_from_slice(&u32b(0));
+        self.conn.req(SET_SELECTION_OWNER, 0, &b);
+        self.conn.flush();
+        true
+    }
+    /// Ask the selection's owner for its text and wait for the pump to collect it.
+    pub fn clipboard_get(&self) -> Option<String> {
+        let c = &self.clip;
+        if c.clipboard == 0 { return None; }
+        let mut st = c.st.lock().unwrap();
+        st.pending = true; st.got = None;
+        let mut b = Vec::new();
+        b.extend_from_slice(&u32b(self.win)); b.extend_from_slice(&u32b(c.clipboard)); b.extend_from_slice(&u32b(c.utf8));
+        b.extend_from_slice(&u32b(c.prop)); b.extend_from_slice(&u32b(0));
+        self.conn.req(CONVERT_SELECTION, 0, &b);
+        self.conn.flush();
+        // An owner that never answers must not hang the caller.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while st.pending {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() { break; }
+            st = c.cv.wait_timeout(st, left).unwrap().0;
+        }
+        st.pending = false;
+        st.got.take().map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+}
+
+impl App {
+    fn make_buf(&mut self, i: usize) {
+        let side = self.side as usize;
+        let mem = match ShmMem::new(side * side * 4) { Some(m) => m, None => return };
+        let sh = &self.sh;
+        let seg = sh.conn.new_id();
+        let pixmap = sh.conn.new_id();
+        // ShmAttachFd(shmseg, fd, read_only) — the fd rides along in the same sendmsg.
+        let mut b = Vec::new();
+        b.extend_from_slice(&u32b(seg)); b.extend_from_slice(&[0, 0, 0, 0]);
+        sh.conn.req_with_fd(sh.ext.shm, 6, &b, mem.fd);
+        // ShmCreatePixmap(pid, drawable, w, h, depth, shmseg, offset)
+        let mut b = Vec::new();
+        b.extend_from_slice(&u32b(pixmap)); b.extend_from_slice(&u32b(sh.win));
+        b.extend_from_slice(&u16b(side as u16)); b.extend_from_slice(&u16b(side as u16));
+        b.push(sh.conn.setup.root_depth); b.extend_from_slice(&[0, 0, 0]);
+        b.extend_from_slice(&u32b(seg)); b.extend_from_slice(&u32b(0));
+        sh.conn.req(sh.ext.shm, 5, &b);
+        sh.conn.flush();
+        sh.pixmap[i].store(pixmap, Release);
+        self.bufs[i] = Some(Buf { mem, seg, pixmap });
+    }
+    fn free_buf(&mut self, i: usize) {
+        if let Some(b) = self.bufs[i].take() {
+            let sh = &self.sh;
+            sh.conn.req(FREE_PIXMAP, 0, &u32b(b.pixmap));
+            sh.conn.req(sh.ext.shm, 2, &u32b(b.seg));   // ShmDetach
+            sh.conn.flush();
+            sh.pixmap[i].store(0, Release);
+            drop(b.mem);
+        }
+    }
+    /// Settle a pending resize (grow only), then hand out the free back buffer.
+    pub fn get_framebuffer(&mut self) -> Option<(*mut u32, u32, u64)> {
+        let w = self.core.win_w.load(Relaxed); let h = self.core.win_h.load(Relaxed);
+        let want = next_pow2(w.max(h));
+        if want > self.side || self.bufs[0].is_none() {
+            self.free_buf(0); self.free_buf(1);
+            self.side = want;
+            self.generation += 1;
+            self.cur = 0;
+            self.core.busy[0].store(false, Relaxed); self.core.busy[1].store(false, Relaxed);
+            self.make_buf(0); self.make_buf(1);
+            self.core.full_redraw.store(true, Relaxed);
+        }
+        if self.core.busy[self.cur].load(Acquire) { return None; }
+        let b = self.bufs[self.cur].as_ref()?;
+        self.frame_w = w; self.frame_h = h;
+        Some((b.mem.ptr as *mut u32, self.side, (self.generation << 2) | self.cur as u64))
+    }
+    pub fn shared(&self) -> Arc<Shared> { self.sh.clone() }
+    pub fn submit(&mut self) {
+        let sh = &self.sh;
+        let Some(b) = self.bufs[self.cur].as_ref() else { return };
+        // The window changed size while this frame was being drawn: a frame for the wrong
+        // size is worse than none — presented into the new geometry it shows a clipped
+        // border or the square pixmap's stale pixels beyond the frame (a second, older
+        // border). The ConfigureNotify already pushed a RENDER, so the redraw is coming.
+        if self.frame_w != self.core.win_w.load(Relaxed) || self.frame_h != self.core.win_h.load(Relaxed) {
+            if sh.debug { eprintln!("[{}] submit: dropped {}x{} frame, window is now {}x{}", (sys::clock_monotonic_ns() / 1_000_000) % 100_000, self.frame_w, self.frame_h, self.core.win_w.load(Relaxed), self.core.win_h.load(Relaxed)); }
+            return;
+        }
+        let serial = sh.present_serial.fetch_add(1, Relaxed);
+        // PresentPixmap: everything optional zeroed — no fences, no target msc, next vblank.
+        let mut r = Vec::with_capacity(72);
+        r.extend_from_slice(&u32b(sh.win)); r.extend_from_slice(&u32b(b.pixmap)); r.extend_from_slice(&u32b(serial));
+        r.extend_from_slice(&[0u8; 8]);     // valid, update regions
+        r.extend_from_slice(&[0u8; 4]);     // x_off, y_off
+        r.extend_from_slice(&[0u8; 16]);    // target_crtc, wait_fence, idle_fence, options
+        r.extend_from_slice(&[0u8; 4]);     // pad
+        r.extend_from_slice(&[0u8; 24]);    // target_msc, divisor, remainder
+        sh.conn.req(sh.ext.present, 1, &r);
+        self.core.busy[self.cur].store(true, Release);
+        self.core.in_flight.fetch_add(1, AcqRel);
+        self.cur ^= 1;
+        // _NET_WM_SYNC_REQUEST: the WM sent a request, then the ConfigureNotify; it now
+        // waits for the counter before its next resize step. The frame that answers it is
+        // one laid out for THAT configured size — a frame already in progress at the old
+        // size does not count. And it answers only once it is ON SCREEN: the pump sets the
+        // counter on this present's CompleteNotify, not here. Acking as soon as the present
+        // is queued lets the WM resize the window again before the server has copied this
+        // frame into it, and the drag shows stale, clipped frames.
+        let want = sh.sync_want.load(Acquire);
+        let cfg = sh.sync_size.load(Acquire);
+        if sh.sync_counter != 0 && want != sh.sync_done.load(Relaxed) && cfg != 0
+            && cfg == ((self.frame_w as u64) << 32 | self.frame_h as u64) {
+            sh.sync_ack_serial.store(serial, Release);
+            sh.sync_size.store(0, Relaxed);
+            if sh.debug { eprintln!("[{}] sync: frame {}x{} queued as serial {}", (sys::clock_monotonic_ns() / 1_000_000) % 100_000, self.frame_w, self.frame_h, serial); }
+        }
+        sh.conn.flush();
+    }
+}
+impl Drop for App {
+    fn drop(&mut self) { self.free_buf(0); self.free_buf(1); }
+}
+
+// ============================================================================
+// Pump thread
+// ============================================================================
+
+/// One XI2 device with a ScrollClass. `touch` decides which axis its smooth deltas
+/// feed: a touch surface pans in pixels (AXIS_SCROLL), anything else is a wheel and
+/// its deltas are fractions of `*_inc`, one detent each (AXIS_WHEEL). XI2 has no
+/// "is a touchpad" bit, so it is inferred from an XITouchClass on the device or a
+/// touchpad-ish device name, which covers synaptics, libinput and the Apple/ELAN/
+/// ALPS naming that reaches X through them.
+struct ScrollDev { id: u16, touch: bool, v_num: u16, h_num: u16, v_inc: f64, h_inc: f64, v_last: Option<f64>, h_last: Option<f64> }
+
+fn touchpad_name(name: &[u8]) -> bool {
+    let lower: Vec<u8> = name.iter().map(|c| c.to_ascii_lowercase()).collect();
+    [&b"touchpad"[..], b"trackpad", b"clickpad", b"glidepoint", b"synaptics", b"touch pad"]
+        .iter().any(|needle| lower.windows(needle.len()).any(|w| w == *needle))
+}
+
+struct Pump {
+    sh: Arc<Shared>,
+    core: Arc<Core>,
+    r: Reader,
+    atoms: Atoms,
+    keymap: xkb::Keymap,
+    last_msc: u64,
+    first_complete: bool,
+    win_root_x: i32, win_root_y: i32,
+    crtc_rect: (i32, i32, u32, u32),
+    cursor_applied: bool,
+    fs_applied: bool,
+    scroll: Vec<ScrollDev>,
+    pinch_scale: i32,
+    quit_seen: bool,
+    debug: bool,
+    /// After acking a sync request: hold the next RENDER until the WM's configure lands
+    /// (deadline in ns), so the next frame is not started at a size about to change.
+    render_hold_until: u64,
+    /// A paste too big for one property arrives in pieces (INCR); they collect here.
+    clip_incr: Option<Vec<u8>>,
+}
+
+impl Pump {
+    fn round_trip(&mut self, seq: u64) -> Option<Vec<u8>> { self.sh.conn.flush(); self.r.wait_reply(seq) }
+
+    // ---- XKB ---------------------------------------------------------------------
+    fn load_keymap(&mut self) {
+        let x = self.sh.ext.xkb;
+        if x == 0 { return; }
+        // XkbGetMap(deviceSpec=UseCoreKbd, full = KeyTypes|KeySyms)
+        let mut b = vec![0u8; 24];
+        b[0..2].copy_from_slice(&u16b(0x100)); b[2..4].copy_from_slice(&u16b(1 | 2));
+        let seq = self.sh.conn.req(x, 8, &b);
+        if let Some(rep) = self.round_trip(seq) {
+            if let Some(km) = xkb::parse_x11_getmap(&rep) { self.keymap = km; }
+        }
+    }
+
+    // ---- RandR: the exact refresh period of the CRTC under the window centre ----------
+    fn query_period(&mut self) {
+        let rr = self.sh.ext.randr;
+        if rr == 0 { return; }
+        let seq = self.sh.conn.req(rr, 25, &u32b(self.sh.conn.setup.root));   // GetScreenResourcesCurrent
+        let Some(res) = self.round_trip(seq) else { return };
+        let ncrtc = rd16(&res, 16) as usize; let nout = rd16(&res, 18) as usize; let nmode = rd16(&res, 20) as usize;
+        let cfg_ts = rd32(&res, 12);
+        let crtcs: Vec<u32> = (0..ncrtc).map(|i| rd32(&res, 32 + 4 * i)).collect();
+        let modes_off = 32 + 4 * ncrtc + 4 * nout;
+        let cx = self.win_root_x + self.core.win_w.load(Relaxed) as i32 / 2;
+        let cy = self.win_root_y + self.core.win_h.load(Relaxed) as i32 / 2;
+        let mut chosen: Option<(u32, (i32, i32, u32, u32))> = None;   // mode id, rect
+        let mut first: Option<(u32, (i32, i32, u32, u32))> = None;
+        for c in crtcs {
+            let mut b = Vec::new(); b.extend_from_slice(&u32b(c)); b.extend_from_slice(&u32b(cfg_ts));
+            let seq = self.sh.conn.req(rr, 20, &b);   // GetCrtcInfo
+            let Some(ci) = self.round_trip(seq) else { continue };
+            let x = rd16(&ci, 12) as i16 as i32; let y = rd16(&ci, 14) as i16 as i32;
+            let w = rd16(&ci, 16) as u32; let h = rd16(&ci, 18) as u32; let mode = rd32(&ci, 20);
+            if mode == 0 || w == 0 { continue; }
+            if first.is_none() { first = Some((mode, (x, y, w, h))); }
+            if cx >= x && cy >= y && cx < x + w as i32 && cy < y + h as i32 { chosen = Some((mode, (x, y, w, h))); break; }
+        }
+        let Some((mode, rect)) = chosen.or(first) else { return };
+        for i in 0..nmode {
+            let o = modes_off + 32 * i;
+            if o + 32 > res.len() { break; }
+            if rd32(&res, o) == mode {
+                let dot = rd32(&res, o + 8) as u64; let ht = rd16(&res, o + 16) as u64; let vt = rd16(&res, o + 24) as u64;
+                if dot != 0 && ht != 0 && vt != 0 {
+                    // 1e15 * ht * vt / dot in two stages so nothing overflows 64 bits.
+                    let period = (1_000_000_000_000_000u64 / dot) * ht * vt + ((1_000_000_000_000_000u64 % dot) * ht * vt) / dot;
+                    self.core.set_period_fs(period);
+                }
+                break;
+            }
+        }
+        self.crtc_rect = rect;
+    }
+    fn maybe_requery_period(&mut self) {
+        let (x, y, w, h) = self.crtc_rect;
+        let cx = self.win_root_x + self.core.win_w.load(Relaxed) as i32 / 2;
+        let cy = self.win_root_y + self.core.win_h.load(Relaxed) as i32 / 2;
+        if w == 0 || cx < x || cy < y || cx >= x + w as i32 || cy >= y + h as i32 { self.query_period(); }
+    }
+
+    // ---- XInput 2: which valuators are scroll axes, per source device --------------
+    fn query_devices(&mut self) {
+        let xi = self.sh.ext.xi;
+        if xi == 0 { return; }
+        let seq = self.sh.conn.req(xi, 48, &[0, 0, 0, 0]);   // XIQueryDevice(XIAllDevices)
+        let Some(rep) = self.round_trip(seq) else { return };
+        self.scroll.clear();
+        let n = rd16(&rep, 8) as usize;
+        let mut o = 32usize;
+        for _ in 0..n {
+            if o + 12 > rep.len() { break; }
+            let id = rd16(&rep, o); let nclasses = rd16(&rep, o + 6) as usize; let name_len = rd16(&rep, o + 8) as usize;
+            let name_end = (o + 12 + name_len).min(rep.len());
+            let touch_by_name = touchpad_name(&rep[(o + 12).min(name_end)..name_end]);
+            o += 12 + ((name_len + 3) & !3);
+            let mut dev = ScrollDev { id, touch: touch_by_name, v_num: u16::MAX, h_num: u16::MAX, v_inc: 0.0, h_inc: 0.0, v_last: None, h_last: None };
+            for _ in 0..nclasses {
+                if o + 4 > rep.len() { break; }
+                let ty = rd16(&rep, o); let len = rd16(&rep, o + 2) as usize * 4;
+                if ty == 8 { dev.touch = true; }   // XITouchClass: a touch surface
+                if ty == 3 && o + 24 <= rep.len() {   // ScrollClass
+                    let number = rd16(&rep, o + 6); let stype = rd16(&rep, o + 8);
+                    let inc = rd32(&rep, o + 16) as i32 as f64 + rd32(&rep, o + 20) as f64 / 4294967296.0;
+                    if stype == 1 { dev.v_num = number; dev.v_inc = inc; } else if stype == 2 { dev.h_num = number; dev.h_inc = inc; }
+                }
+                o += len;
+            }
+            if dev.v_num != u16::MAX || dev.h_num != u16::MAX { self.scroll.push(dev); }
+        }
+    }
+
+    // ---- outward state the app sets -----------------------------------------------
+    fn apply_cursor(&mut self) {
+        let want = self.core.cursor_hidden.load(Relaxed);
+        if want == self.cursor_applied || self.sh.ext.xfixes == 0 { return; }
+        self.cursor_applied = want;
+        self.sh.conn.req(self.sh.ext.xfixes, if want { 29 } else { 30 }, &u32b(self.sh.win));
+        self.sh.conn.flush();
+    }
+    fn apply_icon(&mut self) {
+        let Some(set) = self.core.take_icon() else { return };
+        if self.atoms.net_wm_icon == 0 { return; }
+        // _NET_WM_ICON is one CARDINAL/32 array holding every size back to back:
+        // width, height, then width*height pixels of ARGB with the alpha in the
+        // high byte. Straight alpha, not premultiplied.
+        //
+        // The Xlib trap where format 32 means C `long` (and so 64 bits on LP64)
+        // does not exist here: we write the wire, and the wire says 32.
+        let mut data: Vec<u8> = Vec::with_capacity(set.iter().map(|i| 8 + i.argb.len() * 4).sum());
+        for img in &set {
+            data.extend_from_slice(&u32b(img.side));
+            data.extend_from_slice(&u32b(img.side));
+            for p in &img.argb { data.extend_from_slice(&u32b(*p)); }
+        }
+        // Chunked: a single 256x256 image is already a whole 256 KiB request. An
+        // empty set writes one empty Replace, which clears the property.
+        if self.debug { eprintln!("apply_icon: {} images, {} bytes", set.len(), data.len()); }
+        change_property_chunked(&self.sh.conn, self.sh.win, self.atoms.net_wm_icon, 6, 32, &data);
+        self.sh.conn.flush();
+    }
+    fn apply_fullscreen(&mut self) {
+        let want = self.core.wants_fullscreen.load(Relaxed);
+        if want == self.fs_applied { return; }
+        self.fs_applied = want;
+        // _NET_WM_STATE client message to the root: {action, atom, 0, source=1}
+        let mut ev = vec![33u8, 32, 0, 0];
+        ev.extend_from_slice(&u32b(self.sh.win)); ev.extend_from_slice(&u32b(self.atoms.net_wm_state));
+        ev.extend_from_slice(&u32b(want as u32)); ev.extend_from_slice(&u32b(self.atoms.net_wm_fullscreen));
+        ev.extend_from_slice(&u32b(0)); ev.extend_from_slice(&u32b(1)); ev.extend_from_slice(&u32b(0));
+        let mut b = vec![0u8; 0];
+        b.extend_from_slice(&u32b(self.sh.conn.setup.root)); b.extend_from_slice(&u32b((1 << 20) | (1 << 19)));
+        b.extend_from_slice(&ev);
+        self.sh.conn.req(SEND_EVENT, 0, &b);
+        self.sh.conn.flush();
+    }
+
+    // ---- clipboard ----------------------------------------------------------------
+    /// Another client wants the selection we own: write it into the property it
+    /// named on its own window, then tell it so with a SelectionNotify.
+    fn selection_request(&mut self, p: &[u8]) {
+        let c = &self.sh.clip; let conn = &self.sh.conn;
+        let time = rd32(p, 4); let requestor = rd32(p, 12); let selection = rd32(p, 16); let target = rd32(p, 20);
+        // A requestor older than ICCCM 2 names no property and means the target atom.
+        let prop = match rd32(p, 24) { 0 => target, a => a };
+        let mut ok = selection == c.clipboard;
+        if !ok {
+        } else if target == c.targets {
+            let mut d = Vec::new();
+            for a in [c.targets, c.utf8, c.text_plain] { d.extend_from_slice(&u32b(a)); }
+            change_property(conn, requestor, prop, 4, 32, &d);   // ATOM
+        } else if target == c.utf8 || target == c.text_plain {
+            change_property_chunked(conn, requestor, prop, target, 8, &c.st.lock().unwrap().text);
+        } else { ok = false; }
+        // Property None is the refusal.
+        let mut b = Vec::with_capacity(40);
+        b.extend_from_slice(&u32b(requestor)); b.extend_from_slice(&u32b(0));
+        b.extend_from_slice(&[31, 0, 0, 0]);
+        b.extend_from_slice(&u32b(time)); b.extend_from_slice(&u32b(requestor)); b.extend_from_slice(&u32b(selection));
+        b.extend_from_slice(&u32b(target)); b.extend_from_slice(&u32b(if ok { prop } else { 0 }));
+        b.extend_from_slice(&[0u8; 8]);
+        conn.req(SEND_EVENT, 0, &b);
+        conn.flush();
+    }
+    /// Read our paste property and delete it. The delete is also what asks an
+    /// INCR sender for its next piece.
+    fn take_clip_prop(&mut self) -> Option<(u32, Vec<u8>)> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&u32b(self.sh.win)); b.extend_from_slice(&u32b(self.sh.clip.prop));
+        b.extend_from_slice(&u32b(0)); b.extend_from_slice(&u32b(0)); b.extend_from_slice(&u32b(0x1fff_ffff));
+        let seq = self.sh.conn.req(GET_PROPERTY, 1, &b);
+        let rep = self.round_trip(seq)?;
+        let n = rd32(&rep, 16) as usize * (rep[1] as usize / 8);
+        Some((rd32(&rep, 8), rep.get(32..32 + n)?.to_vec()))
+    }
+    fn clip_finish(&mut self, data: Option<Vec<u8>>) {
+        self.clip_incr = None;
+        let mut st = self.sh.clip.st.lock().unwrap();
+        if st.pending { st.got = data; st.pending = false; self.sh.clip.cv.notify_all(); }
+    }
+    /// The owner answered our ConvertSelection.
+    fn selection_notify(&mut self, p: &[u8]) {
+        if rd32(p, 8) != self.sh.win || rd32(p, 12) != self.sh.clip.clipboard { return; }
+        if rd32(p, 20) == 0 { self.clip_finish(None); return; }   // no owner, or no text to give
+        match self.take_clip_prop() {
+            Some((ty, _)) if ty == self.sh.clip.incr && ty != 0 => self.clip_incr = Some(Vec::new()),
+            Some((_, data)) => self.clip_finish(Some(data)),
+            None => self.clip_finish(None),
+        }
+    }
+    /// One more INCR piece landed in the property; an empty one ends the transfer.
+    fn incr_piece(&mut self) {
+        match self.take_clip_prop() {
+            Some((_, data)) if !data.is_empty() => { if let Some(acc) = &mut self.clip_incr { acc.extend_from_slice(&data); } }
+            _ => { let acc = self.clip_incr.take(); self.clip_finish(acc); }
+        }
+    }
+
+    // ---- event handling ------------------------------------------------------------
+    fn handle(&mut self, p: &[u8], now: u64) {
+        let ty = p[0] & 0x7f;
+        let synthetic = p[0] & 0x80 != 0;
+        if self.debug {
+            let ms = (sys::clock_monotonic_ns() / 1_000_000) % 100_000;
+            if ty == 35 && p[1] == self.sh.ext.present {
+                let et = rd16(p, 8);
+                if et == 1 { eprintln!("[{ms}] present complete mode {} msc {} in_flight {}", p[11], rd64(p, 32), self.core.in_flight.load(Relaxed)); }
+                else if et == 2 { eprintln!("[{ms}] present idle pixmap 0x{:x}", rd32(p, 24)); }
+                else { eprintln!("[{ms}] present configure {}x{}", rd16(p, 24), rd16(p, 26)); }
+            } else if ty != 35 { eprintln!("[{ms}] x11 event type {ty} detail {} {}", p[1], if synthetic { "(synthetic)" } else { "" }); }
+        }
+        let ext = &self.sh.ext;
+        match ty {
+            0 => eprintln!("softer_gui: X error code {} major {} minor {}", p[1], p[10], rd16(p, 8)),
+            2 | 3 => {   // KeyPress / KeyRelease
+                let keycode = p[1] as u32;
+                let code = keycode.saturating_sub(8);
+                if ty == 3 { self.core.key(code, false); return; }
+                // With detectable autorepeat the server still sends a fresh KeyPress per
+                // repeat tick; a press whose bit is already set IS that tick. We repeat ourselves.
+                if self.core.key_down(code) { return; }
+                let state = rd16(p, 28);
+                let (sym, text) = self.keymap.text(keycode, (state & 0xff) as u8, ((state >> 13) & 3) as u32);
+                self.core.key_press_sym(code, sym, &text, now);
+            }
+            4 | 5 => {   // core ButtonPress/Release: only when XI2 is absent
+                if ext.xi != 0 { return; }
+                let b = p[1] as u32;
+                let code = match b { 1 => BTN_LEFT, 2 => BTN_MIDDLE, 3 => BTN_RIGHT, 8 => BTN_SIDE, 9 => BTN_EXTRA, _ => 0 };
+                if ty == 4 && (4..=7).contains(&b) {
+                    let d = match b { 4 | 6 => -WHEEL_CLICK, _ => WHEEL_CLICK };
+                    let axis = if b <= 5 { AXIS_WHEEL_V } else { AXIS_WHEEL_H };
+                    self.core.push_axes(&[AxisDiff { axis, delta: d }]);
+                }
+                if code != 0 { self.core.key(code, ty == 4); }
+            }
+            6 => {   // MotionNotify (no XI2)
+                if ext.xi != 0 { return; }
+                let x = rd16(p, 24) as i16 as i64; let y = rd16(p, 26) as i16 as i64;
+                self.core.pointer_abs(x << 32, y << 32);
+            }
+            9 => { self.core.focused.store(true, Relaxed); }
+            10 => { self.core.focused.store(false, Relaxed); self.core.release_all_keys(true); }
+            12 => {   // Expose: restart the frame chain if it is idle
+                if self.core.in_flight.load(Acquire) == 0 { self.core.push_render(); }
+            }
+            22 => {   // ConfigureNotify
+                if rd32(p, 8) != self.sh.win { return; }
+                let w = rd16(p, 20) as u32; let h = rd16(p, 22) as u32;
+                if synthetic {
+                    // Only the synthetic one carries ROOT coordinates; the real one is relative to the WM frame.
+                    self.win_root_x = rd16(p, 16) as i16 as i32; self.win_root_y = rd16(p, 18) as i16 as i32;
+                    self.maybe_requery_period();
+                }
+                if w != 0 && h != 0 && (w != self.core.win_w.load(Relaxed) || h != self.core.win_h.load(Relaxed)) {
+                    self.core.win_w.store(w, Relaxed); self.core.win_h.store(h, Relaxed);
+                    self.core.full_redraw.store(true, Relaxed);
+                    // A new size wants a frame NOW, not at the next completion: during a drag
+                    // every vblank of delay is a step the WM waits on. A second present in
+                    // flight is fine — the msc gate still ticks once per vblank.
+                    self.render_hold_until = 0;
+                    self.core.push_render();
+                }
+                // The configure that answers a pending sync request names the size the WM is waiting on.
+                if !synthetic && w != 0 && h != 0 && self.sh.sync_want.load(Acquire) != self.sh.sync_done.load(Acquire) {
+                    self.sh.sync_size.store((w as u64) << 32 | h as u64, Release);
+                }
+            }
+            28 => {   // PropertyNotify, state NewValue
+                if self.clip_incr.is_some() && rd32(p, 4) == self.sh.win && rd32(p, 8) == self.sh.clip.prop && p[16] == 0 { self.incr_piece(); }
+            }
+            30 => self.selection_request(p),
+            31 => self.selection_notify(p),
+            33 => {   // ClientMessage
+                if rd32(p, 8) == self.atoms.wm_protocols {
+                    let proto = rd32(p, 12);
+                    if proto == self.atoms.wm_delete { self.core.push_close(); }
+                    else if proto == self.atoms.net_wm_sync && self.atoms.net_wm_sync != 0 {
+                        let v = rd32(p, 20) as u64 | ((rd32(p, 24) as u64) << 32);
+                        self.sh.sync_size.store(0, Relaxed);   // the matching ConfigureNotify is still to come
+                        self.sh.sync_want.store(v, Release);
+                    }
+                }
+            }
+            34 => { self.load_keymap(); }   // MappingNotify
+            35 => self.handle_generic(p, now),
+            t if ext.rr_event != 0 && t == ext.rr_event => { self.query_period(); }
+            t if ext.xkb_event != 0 && t == ext.xkb_event => { if p[1] <= 1 { self.load_keymap(); } }
+            _ => {}
+        }
+    }
+
+    fn handle_generic(&mut self, p: &[u8], _now: u64) {
+        let extension = p[1]; let evtype = rd16(p, 8);
+        let ext = &self.sh.ext;
+        if extension == ext.present {
+            match evtype {
+                0 => {   // PresentConfigureNotify
+                    let w = rd16(p, 24) as u32; let h = rd16(p, 26) as u32;
+                    if w != 0 && h != 0 { self.core.win_w.store(w, Relaxed); self.core.win_h.store(h, Relaxed); self.core.full_redraw.store(true, Relaxed); }
+                }
+                1 => {   // CompleteNotify
+                    let mode = p[11]; let msc = rd64(p, 32); let serial = rd32(p, 20);
+                    // The frame the WM's sync request was waiting on is on screen: release it.
+                    let ack = self.sh.sync_ack_serial.load(Acquire);
+                    let mut acked = false;
+                    if ack != 0 && serial >= ack {
+                        acked = true;
+                        self.sh.sync_ack_serial.store(0, Relaxed);
+                        let want = self.sh.sync_want.load(Acquire);
+                        let mut b = Vec::new();
+                        b.extend_from_slice(&u32b(self.sh.sync_counter));
+                        b.extend_from_slice(&u32b((want >> 32) as u32)); b.extend_from_slice(&u32b(want as u32));
+                        self.sh.conn.req(self.sh.ext.sync, 3, &b);
+                        self.sh.sync_done.store(want, Relaxed);
+                        self.sh.conn.flush();
+                        if self.debug { eprintln!("[{}] sync: acked {want} on complete of serial {serial}", (sys::clock_monotonic_ns() / 1_000_000) % 100_000); }
+                    }
+                    let frames = if self.first_complete { 1 } else { msc.saturating_sub(self.last_msc) };
+                    let first = self.first_complete;
+                    self.first_complete = false;
+                    self.last_msc = msc;
+                    if self.core.in_flight.load(Acquire) > 0 { self.core.in_flight.fetch_sub(1, AcqRel); }
+                    // Several presents can retire against ONE vblank: a delta of zero advances
+                    // nothing and drives no tick, or the swapchain runs at 2x the monitor with
+                    // two presents permanently in flight (measured under Xwayland: the second
+                    // retires as a frames==0 COPY, not a SKIP).
+                    self.core.display_tick(frames);
+                    if acked {
+                        // The WM resizes the instant it sees the counter; a frame started now would be
+                        // laid out for the size it is about to replace. Wait for its configure.
+                        self.render_hold_until = sys::clock_monotonic_ns() + self.core.period_fs() / 1_000_000;
+                    } else if mode != 2 && (frames != 0 || first) && self.render_hold_until == 0 { self.core.push_render(); }
+                }
+                2 => {   // IdleNotify
+                    let pix = rd32(p, 24);
+                    for i in 0..2 { if self.sh.pixmap[i].load(Acquire) == pix { self.core.busy[i].store(false, Release); } }
+                    // The app skipped a frame on backpressure and the chain went idle: restart it.
+                    if self.core.in_flight.load(Acquire) == 0 { self.core.push_render(); }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if extension == ext.xi && ext.xi != 0 {
+            match evtype {
+                1 | 11 => { for d in self.scroll.iter_mut() { d.v_last = None; d.h_last = None; } if evtype == 11 { self.query_devices(); } }
+                4 | 5 | 6 | 7 | 8 => {
+                    if p.len() < 80 { return; }
+                    let ex = rd32(p, 40) as i32 as i64; let ey = rd32(p, 44) as i32 as i64;   // FP1616
+                    let x_fx = ex << 16; let y_fx = ey << 16;
+                    if evtype == 6 || evtype == 7 || evtype == 8 {
+                        if x_fx != self.core.cursor_x.load(Relaxed) || y_fx != self.core.cursor_y.load(Relaxed) || evtype == 7 {
+                            self.core.pointer_abs(x_fx, y_fx);
+                        }
+                    } else {
+                        self.core.cursor_x.store(x_fx, Relaxed); self.core.cursor_y.store(y_fx, Relaxed);
+                    }
+                    if evtype == 8 { return; }
+                    // Valuators: the scroll axes are absolute accumulators; deltas come from our last value.
+                    let blen = rd16(p, 48) as usize; let vlen = rd16(p, 50) as usize; let sourceid = rd16(p, 52);
+                    let flags = rd32(p, 56);
+                    let mut o = 80 + blen * 4;
+                    let mask_off = o; o += vlen * 4;
+                    let mut diffs: Vec<AxisDiff> = Vec::new();
+                    for bit in 0..(vlen * 32) {
+                        if mask_off + bit / 8 >= p.len() || p[mask_off + bit / 8] & (1 << (bit % 8)) == 0 { continue; }
+                        if o + 8 > p.len() { break; }
+                        let v = rd32(p, o) as i32 as f64 + rd32(p, o + 4) as f64 / 4294967296.0;
+                        o += 8;
+                        if let Some(d) = self.scroll.iter_mut().find(|d| d.id == sourceid) {
+                            // The valuator counts `inc` per wheel detent. A wheel reports that
+                            // as clicks; a touch surface's increment is a nominal 15 px per
+                            // "line", so its deltas become pixels at that rate.
+                            let (axis_num, inc, last, scroll_axis, wheel_axis) = if bit as u16 == d.v_num {
+                                (d.v_num, d.v_inc, &mut d.v_last, AXIS_SCROLL_V, AXIS_WHEEL_V)
+                            } else if bit as u16 == d.h_num {
+                                (d.h_num, d.h_inc, &mut d.h_last, AXIS_SCROLL_H, AXIS_WHEEL_H)
+                            } else { (u16::MAX, 0.0, &mut d.v_last, 0, 0) };
+                            if axis_num != u16::MAX {
+                                if let Some(prev) = *last {
+                                    let detents = (v - prev) / inc;
+                                    let diff = if d.touch { AxisDiff { axis: scroll_axis, delta: (detents * SCROLL_STEP as f64) as i32 } }
+                                               else { AxisDiff { axis: wheel_axis, delta: (detents * WHEEL_CLICK as f64) as i32 } };
+                                    if diff.delta != 0 { diffs.push(diff); }
+                                }
+                                *last = Some(v);
+                            }
+                        }
+                    }
+                    if !diffs.is_empty() { self.core.push_axes(&diffs); }
+                    if evtype == 4 || evtype == 5 {
+                        let b = rd32(p, 16);
+                        let code = match b { 1 => BTN_LEFT, 2 => BTN_MIDDLE, 3 => BTN_RIGHT, 8 => BTN_SIDE, 9 => BTN_EXTRA, _ => 0 };
+                        if code != 0 { self.core.key(code, evtype == 4); }
+                        else if evtype == 4 && (4..=7).contains(&b) && flags & 0x10000 == 0 {
+                            // A wheel on a device without a ScrollClass: legacy buttons, one click each.
+                            let known = self.scroll.iter().any(|d| d.id == sourceid);
+                            if !known {
+                                let d = match b { 4 | 6 => -WHEEL_CLICK, _ => WHEEL_CLICK };
+                                self.core.push_axes(&[AxisDiff { axis: if b <= 5 { AXIS_WHEEL_V } else { AXIS_WHEEL_H }, delta: d }]);
+                            }
+                        }
+                    }
+                }
+                27 => { self.pinch_scale = 1 << 16; }
+                28 => {
+                    if p.len() < 80 { return; }
+                    let scale = rd32(p, 64) as i32; let angle = rd32(p, 68) as i32;
+                    let dz = scale - self.pinch_scale; self.pinch_scale = scale;
+                    let mut d = Vec::new();
+                    if dz != 0 { d.push(AxisDiff { axis: AXIS_ZOOM, delta: dz }); }
+                    if angle != 0 { d.push(AxisDiff { axis: AXIS_ROTATE, delta: angle }); }
+                    if !d.is_empty() { self.core.push_axes(&d); }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn run(mut self) {
+        let fd = self.sh.conn.fd;
+        loop {
+            if self.core.quit.load(Relaxed) || self.r.dead { break; }
+            self.core.service_resync();
+            // Drain to empty BEFORE blocking: a packet already read into our buffer would
+            // otherwise wait out the whole poll timeout (the mouse-stop hitch).
+            while let Some(p) = self.r.next_packet(true) {
+                let now = sys::clock_monotonic_ns();
+                self.handle(&p, now);
+                if self.r.dead { return; }
+            }
+            let now = sys::clock_monotonic_ns();
+            let mut timeout = self.core.repeat_tick(now);
+            if self.render_hold_until != 0 {
+                if now >= self.render_hold_until { self.render_hold_until = 0; self.core.push_render(); }
+                else { timeout = timeout.min(((self.render_hold_until - now) / 1_000_000).max(1) as i32); }
+            }
+            self.apply_cursor();
+            self.apply_icon();
+            self.apply_fullscreen();
+            if self.core.wants_frame.load(Relaxed) {
+                if self.core.in_flight.load(Acquire) == 0 && !self.core.render_pending() { self.core.push_render(); }
+                timeout = timeout.min(4);
+            }
+            self.sh.conn.flush();
+            if self.r.has_buffered() { continue; }
+            let mut pfd = [sys::PollFd { fd, events: sys::pollin(), revents: 0 }];
+            let r = sys::poll(&mut pfd, timeout);
+            if r < 0 && r != sys::EINTR { break; }
+            if pfd[0].revents & (sys::pollerr() | sys::pollhup()) != 0 { break; }
+        }
+        if !self.quit_seen { self.core.push_close(); }
+    }
+}
+
+// ============================================================================
+// Open
+// ============================================================================
+pub fn open(core: Arc<Core>, title: &str, app_id: &str, width: u32, height: u32) -> Option<App> {
+    let conn = Conn::open()?;
+    let mut r = Reader::new(conn.fd);
+
+    let present = query_extension(&conn, &mut r, b"Present").map(|e| e.0);
+    let shm = query_extension(&conn, &mut r, b"MIT-SHM").map(|e| e.0);
+    let (Some(present), Some(shm)) = (present, shm) else { eprintln!("softer_gui: X server lacks Present or MIT-SHM"); return None; };
+    let sync = query_extension(&conn, &mut r, b"SYNC").map(|e| e.0).unwrap_or(0);
+    let xfixes = query_extension(&conn, &mut r, b"XFIXES").map(|e| e.0).unwrap_or(0);
+    let (randr, rr_event) = query_extension(&conn, &mut r, b"RANDR").map(|e| (e.0, e.1)).unwrap_or((0, 0));
+    let (xkb, xkb_event) = query_extension(&conn, &mut r, b"XKEYBOARD").map(|e| (e.0, e.1)).unwrap_or((0, 0));
+    let xi = query_extension(&conn, &mut r, b"XInputExtension").map(|e| e.0).unwrap_or(0);
+
+    // Version handshakes (the server requires them before other requests of the extension).
+    { let mut b = Vec::new(); b.extend_from_slice(&u32b(1)); b.extend_from_slice(&u32b(0)); let s = conn.req(present, 0, &b); conn.flush(); r.wait_reply(s)?; }
+    {
+        let s = conn.req(shm, 0, &[]); conn.flush();
+        let rep = r.wait_reply(s)?;
+        let shared_pixmaps = rep[1] != 0; let major = rd16(&rep, 8); let minor = rd16(&rep, 10);
+        if !shared_pixmaps || major < 1 || (major == 1 && minor < 2) { eprintln!("softer_gui: MIT-SHM {major}.{minor} lacks fd passing / shared pixmaps"); return None; }
+    }
+    if sync != 0 { let s = conn.req(sync, 0, &[3, 1, 0, 0]); conn.flush(); r.wait_reply(s); }
+    if xfixes != 0 { let mut b = Vec::new(); b.extend_from_slice(&u32b(4)); b.extend_from_slice(&u32b(0)); let s = conn.req(xfixes, 0, &b); conn.flush(); r.wait_reply(s); }
+    if randr != 0 { let mut b = Vec::new(); b.extend_from_slice(&u32b(1)); b.extend_from_slice(&u32b(5)); let s = conn.req(randr, 0, &b); conn.flush(); r.wait_reply(s); }
+    let mut xi_minor = 0u16;
+    let xi = if xi != 0 {
+        let mut b = Vec::new(); b.extend_from_slice(&u16b(2)); b.extend_from_slice(&u16b(4));
+        let s = conn.req(xi, 47, &b); conn.flush();
+        match r.wait_reply(s) { Some(rep) if rd16(&rep, 8) >= 2 => { xi_minor = rd16(&rep, 10); xi } _ => 0 }
+    } else { 0 };
+    let xkb = if xkb != 0 {
+        let s = conn.req(xkb, 0, &[1, 0, 0, 0]); conn.flush();   // XkbUseExtension(1.0)
+        match r.wait_reply(s) { Some(rep) if rep[1] != 0 => xkb, _ => 0 }
+    } else { 0 };
+
+    let ext = Ext { present, shm, sync, xfixes, randr, rr_event, xkb, xkb_event, xi };
+
+    // Detectable autorepeat + the user's repeat rate.
+    let mut repeat: Option<(u64, u64)> = None;
+    if xkb != 0 {
+        let mut b = vec![0u8; 24];
+        b[0..2].copy_from_slice(&u16b(0x100)); b[4..8].copy_from_slice(&u32b(1)); b[8..12].copy_from_slice(&u32b(1));
+        let s = conn.req(xkb, 21, &b); conn.flush(); r.wait_reply(s);   // PerClientFlags(DetectableAutoRepeat)
+        let mut b = vec![0u8; 4]; b[0..2].copy_from_slice(&u16b(0x100));
+        let s = conn.req(xkb, 6, &b); conn.flush();                      // GetControls
+        if let Some(rep) = r.wait_reply(s) {
+            // xkbGetControlsReply: ...internalModsVmods@16, ignoreLockModsVmods@18, repeatDelay@20, repeatInterval@22.
+            let delay = rd16(&rep, 20) as u64; let interval = rd16(&rep, 22) as u64;
+            if core.debug.load(Relaxed) { eprintln!("softer_gui: xkb repeat delay {delay} ms interval {interval} ms"); }
+            if interval > 0 { repeat = Some((delay, interval)); }
+        }
+        // XkbSelectEvents: NewKeyboardNotify (all details) + MapNotify (all map parts).
+        let mut b = Vec::new();
+        b.extend_from_slice(&u16b(0x100)); b.extend_from_slice(&u16b(3)); b.extend_from_slice(&u16b(0)); b.extend_from_slice(&u16b(1));
+        b.extend_from_slice(&u16b(0x0fff)); b.extend_from_slice(&u16b(0x0fff));
+        conn.req(xkb, 1, &b);
+    }
+
+    // Window.
+    let win = conn.new_id();
+    let root = conn.setup.root;
+    {
+        // background_pixmap = None and bit_gravity = NorthWest: the server must never paint
+        // the window itself (that is the black flash on every step of a resize drag), and
+        // the old contents stay anchored top-left until our next present lands.
+        let mut b = Vec::new();
+        b.extend_from_slice(&u32b(win)); b.extend_from_slice(&u32b(root));
+        b.extend_from_slice(&u16b(0)); b.extend_from_slice(&u16b(0));
+        b.extend_from_slice(&u16b(width as u16)); b.extend_from_slice(&u16b(height as u16));
+        b.extend_from_slice(&u16b(0)); b.extend_from_slice(&u16b(1));   // border, class InputOutput
+        b.extend_from_slice(&u32b(conn.setup.root_visual));
+        let event_mask: u32 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 6) | (1 << 15) | (1 << 17) | (1 << 21) | (1 << 22);
+        b.extend_from_slice(&u32b(1 | (1 << 4) | (1 << 11)));   // CWBackPixmap | CWBitGravity | CWEventMask
+        b.extend_from_slice(&u32b(0)); b.extend_from_slice(&u32b(1)); b.extend_from_slice(&u32b(event_mask));
+        conn.req(CREATE_WINDOW, conn.setup.root_depth, &b);
+    }
+    let atoms = Atoms {
+        wm_protocols: intern_atom(&conn, &mut r, b"WM_PROTOCOLS"),
+        wm_delete: intern_atom(&conn, &mut r, b"WM_DELETE_WINDOW"),
+        net_wm_sync: intern_atom(&conn, &mut r, b"_NET_WM_SYNC_REQUEST"),
+        net_wm_sync_counter: intern_atom(&conn, &mut r, b"_NET_WM_SYNC_REQUEST_COUNTER"),
+        net_wm_state: intern_atom(&conn, &mut r, b"_NET_WM_STATE"),
+        net_wm_fullscreen: intern_atom(&conn, &mut r, b"_NET_WM_STATE_FULLSCREEN"),
+        net_wm_name: intern_atom(&conn, &mut r, b"_NET_WM_NAME"),
+        utf8_string: intern_atom(&conn, &mut r, b"UTF8_STRING"),
+        net_wm_pid: intern_atom(&conn, &mut r, b"_NET_WM_PID"),
+        net_wm_icon: intern_atom(&conn, &mut r, b"_NET_WM_ICON"),
+    };
+    let clip = Clip {
+        clipboard: intern_atom(&conn, &mut r, b"CLIPBOARD"),
+        targets: intern_atom(&conn, &mut r, b"TARGETS"),
+        incr: intern_atom(&conn, &mut r, b"INCR"),
+        utf8: atoms.utf8_string,
+        text_plain: intern_atom(&conn, &mut r, b"text/plain;charset=utf-8"),
+        prop: intern_atom(&conn, &mut r, b"SOFTER_GUI_CLIPBOARD"),
+        st: Mutex::new(ClipState::default()),
+        cv: Condvar::new(),
+    };
+    change_property(&conn, win, 39, 31, 8, title.as_bytes());   // WM_NAME / STRING
+    change_property(&conn, win, atoms.net_wm_name, atoms.utf8_string, 8, title.as_bytes());
+    // WM_CLASS (atom 67) is instance\0class\0 — two NUL-TERMINATED strings, not one
+    // label. Desktops match a running window to its .desktop entry through this
+    // (StartupWMClass), so a malformed value costs you the launcher icon and gets
+    // the window a second, generic taskbar group.
+    let mut wm_class = Vec::with_capacity(app_id.len() * 2 + 2);
+    wm_class.extend_from_slice(app_id.as_bytes()); wm_class.push(0);
+    wm_class.extend_from_slice(app_id.as_bytes()); wm_class.push(0);
+    change_property(&conn, win, 67, 31, 8, &wm_class);
+    if atoms.net_wm_pid != 0 {
+        change_property(&conn, win, atoms.net_wm_pid, 6, 32, &u32b(std::process::id()));
+    }
+
+    // _NET_WM_SYNC_REQUEST counter, best effort and independent of the close protocol.
+    let mut sync_counter = 0u32;
+    let mut sync_atom = 0u32;
+    if sync != 0 && atoms.net_wm_sync != 0 && atoms.net_wm_sync_counter != 0 {
+        sync_counter = conn.new_id();
+        let mut b = Vec::new(); b.extend_from_slice(&u32b(sync_counter)); b.extend_from_slice(&[0u8; 8]);
+        conn.req(sync, 2, &b);
+        change_property(&conn, win, atoms.net_wm_sync_counter, 6, 32, &u32b(sync_counter));
+        sync_atom = atoms.net_wm_sync;
+    }
+    let mut protos = Vec::new();
+    protos.extend_from_slice(&u32b(atoms.wm_delete));
+    if sync_atom != 0 { protos.extend_from_slice(&u32b(sync_atom)); }
+    change_property(&conn, win, atoms.wm_protocols, 4, 32, &protos);
+
+    // Extension event selection.
+    if randr != 0 { let mut b = Vec::new(); b.extend_from_slice(&u32b(root)); b.extend_from_slice(&u16b(1)); b.extend_from_slice(&u16b(0)); conn.req(randr, 4, &b); }
+    if xi != 0 {
+        // Master pointer events on our window: Motion, ButtonPress/Release, Enter/Leave, and (2.4+) pinch gestures.
+        let mut mask: u32 = (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8);
+        if xi_minor >= 4 { mask |= (1 << 27) | (1 << 28) | (1 << 29); }
+        let mut b = Vec::new();
+        b.extend_from_slice(&u32b(win)); b.extend_from_slice(&u16b(1)); b.extend_from_slice(&u16b(0));
+        b.extend_from_slice(&u16b(1)); b.extend_from_slice(&u16b(1)); b.extend_from_slice(&u32b(mask));   // XIAllMasterDevices
+        conn.req(xi, 46, &b);
+        // Device topology changes on the root, for every device.
+        let mut b = Vec::new();
+        b.extend_from_slice(&u32b(root)); b.extend_from_slice(&u16b(1)); b.extend_from_slice(&u16b(0));
+        b.extend_from_slice(&u16b(0)); b.extend_from_slice(&u16b(1)); b.extend_from_slice(&u32b((1 << 1) | (1 << 11)));
+        conn.req(xi, 46, &b);
+    }
+    conn.req(MAP_WINDOW, 0, &u32b(win));
+    if core.debug.load(Relaxed) { eprintln!("softer_gui: x11 window 0x{win:x}"); }
+    // PresentSelectInput(eid, window, ConfigureNotify|CompleteNotify|IdleNotify)
+    let eid = conn.new_id();
+    { let mut b = Vec::new(); b.extend_from_slice(&u32b(eid)); b.extend_from_slice(&u32b(win)); b.extend_from_slice(&u32b(1 | 2 | 4)); conn.req(present, 3, &b); }
+    conn.flush();
+
+    core.win_w.store(width, Relaxed); core.win_h.store(height, Relaxed);
+    if let Some((d, i)) = repeat { core.set_repeat(d, i); }
+
+    let sh = Arc::new(Shared {
+        conn, win, ext, sync_counter,
+        sync_want: AtomicU64::new(0), sync_done: AtomicU64::new(0), sync_size: AtomicU64::new(0), sync_ack_serial: AtomicU32::new(0),
+        pixmap: [AtomicU32::new(0), AtomicU32::new(0)], present_serial: AtomicU32::new(1),
+        clip,
+        debug: core.debug.load(Relaxed),
+    });
+    let mut pump = Pump {
+        sh: sh.clone(), core: core.clone(), r, atoms, keymap: xkb::Keymap::default(),
+        last_msc: 0, first_complete: true, win_root_x: 0, win_root_y: 0, crtc_rect: (0, 0, 0, 0),
+        cursor_applied: false, fs_applied: false, scroll: Vec::new(), pinch_scale: 1 << 16, quit_seen: false,
+        debug: core.debug.load(Relaxed),
+        render_hold_until: 0,
+        clip_incr: None,
+    };
+    pump.load_keymap();
+    pump.query_devices();
+    pump.query_period();
+    if pump.keymap.keys.is_empty() { eprintln!("softer_gui: no XKB keymap; text input will be empty"); }
+    std::thread::Builder::new().name("softer_gui-x11-pump".into()).spawn(move || pump.run()).ok()?;
+
+    Some(App { sh, core, frame_w: 0, frame_h: 0, side: 0, generation: 0, cur: 0, bufs: [None, None] })
+}

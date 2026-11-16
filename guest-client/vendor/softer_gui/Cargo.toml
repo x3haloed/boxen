@@ -1,0 +1,27 @@
+[package]
+name = "softer_gui"
+version = "5.0.1"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+description = "CPU-rendered windowing with vblank-exact frame pacing and one ordered input+render event stream. Speaks X11, Wayland, AppKit and Win32 directly; no dependencies."
+repository = "https://github.com/ShieldedLabs/softer_gui"
+documentation = "https://docs.rs/softer_gui"
+readme = "README.md"
+keywords = ["gui", "windowing", "x11", "wayland", "vblank"]
+categories = ["gui", "graphics", "os"]
+# The demo application and the research notes are not part of the library.
+# rust-toolchain.toml and .cargo/config.toml are this repo's build policy, not a
+# consumer's.
+include = ["src/**", "examples/**", "README.md", "LICENSE", "Cargo.toml"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(cosmo)'] }
+
+[profile.release]
+debug = 2
+codegen-units = 1
+lto = "fat"
+# unwind, not abort: cargo_cosmo builds std with panic_unwind only (cosmo ships the
+# full _Unwind_* ABI), and a mismatched panic runtime fails to link there.
+panic = "unwind"

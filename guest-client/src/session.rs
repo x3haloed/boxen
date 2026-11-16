@@ -1,4 +1,7 @@
-use boxen_guest_transport::{Connection, Message, Result, hash_id, lock_channel, new_id};
+use boxen_guest_transport::{
+    Attachment, BlobStore, Connection, Control, Message, Packet, PendingMessages, Presence, Result,
+    fresh_presence, hash_id, lock_channel, new_id, now_seconds,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
@@ -10,72 +13,128 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HISTORY_ROWS: usize = 64;
 const PENDING_LIMIT: usize = 256;
 
 pub struct Session {
     state: Arc<Mutex<Store>>,
+    files: Arc<Mutex<BlobStore>>,
+}
+
+#[derive(Clone)]
+pub struct Entry {
+    pub sent: bool,
+    pub message: Message,
 }
 
 pub struct View {
     pub revision: u64,
     pub status: &'static str,
     pub pending: usize,
-    pub history: VecDeque<(bool, String)>,
+    pub history: Arc<Vec<Entry>>,
+    pub resident: Option<String>,
+    pub presence: Presence,
 }
 
 impl Session {
     pub fn open(config: &Path, data: &Path) -> Result<Self> {
-        let connection = Connection::open(config)?;
-        let state = Arc::new(Mutex::new(Store::open(&data.join(connection.scope_id()))?));
+        let (session, sync) = Self::prepare(Connection::open(config)?, data, false)?;
         // The macOS GUI backend takes over the original main thread. Start the
         // network thread before handing control to AppKit.
-        let weak = Arc::downgrade(&state);
         thread::Builder::new()
             .name("guest-pubsub".into())
-            .spawn(move || {
-                let mut connection = connection;
-                let mut permission_check = None;
-                let mut retry = Duration::from_secs(1);
-                while let Some(state) = weak.upgrade() {
-                    let result = synchronize(&mut connection, &state, &mut permission_check);
-                    state.lock().unwrap().set_status(if result.is_ok() {
-                        "Connected"
-                    } else {
-                        "Sync paused; retrying"
-                    });
-                    drop(state);
-                    if result.is_ok() {
-                        retry = Duration::from_secs(1);
-                        thread::sleep(Duration::from_millis(250));
-                    } else {
-                        permission_check = None;
-                        thread::sleep(retry);
-                        retry = (retry * 2).min(Duration::from_secs(15));
-                    }
-                }
-            })?;
-        Ok(Self { state })
+            .spawn(sync)?;
+        Ok(session)
     }
 
-    pub fn send(&self, body: &str) -> Result<()> {
+    pub fn prepare(
+        connection: Connection,
+        data: &Path,
+        verified: bool,
+    ) -> Result<(Self, impl FnOnce() + Send + use<>)> {
+        let channel = data.join(connection.scope_id());
+        let mut opened = Store::open(&channel)?;
+        if verified {
+            opened.set_status("Connected");
+        }
+        let state = Arc::new(Mutex::new(opened));
+        let files = Arc::new(Mutex::new(BlobStore::new(channel.join("files"))?));
+        let worker_files = files.clone();
+        let weak = Arc::downgrade(&state);
+        Ok((Self { state, files }, move || {
+            let mut connection = connection;
+            let mut permission_check = verified.then(Instant::now);
+            let mut last_probe: Option<Instant> = None;
+            let mut pending = PendingMessages::default();
+            let mut retry = Duration::from_secs(1);
+            while let Some(state) = weak.upgrade() {
+                let result = synchronize(
+                    &mut connection,
+                    &state,
+                    &worker_files,
+                    &mut permission_check,
+                    &mut last_probe,
+                    &mut pending,
+                );
+                state.lock().unwrap().set_status(if result.is_ok() {
+                    "Connected"
+                } else {
+                    "Sync paused; retrying"
+                });
+                drop(state);
+                if result.is_ok() {
+                    retry = Duration::from_secs(1);
+                    thread::sleep(Duration::from_millis(250));
+                } else {
+                    permission_check = None;
+                    thread::sleep(retry);
+                    retry = (retry * 2).min(Duration::from_secs(15));
+                }
+            }
+        }))
+    }
+
+    pub fn send(
+        &self,
+        body: &str,
+        attachments: impl IntoIterator<Item = (String, impl AsRef<[u8]>)>,
+    ) -> Result<()> {
+        let mut packet = Message::new(new_id()?, body.to_owned(), Vec::new());
+        {
+            let files = self.files.lock().unwrap();
+            for (name, bytes) in attachments {
+                packet.files.push(files.retain(name, bytes.as_ref())?);
+            }
+        }
+        packet.validate_guest_submission()?;
         let mut state = self.state.lock().unwrap();
         if state.pending.len() >= PENDING_LIMIT {
             return Err("The outgoing queue is full".into());
         }
-        let packet = Message::new(new_id()?, body.to_owned(), Vec::new());
-        packet.validate_guest_submission()?;
         state.append(Record::Queued(packet))?;
         Ok(())
     }
 
+    pub fn read_file(&self, file: &Attachment) -> Result<Vec<u8>> {
+        self.files.lock().unwrap().read(file)
+    }
+
+    pub fn file_prefix(&self, file: &Attachment) -> Result<Vec<u8>> {
+        self.files.lock().unwrap().prefix(file)
+    }
+
     pub fn view_since(&self, revision: u64) -> Option<View> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        if state.presence != Presence::Offline && !fresh_presence(state.presence_at) {
+            state.presence = Presence::Offline;
+            state.revision += 1;
+        }
         (revision != state.revision).then(|| View {
             revision: state.revision,
             status: state.status,
             pending: state.pending.len(),
             history: state.history.clone(),
+            resident: state.resident.clone(),
+            presence: state.presence,
         })
     }
 }
@@ -83,7 +142,10 @@ impl Session {
 fn synchronize(
     connection: &mut Connection,
     state: &Mutex<Store>,
+    files: &Mutex<BlobStore>,
     checked: &mut Option<Instant>,
+    last_probe: &mut Option<Instant>,
+    pending: &mut PendingMessages,
 ) -> Result<()> {
     if checked.is_none_or(|time| time.elapsed() >= Duration::from_secs(60)) {
         connection.check_permissions()?;
@@ -91,20 +153,74 @@ fn synchronize(
     }
     let outgoing = state.lock().unwrap().pending.front().cloned();
     if let Some(packet) = outgoing {
+        for file in &packet.files {
+            let bytes = files.lock().unwrap().read(file)?;
+            connection.publish_file(file, &bytes)?;
+        }
         connection.publish(&packet)?;
         state
             .lock()
             .unwrap()
             .append(Record::Published { id: packet.id })?;
     }
+    let probe_delay = if state.lock().unwrap().presence == Presence::Offline {
+        30
+    } else {
+        12
+    };
+    if last_probe.is_none_or(|time| time.elapsed() >= Duration::from_secs(probe_delay)) {
+        connection.control(&Control::PresenceProbe {
+            sent_at: now_seconds(),
+        })?;
+        *last_probe = Some(Instant::now());
+    }
+    let mut acknowledged = Vec::new();
     for delivery in connection.pull()? {
         match delivery.decode() {
-            Ok(message) => state.lock().unwrap().receive(message)?,
-            Err(_) => eprintln!("Guest Pub/Sub discarded an invalid message envelope."),
+            Ok(Packet::Message(message)) => {
+                pending.insert(delivery.ack_id, message)?;
+                continue;
+            }
+            Ok(Packet::Control(Control::File(chunk))) => match chunk.bytes() {
+                Ok(bytes) => files.lock().unwrap().insert(&chunk, &bytes)?,
+                Err(_) => eprintln!("Guest Pub/Sub discarded an invalid attachment chunk."),
+            },
+            Ok(Packet::Control(Control::Presence {
+                sent_at,
+                name,
+                state: presence,
+            })) => {
+                let mut store = state.lock().unwrap();
+                if fresh_presence(sent_at)
+                    && sent_at >= store.presence_at
+                    && !name.is_empty()
+                    && name.len() <= 1024
+                {
+                    store.presence_at = sent_at;
+                    if store.presence != presence || store.resident.as_ref() != Some(&name) {
+                        store.presence = presence;
+                        store.resident = Some(name);
+                        store.revision += 1;
+                    }
+                }
+            }
+            _ => eprintln!("Guest Pub/Sub discarded an invalid message envelope."),
         }
-        connection.ack(&[delivery.ack_id])?;
+        acknowledged.push(delivery.ack_id);
     }
-    Ok(())
+    connection.ack(&acknowledged)?;
+    pending.deliver(connection, |message| {
+        {
+            let store = files.lock().unwrap();
+            for file in &message.files {
+                if store.complete(file)?.is_none() {
+                    return Ok(false);
+                }
+            }
+        }
+        state.lock().unwrap().receive(message.clone())?;
+        Ok(true)
+    })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -120,7 +236,10 @@ struct Store {
     _lock: File,
     pending: VecDeque<Message>,
     received: HashMap<String, String>,
-    history: VecDeque<(bool, String)>,
+    history: Arc<Vec<Entry>>,
+    resident: Option<String>,
+    presence: Presence,
+    presence_at: u64,
     revision: u64,
     status: &'static str,
     healthy: bool,
@@ -152,7 +271,10 @@ impl Store {
             _lock: lock,
             pending: VecDeque::new(),
             received: HashMap::new(),
-            history: VecDeque::new(),
+            history: Arc::default(),
+            resident: None,
+            presence: Presence::Offline,
+            presence_at: 0,
             revision: 1,
             status: "Connecting",
             healthy: true,
@@ -213,7 +335,10 @@ impl Store {
     fn apply(&mut self, event: Record) -> Result<()> {
         match event {
             Record::Queued(message) => {
-                self.add_history(true, message.body.clone());
+                Arc::make_mut(&mut self.history).push(Entry {
+                    sent: true,
+                    message: message.clone(),
+                });
                 self.pending.push_back(message);
             }
             Record::Published { id } => {
@@ -224,22 +349,14 @@ impl Store {
             }
             Record::Received(message) => {
                 let digest = hash_id(&serde_json::to_vec(&message)?);
-                self.received.insert(message.id, digest);
-                let mut body = message.body;
-                for name in message.attachment_names {
-                    body.push_str(&format!("\nAttachment unavailable: {name}"));
-                }
-                self.add_history(false, body);
+                self.received.insert(message.id.clone(), digest);
+                Arc::make_mut(&mut self.history).push(Entry {
+                    sent: false,
+                    message,
+                });
             }
         }
         Ok(())
-    }
-
-    fn add_history(&mut self, sent: bool, body: String) {
-        self.history.push_back((sent, body));
-        if self.history.len() > HISTORY_ROWS {
-            self.history.pop_front();
-        }
     }
 
     fn set_status(&mut self, status: &'static str) {
