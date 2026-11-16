@@ -1,8 +1,8 @@
 //! Window and keyboard feasibility probe for the portable guest client.
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use softer_gui::{
-    BTN_LEFT, EVENT_BUTTONS, EVENT_CLOSE, EVENT_RENDER, EVENT_TEXT, Event, Framebuffer,
-    KEY_BACKSPACE, KEY_ENTER, KEY_LEFTSHIFT, KEY_RIGHTSHIFT,
+    AXIS_MOUSE_X, AXIS_MOUSE_Y, BTN_LEFT, EVENT_AXES, EVENT_BUTTONS, EVENT_CLOSE, EVENT_RENDER,
+    EVENT_TEXT, Event, Framebuffer, KEY_BACKSPACE, KEY_ENTER, KEY_LEFTSHIFT, KEY_RIGHTSHIFT,
 };
 use std::collections::VecDeque;
 
@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut event = Event::default();
     let mut buttons = [0; 8];
     let mut dirty = true;
-    let mut click = false;
+    let mut pointer = (0, 0);
     let mut previous_size = (0, 0);
     gui.request_frame();
     loop {
@@ -28,6 +28,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if !ch.is_control() && chat.draft.len() + ch.len_utf8() <= 8192 {
                             chat.draft.push(ch);
                             dirty = true;
+                        }
+                    }
+                }
+                EVENT_AXES => {
+                    for axis in event.axes() {
+                        match axis.axis {
+                            AXIS_MOUSE_X => pointer.0 = i64::from(axis.delta >> 8),
+                            AXIS_MOUSE_Y => pointer.1 = i64::from(axis.delta >> 8),
+                            _ => {}
                         }
                     }
                 }
@@ -51,22 +60,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         chat.draft.pop();
                         dirty = true;
                     }
-                    click |= event.button(BTN_LEFT) && !pressed(&buttons, BTN_LEFT);
-                    buttons = event.bits;
-                }
-                EVENT_RENDER => {
-                    let size = (event.width, event.height);
-                    if std::mem::take(&mut click)
-                        && send_button_at(event.width as usize, event.height as usize).is_some_and(
-                            |(x, y)| {
-                                (x as i64..x as i64 + 90).contains(&(event.cursor_x >> 32))
-                                    && (y as i64..y as i64 + 28).contains(&(event.cursor_y >> 32))
-                            },
-                        )
+                    if event.button(BTN_LEFT)
+                        && !pressed(&buttons, BTN_LEFT)
+                        && hits_send(previous_size, pointer)
                     {
                         chat.send();
                         dirty = true;
                     }
+                    buttons = event.bits;
+                }
+                EVENT_RENDER => {
+                    let size = (event.width, event.height);
+                    pointer = (event.cursor_x >> 32, event.cursor_y >> 32);
                     if dirty || size != previous_size {
                         let mut frame = gui.get_framebuffer();
                         if frame.ok() {
@@ -80,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
-        if dirty || click {
+        if dirty {
             gui.request_frame();
         }
     }
@@ -177,6 +182,13 @@ fn lines(text: &str, columns: usize) -> Vec<String> {
 
 fn send_button_at(width: usize, height: usize) -> Option<(usize, usize)> {
     (width >= 250 && height >= 102).then(|| (width - 110, height - 96))
+}
+
+fn hits_send((width, height): (u32, u32), (pointer_x, pointer_y): (i64, i64)) -> bool {
+    send_button_at(width as usize, height as usize).is_some_and(|(x, y)| {
+        let (x, y) = (x as i64, y as i64);
+        (x..x + 90).contains(&pointer_x) && (y..y + 28).contains(&pointer_y)
+    })
 }
 
 struct Screen<'a> {
