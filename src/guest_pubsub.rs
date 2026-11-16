@@ -1,13 +1,16 @@
 //! Outbound-only runner for a single Boxen guest correspondence binding.
 use crate::{Result, guest_chat, messaging::Instance, state};
-use boxen_guest_transport::{Connection, Message, lock_channel};
+use boxen_guest_transport::{
+    Attachment, BlobStore, Connection, Control, Message, Packet, PendingMessages, Presence,
+    fresh_presence, lock_channel, now_seconds,
+};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
     fs,
     path::{Path, PathBuf},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
@@ -48,13 +51,33 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
     if checkpoint.instance != instance {
         return Err("guest Pub/Sub history belongs to a different Boxen connector".into());
     }
+    let files = Files {
+        incoming: BlobStore::new(directory.join("incoming"))?,
+        originals: crate::attachments::Store::new(home.canonicalize()?.join("attachments")),
+    };
     save_checkpoint(&cursor_path, &checkpoint)?;
     event("runner_started", &instance, None);
     let mut previous_error = None;
     let mut backoff = 1;
+    let mut pending = PendingMessages::default();
+    let mut presence = PresenceWatch::default();
     loop {
-        let outbound = publish_replies(&mut cloud, &control, &mut checkpoint, &cursor_path);
-        let inbound = receive_messages(&mut cloud, &control, &instance);
+        let outbound = publish_replies(
+            &mut cloud,
+            &control,
+            &mut checkpoint,
+            &cursor_path,
+            &files,
+            &mut presence,
+        );
+        let inbound = receive_messages(
+            &mut cloud,
+            &control,
+            &instance,
+            &files,
+            &mut pending,
+            &mut presence,
+        );
         let issue = outbound
             .err()
             .or_else(|| inbound.err())
@@ -112,6 +135,8 @@ use std::fs::File;
 
 #[derive(Deserialize)]
 struct Page {
+    resident: String,
+    status: Presence,
     messages: Vec<Mail>,
     next_after: u64,
 }
@@ -122,12 +147,45 @@ struct Mail {
     sender: String,
     body: String,
     #[serde(default)]
-    attachments: Vec<Attachment>,
+    attachments: Vec<AttachmentSummary>,
 }
 
 #[derive(Deserialize)]
-struct Attachment {
-    name: String,
+struct AttachmentSummary {
+    size: u64,
+}
+
+struct Files {
+    incoming: BlobStore,
+    originals: crate::attachments::Store,
+}
+
+#[derive(Default)]
+struct PresenceWatch {
+    requested: Option<Instant>,
+    published: Option<(Instant, String, Presence)>,
+}
+
+impl PresenceWatch {
+    fn publish(&mut self, cloud: &mut Connection, page: &Page) -> Result<()> {
+        if self
+            .requested
+            .is_some_and(|last| last.elapsed() < Duration::from_secs(75))
+            && self.published.as_ref().is_none_or(|(last, name, state)| {
+                name != &page.resident
+                    || *state != page.status
+                    || last.elapsed() >= Duration::from_secs(12)
+            })
+        {
+            cloud.control(&Control::Presence {
+                sent_at: now_seconds(),
+                name: page.resident.clone(),
+                state: page.status,
+            })?;
+            self.published = Some((Instant::now(), page.resident.clone(), page.status));
+        }
+        Ok(())
+    }
 }
 
 fn publish_replies(
@@ -135,6 +193,8 @@ fn publish_replies(
     control: &guest_chat::Control,
     checkpoint: &mut Checkpoint,
     path: &Path,
+    files: &Files,
+    presence: &mut PresenceWatch,
 ) -> Result<()> {
     let instance = &checkpoint.instance;
     let page: Page = serde_json::from_value(control.call(
@@ -144,16 +204,26 @@ fn publish_replies(
     if page.next_after < checkpoint.after {
         return Err("Boxen returned a regressed guest cursor".into());
     }
+    presence.publish(cloud, &page)?;
     for mail in page
         .messages
         .into_iter()
         .filter(|mail| mail.sender == "resident")
     {
-        let packet = Message::new(
-            mail.id,
-            mail.body,
-            mail.attachments.into_iter().map(|file| file.name).collect(),
-        );
+        let mut packet = Message::new(mail.id, mail.body, Vec::new());
+        for (index, summary) in mail.attachments.iter().enumerate() {
+            let value = control.call(Some(instance), json!({
+                "action":"guest_chat_attachment","instance":instance,"message_id":packet.id,"index":index
+            }))?;
+            let file: Attachment = serde_json::from_value(value.clone())?;
+            if file.size != summary.size {
+                return Err("guest attachment changed after the mailbox read".into());
+            }
+            let original: crate::attachments::Attachment = serde_json::from_value(value)?;
+            let path = files.originals.verify(&original)?;
+            cloud.publish_file(&file, &fs::read(path)?)?;
+            packet.files.push(file);
+        }
         cloud.publish(&packet)?;
     }
     if page.next_after != checkpoint.after {
@@ -171,25 +241,74 @@ fn receive_messages(
     cloud: &mut Connection,
     control: &guest_chat::Control,
     instance: &str,
+    files: &Files,
+    pending: &mut PendingMessages,
+    presence: &mut PresenceWatch,
 ) -> Result<()> {
+    let mut acknowledged = Vec::new();
     for delivery in cloud.pull()? {
-        match delivery.decode().and_then(|packet| {
-            packet.validate_guest_submission()?;
-            Ok(packet)
-        }) {
-            Ok(packet) => {
-                let accepted = control.call(Some(instance), json!({
-                    "action":"guest_chat_send","instance":instance,"id":packet.id,"body":packet.body
-                })).map_err(|_| "Boxen could not accept guest text")?;
-                if accepted["accepted"] != true {
-                    return Err("Boxen did not confirm guest mailbox acceptance".into());
+        match delivery.decode() {
+            Ok(Packet::Message(packet)) if packet.validate_guest_submission().is_ok() => {
+                pending.insert(delivery.ack_id, packet)?;
+                continue;
+            }
+            Ok(Packet::Control(Control::File(chunk))) => match chunk.bytes() {
+                Ok(bytes) => files.incoming.insert(&chunk, &bytes)?,
+                Err(_) => event("invalid_delivery_discarded", instance, None),
+            },
+            Ok(Packet::Control(Control::PresenceProbe { sent_at })) => {
+                if fresh_presence(sent_at) {
+                    presence.requested = Some(Instant::now());
                 }
             }
-            Err(_) => event("invalid_delivery_discarded", instance, None),
+            _ => event("invalid_delivery_discarded", instance, None),
         }
-        cloud.ack(&[delivery.ack_id])?;
+        acknowledged.push(delivery.ack_id);
     }
-    Ok(())
+    cloud.ack(&acknowledged)?;
+    pending.deliver(cloud, |packet| accept(control, instance, files, packet))
+}
+
+fn accept(
+    control: &guest_chat::Control,
+    instance: &str,
+    files: &Files,
+    packet: &Message,
+) -> Result<bool> {
+    for file in &packet.files {
+        if files.incoming.complete(file)?.is_none() {
+            return Ok(false);
+        }
+    }
+    let mut attachments = Vec::new();
+    for file in &packet.files {
+        let bytes = files.incoming.read(file)?;
+        attachments.push(crate::attachments::capture(
+            &file.name,
+            &bytes,
+            |transfer| {
+                control.call(
+                    Some(instance),
+                    json!({
+                        "action":"guest_chat_upload","instance":instance,"transfer":transfer
+                    }),
+                )
+            },
+        )?);
+    }
+    let accepted = control
+        .call(
+            Some(instance),
+            json!({
+                "action":"guest_chat_send","instance":instance,"id":packet.id,"body":packet.body,
+                "attachments":attachments
+            }),
+        )
+        .map_err(|_| "Boxen could not accept guest message")?;
+    if accepted["accepted"] != true {
+        return Err("Boxen did not confirm guest mailbox acceptance".into());
+    }
+    Ok(true)
 }
 
 // The runner is a separate CLI process. Its supervisor owns retention of these

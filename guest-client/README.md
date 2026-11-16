@@ -1,9 +1,16 @@
 # Boxen guest client
 
-The native client exchanges text with a single Boxen resident through two
-Google Cloud Pub/Sub topics. Enter sends and Shift+Enter inserts a newline.
-The client shows its connection and queue status. Resident presence and
-attachment transfer are outside this text transport slice.
+The native client exchanges messages and files with a single Boxen resident
+through two Google Cloud Pub/Sub topics. The header shows the resident's Ready,
+Working, or Offline state and reports connection and queue status separately.
+Enter sends and Shift+Enter inserts a newline. The conversation scrolls without
+moving the composer.
+
+On Windows and macOS, drop files anywhere in the window or use **Attach files**.
+A draft can carry up to eight files of 32 MiB each. Each file can be removed
+before sending. Click an image thumbnail to preview it in the window. Other
+attachments open a Save dialog. The Windows APE uses an in-app picker for file
+selection and saving. The resident sends files through its existing guest-chat tool.
 
 From this directory, `cargo run --locked -- --loopback` opens a local-only
 window with in-memory echo for input testing.
@@ -60,4 +67,15 @@ retry uses the same Boxen message ID, including when a cloud publication
 succeeded just before a local restart. Outgoing client drafts become durable
 queue entries when sent. Acknowledged messages remain in the local journals;
 a fresh installation without that journal can retrieve only pending
-deliveries.
+deliveries. The sender publishes attachment parts on the existing channel.
+Each part is retained before acknowledgment. Boxen and the client assemble and
+verify the original bytes before accepting the associated message. Incomplete
+staging expires after 31 days and completed originals remain in local storage.
+
+Use updated builds of the host runner and native client together for file
+transfer. A text-only client can consume a Pub/Sub delivery it cannot display.
+
+The client embeds [DM Sans](https://github.com/google/fonts/tree/main/ofl/dmsans)
+under the SIL Open Font License. The local window backend is based on
+[softer_gui 5.0.1](https://github.com/ShieldedLabs/softer_gui/commit/de63f083ea670b4e453710863c83e3d9a03d9906)
+with Windows and AppKit file dialogs and drop handling.
