@@ -18,6 +18,22 @@ and run `cargo build --locked --release --features ape`. The artifact is
 Windows can launch a byte-identical copy with an `.exe` extension. On macOS,
 run `bash ./boxen-guest-client.com` from the directory containing the artifact.
 
+## Package the Mac app
+
+On an Apple Silicon Mac, run `python3 scripts/package-guest-client-macos.py`
+from the repository root. It builds the native client with source/dependency
+path remapping and creates an ad hoc signed app in a compressed disk image under
+`work/guest-client-release/`, with a SHA-256 checksum and build manifest. The
+package includes installation instructions and license notices, without account
+credentials, connection settings, or chat history. Existing output is never
+overwritten; `--output PATH` selects another destination.
+
+This package supports Apple Silicon Macs running macOS 12 or later. Intel Macs
+are not supported by the current Mac window backend. Without Developer ID signing
+and notarization, the recipient follows the per-app Open Anyway steps in
+[the installation guide](INSTALL-macOS.txt). Gatekeeper acceptance on another
+Mac remains a recipient-side check.
+
 ## Connect the desktop client
 
 Give the guest the app, their Google Cloud service-account JSON file, and one

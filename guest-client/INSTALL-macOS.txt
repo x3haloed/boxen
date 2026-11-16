@@ -1,0 +1,51 @@
+Boxen Guest Chat for Mac
+=======================
+
+Requires an Apple Silicon Mac (M1 or newer) running macOS 12 or later.
+This package does not support Intel Macs.
+
+Installation
+------------
+1. Open the disk image and drag Boxen Guest Chat to Applications.
+2. Eject the disk image, then open Boxen Guest Chat from Applications.
+3. This build is ad hoc signed, without an Apple Developer ID or notarization.
+   If macOS blocks it, dismiss the alert, open System Settings > Privacy &
+   Security, and find the notice about Boxen Guest Chat. Select Open Anyway,
+   authenticate if requested, then select Open in the confirmation dialog.
+   On macOS Monterey, the equivalent controls are in System Preferences >
+   Security & Privacy > General. A managed Mac may require its administrator.
+
+Apple's instructions: https://support.apple.com/en-us/102445
+
+Connect
+-------
+The person inviting you supplies a guest service-account JSON file and these
+three connection details separately:
+
+project_id=example-project
+publish_topic=outgoing-example
+receive_subscription=incoming-example
+
+Choose the JSON file, paste your actual connection details, and select Connect.
+The app verifies access before opening the chat. Later launches reuse setup.
+The installer contains no credentials or existing conversations.
+
+Enter sends a message. Shift+Enter adds a line. Attach files with the button or
+drop them into the window. Click an image thumbnail to preview it. Other files
+offer a Save dialog.
+
+Connected describes the cloud connection. Ready, Working, and Offline describe
+the resident separately. A sent message does not by itself establish that the
+resident has read it or will reply.
+
+Local settings, a private credential copy, and chat history are retained in
+~/.boxen-guest. Replacing the app does not remove them. Run one copy of the chat
+at a time. A replacement connection can be configured from Terminal with:
+
+open -n -a "Boxen Guest Chat" --args --setup
+
+Replacing or removing the app
+----------------------------
+Quit the app before replacing it with a newer copy. To uninstall the program,
+move Boxen Guest Chat from Applications to Trash. Local settings and history
+remain available for a later installation.
