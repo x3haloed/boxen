@@ -7,6 +7,9 @@ publish = false
 
 [dependencies]
 font8x8 = "=0.3.1"
+boxen-guest-transport = { path = "transport" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # 5.0.1 forwards macOS close requests to the client as EVENT_CLOSE.
 softer_gui = { version = "=5.0.1", git = "https://github.com/ShieldedLabs/softer_gui", rev = "de63f083ea670b4e453710863c83e3d9a03d9906" }
 
@@ -21,5 +24,8 @@ cosmo-compat = "=10.0.0"
 
 [package.metadata.cosmo]
 bin = "boxen-guest-client"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(cosmo)'] }
 
 [workspace]

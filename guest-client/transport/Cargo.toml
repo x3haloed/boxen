@@ -1,0 +1,17 @@
+[package]
+name = "boxen-guest-transport"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+base64 = "=0.23.1"
+fs2 = "0.4"
+ring = "=0.17.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "=3.5.0", default-features = false, features = ["rustls", "json"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(cosmo)'] }

@@ -1,17 +1,76 @@
-//! Window and keyboard feasibility probe for the portable guest client.
+//! Portable native client for a Boxen guest conversation.
+mod session;
+
+use boxen_guest_transport::{Connection, GUEST_BODY_LIMIT, Result, host_path};
 use font8x8::{BASIC_FONTS, UnicodeFonts};
+use session::Session;
 use softer_gui::{
     AXIS_MOUSE_X, AXIS_MOUSE_Y, BTN_LEFT, EVENT_AXES, EVENT_BUTTONS, EVENT_CLOSE, EVENT_RENDER,
     EVENT_TEXT, Event, Framebuffer, KEY_BACKSPACE, KEY_ENTER, KEY_LEFTSHIFT, KEY_RIGHTSHIFT,
 };
-use std::collections::VecDeque;
+use std::{collections::VecDeque, env, path::PathBuf};
 
 const KEY_KPENTER: u32 = 96;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
+    let mut args = env::args_os().skip(1);
+    let mut config = None;
+    let mut data = None;
+    let mut check = false;
+    let mut loopback = false;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--config") if config.is_none() => {
+                config = Some(PathBuf::from(
+                    args.next().ok_or("--config requires a path")?,
+                ));
+            }
+            Some("--data-dir") if data.is_none() => {
+                data = Some(PathBuf::from(
+                    args.next().ok_or("--data-dir requires a path")?,
+                ));
+            }
+            Some("--check") => check = true,
+            Some("--loopback") => loopback = true,
+            Some("--help" | "-h") => {
+                println!(
+                    "boxen-guest-client [--config PATH] [--data-dir PATH] [--check]\nboxen-guest-client --loopback"
+                );
+                return Ok(());
+            }
+            _ => return Err("unexpected guest client argument".into()),
+        }
+    }
+    if loopback && (config.is_some() || data.is_some() || check) {
+        return Err("--loopback runs without connection settings".into());
+    }
+    let session = if loopback {
+        None
+    } else {
+        let config = match config {
+            Some(path) => path,
+            None => PathBuf::from(
+                env::var_os("HOME")
+                    .or_else(|| env::var_os("USERPROFILE"))
+                    .ok_or("the guest client needs a home directory or --config")?,
+            )
+            .join(".boxen-guest")
+            .join("guest-pubsub.json"),
+        };
+        let config = host_path(&config);
+        if check {
+            Connection::open(&config)?.check_permissions()?;
+            println!("Guest Pub/Sub authentication and permissions verified");
+            return Ok(());
+        }
+        let data = data
+            .map(|path| host_path(&path))
+            .unwrap_or_else(|| config.with_file_name("history"));
+        Some(Session::open(&config, &data)?)
+    };
     let mut gui = softer_gui::open("Boxen Guest Client", "org.boxen.guest-client", 620, 440)
         .ok_or("Could not open the guest client window")?;
-    let mut chat = LocalChat::default();
+    let mut chat = Chat::new(session);
     let mut event = Event::default();
     let mut buttons = [0; 8];
     let mut dirty = true;
@@ -19,13 +78,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut previous_size = (0, 0);
     gui.request_frame();
     loop {
-        gui.wait();
+        if chat.session.is_some() {
+            gui.wait_ms(250);
+            dirty |= chat.refresh();
+        } else {
+            gui.wait();
+        }
         while gui.next_event(&mut event) {
             match event.kind {
                 EVENT_CLOSE => return Ok(()),
                 EVENT_TEXT => {
                     for ch in event.text.into_iter().take(event.text_len as usize) {
-                        if !ch.is_control() && chat.draft.len() + ch.len_utf8() <= 8192 {
+                        if !ch.is_control() && chat.draft.len() + ch.len_utf8() <= GUEST_BODY_LIMIT
+                        {
                             chat.draft.push(ch);
                             dirty = true;
                         }
@@ -48,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if pressed(&event.bits, KEY_LEFTSHIFT)
                             || pressed(&event.bits, KEY_RIGHTSHIFT)
                         {
-                            if chat.draft.len() < 8192 {
+                            if chat.draft.len() < GUEST_BODY_LIMIT {
                                 chat.draft.push('\n');
                             }
                         } else {
@@ -95,15 +160,60 @@ fn pressed(bits: &[u64; 8], key: u32) -> bool {
     bits[(key / 64) as usize] & (1 << (key % 64)) != 0
 }
 
-#[derive(Default)]
-struct LocalChat {
+struct Chat {
+    session: Option<Session>,
+    revision: u64,
     draft: String,
     history: VecDeque<(bool, String)>,
+    status: String,
+    send_error: bool,
 }
 
-impl LocalChat {
+impl Chat {
+    fn new(session: Option<Session>) -> Self {
+        let status = if session.is_some() {
+            "Connecting"
+        } else {
+            "Local loopback"
+        };
+        Self {
+            session,
+            revision: 0,
+            draft: String::new(),
+            history: VecDeque::new(),
+            status: status.into(),
+            send_error: false,
+        }
+    }
+
+    fn refresh(&mut self) -> bool {
+        let Some(view) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.view_since(self.revision))
+        else {
+            return false;
+        };
+        self.revision = view.revision;
+        self.status = if view.pending == 0 {
+            view.status.to_owned()
+        } else {
+            format!("{} / {} queued", view.status, view.pending)
+        };
+        self.history = view.history;
+        true
+    }
+
     fn send(&mut self) {
         if self.draft.trim().is_empty() {
+            return;
+        }
+        if let Some(session) = &self.session {
+            self.send_error = session.send(&self.draft).is_err();
+            if !self.send_error {
+                self.draft.clear();
+                self.refresh();
+            }
             return;
         }
         let message = std::mem::take(&mut self.draft);
@@ -127,7 +237,7 @@ impl LocalChat {
         screen.band(0, height, 0xfff4f7f6);
         screen.band(0, 76, 0xff18483a);
         screen.text(20, 20, "Boxen Guest Client", 0xffffffff);
-        screen.text(20, 46, "Local loopback", 0xffd2eee4);
+        screen.text(20, 46, &self.status, 0xffd2eee4);
         let composer = height.saturating_sub(102);
         screen.band(composer, height, 0xffffffff);
         screen.text(20, composer + 12, "Message", 0xff18483a);
@@ -138,14 +248,22 @@ impl LocalChat {
         screen.text(
             20,
             height.saturating_sub(22),
-            "Enter sends / Shift+Enter adds a line",
+            if self.send_error {
+                "Could not queue message; draft kept"
+            } else {
+                "Enter sends / Shift+Enter adds a line"
+            },
             0xff526663,
         );
 
         let columns = width.saturating_sub(40).div_ceil(16).max(1);
         let mut transcript = Vec::new();
         for (sent, message) in &self.history {
-            let author = if *sent { "You" } else { "Echo" };
+            let author = match (*sent, self.session.is_some()) {
+                (true, _) => "You",
+                (false, true) => "Resident",
+                (false, false) => "Echo",
+            };
             transcript.extend(lines(&format!("{author}  {message}"), columns));
         }
         let visible = composer.saturating_sub(92) / 20;

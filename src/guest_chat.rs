@@ -42,7 +42,7 @@ pub fn binding(definition: &Definition) -> Result<&Binding> {
     }
 }
 
-struct Control {
+pub(crate) struct Control {
     agent: ureq::Agent,
     url: String,
     peer: String,
@@ -50,7 +50,7 @@ struct Control {
 }
 
 impl Control {
-    fn open(home: &Path, args: &mut Vec<String>) -> Result<Self> {
+    pub(crate) fn open(home: &Path, args: &mut Vec<String>) -> Result<Self> {
         let url =
             crate::take_option(args, "--url")?.unwrap_or_else(|| "http://127.0.0.1:42425".into());
         let origin = url
@@ -88,7 +88,7 @@ impl Control {
         })
     }
 
-    fn call(&self, instance: Option<&str>, args: Value) -> Result<Value> {
+    pub(crate) fn call(&self, instance: Option<&str>, args: Value) -> Result<Value> {
         let mut response = self
             .agent
             .post(format!("{}/api/operation", self.url))

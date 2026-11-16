@@ -62,6 +62,7 @@ name = "boxen"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "boxen-guest-transport",
  "cosmo-build",
  "cosmo-compat",
  "fs2",
@@ -74,6 +75,18 @@ dependencies = [
  "sha2",
  "snow",
  "tungstenite",
+ "ureq",
+]
+
+[[package]]
+name = "boxen-guest-transport"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "fs2",
+ "ring",
+ "serde",
+ "serde_json",
  "ureq",
 ]
 
