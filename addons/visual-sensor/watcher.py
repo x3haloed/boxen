@@ -430,8 +430,8 @@ class WatchRequest(BaseHTTPRequestHandler):
                 latest = feed.sequence
                 oldest = feed.events[0][0] if feed.events else latest + 1
             if header and (cursor is None or cursor > latest):
-                send("gap", {"reason": "cursor_unavailable"})
                 cursor = oldest - 1
+                send("gap", {"reason": "cursor_unavailable"}, cursor)
             if cursor is None:
                 cursor = latest
             # Only a newly attached client can advance its cursor from a snapshot.
@@ -448,7 +448,7 @@ class WatchRequest(BaseHTTPRequestHandler):
                 if self.authorize() != scope:
                     return
                 if cursor < oldest - 1:
-                    send("gap", {"reason": "retention", "from": cursor + 1, "through": oldest - 1})
+                    send("gap", {"reason": "retention", "from": cursor + 1, "through": oldest - 1}, oldest - 1)
                     send("snapshot", current)
                     cursor = oldest - 1
                 for seq, kind, event in pending:
