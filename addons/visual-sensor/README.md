@@ -127,8 +127,13 @@ The parsed candidate and last confirmed value have separate meanings.
 `carried`, `valueFrame`, `heldSamples`, and `heldMs` identify a value retained
 from an earlier reading. `confirmationSamples` counts consecutive matching
 parsed readings up to the configured confirmation threshold. An unreadable
-sample can still have OCR rows and a carried value. Invalid quest counter
-fractions remain in OCR rows and do not become parsed objectives.
+sample can still have OCR rows and a carried value. Counter fields label each
+OCR row with `parseStatus`. An `unparsed` row failed the counter pattern or
+fraction validation. It may contain damaged OCR or unrelated text. Rows
+excluded by clipping or selection limits have separate statuses.
+`unparsedRowCount` remains available in Boxen snapshots that omit raw rows
+to fit the payload limit. An omitted objective does not establish completion
+or absence from the screen.
 
 The legacy `evidenceRetained` field describes the local archive. HTTPS
 snapshots and change events have a separate `remoteEvidence` object with

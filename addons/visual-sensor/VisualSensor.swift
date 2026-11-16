@@ -63,6 +63,7 @@ struct FieldState: Encodable {
     let heldSamples: Int?
     let heldMs: Int64?
     let confirmationSamples: Int
+    let unparsedRowCount: Int?
 }
 
 struct Change: Encodable {
@@ -98,6 +99,13 @@ struct OCRRow: Encodable {
     let bounds: Bounds
     let confidence: Float
     let possibleClipping: Bool
+    var parseStatus: ParseStatus? = nil
+
+    enum ParseStatus: String, Encodable {
+        case parsed, unparsed
+        case excludedClipping = "excluded_clipping"
+        case excludedLimit = "excluded_limit"
+    }
 }
 
 struct Reading {
@@ -105,6 +113,10 @@ struct Reading {
     let rows: [OCRRow]
 
     var confidence: Float? { rows.map(\.confidence).min() }
+    var unparsedRowCount: Int? {
+        guard let first = rows.first, first.parseStatus != nil else { return nil }
+        return rows.count(where: { $0.parseStatus == .unparsed })
+    }
 }
 
 struct Field {
@@ -180,7 +192,8 @@ struct Field {
                            carried: valueFrame.map { $0 != frame } ?? false,
                            heldSamples: valueFrame.map { frame - $0 },
                            heldMs: valueAtMs.map { max(0, capturedAtMs - $0) },
-                           confirmationSamples: consecutive), change)
+                           confirmationSamples: consecutive,
+                           unparsedRowCount: lastReading?.unparsedRowCount), change)
     }
 
     private func recognize(_ crop: CGImage) throws -> Reading? {
@@ -197,6 +210,13 @@ struct Field {
                           confidence: candidate.confidence,
                           possibleClipping: box.minX <= 0.02 || box.maxX >= 0.98)
         }
+        return parse(rows)
+    }
+
+    func parse(_ rows: [OCRRow]) -> Reading {
+        if config.validateCounter == true, let pattern {
+            return parseCounterRows(rows, pattern: pattern)
+        }
         let included = rows.filter { config.rejectHorizontalEdgeText != true || !$0.possibleClipping }
         let text = String(included.map(\.text).joined(separator: "\n").unicodeScalars.prefix(2048))
         guard let pattern else { return Reading(value: text.isEmpty ? nil : text, rows: rows) }
@@ -207,15 +227,48 @@ struct Field {
         let values = matches.compactMap { match -> String? in
             let matchRange = match.range(at: match.numberOfRanges > 1 ? 1 : 0)
             guard let range = Range(matchRange, in: text), !range.isEmpty else { return nil }
-            let value = String(text[range])
-            if config.validateCounter == true {
-                let parts = value.split(separator: "/", maxSplits: 1)
-                guard parts.count == 2,
-                      let done = Int(parts[0].trimmingCharacters(in: .whitespaces)),
-                      let total = Int(parts[1].trimmingCharacters(in: .whitespaces).prefix(while: \.isNumber)),
-                      total > 0, done <= total else { return nil }
+            return String(text[range])
+        }
+        return Reading(value: values.isEmpty ? nil : values.joined(separator: "\n"), rows: rows)
+    }
+
+    private func parseCounterRows(_ input: [OCRRow], pattern: NSRegularExpression) -> Reading {
+        var rows = input
+        var values: [String] = []
+        var remaining = 2048
+        for index in rows.indices {
+            let text = rows[index].text
+            if config.rejectHorizontalEdgeText == true, rows[index].possibleClipping {
+                rows[index].parseStatus = .excludedClipping
+                continue
             }
-            return value
+            if remaining < text.unicodeScalars.count {
+                rows[index].parseStatus = .excludedLimit
+                remaining = 0
+                continue
+            }
+            remaining -= text.unicodeScalars.count + 1
+            guard let match = pattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  let range = Range(match.range(at: match.numberOfRanges > 1 ? 1 : 0), in: text),
+                  !range.isEmpty else {
+                rows[index].parseStatus = .unparsed
+                continue
+            }
+            let value = String(text[range])
+            let parts = value.split(separator: "/", maxSplits: 1)
+            guard parts.count == 2,
+                  let done = Int(parts[0].trimmingCharacters(in: .whitespaces)), done >= 0,
+                  let total = Int(parts[1].trimmingCharacters(in: .whitespaces).prefix(while: \.isNumber)),
+                  total > 0, done <= total else {
+                rows[index].parseStatus = .unparsed
+                continue
+            }
+            if values.isEmpty || config.matchAll == true {
+                rows[index].parseStatus = .parsed
+                values.append(value)
+            } else {
+                rows[index].parseStatus = .excludedLimit
+            }
         }
         return Reading(value: values.isEmpty ? nil : values.joined(separator: "\n"), rows: rows)
     }
