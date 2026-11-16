@@ -297,9 +297,8 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "softer_gui"
-version = "5.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d0cc06796eff6c1d2ce3972b36085524a61bf5473a048b3a606ec415aa9d8d1"
+version = "5.0.1"
+source = "git+https://github.com/ShieldedLabs/softer_gui?rev=de63f083ea670b4e453710863c83e3d9a03d9906#de63f083ea670b4e453710863c83e3d9a03d9906"
 
 [[package]]
 name = "subtle"

@@ -7,7 +7,8 @@ publish = false
 
 [dependencies]
 font8x8 = "=0.3.1"
-softer_gui = "=5.0.0"
+# 5.0.1 forwards macOS close requests to the client as EVENT_CLOSE.
+softer_gui = { version = "=5.0.1", git = "https://github.com/ShieldedLabs/softer_gui", rev = "de63f083ea670b4e453710863c83e3d9a03d9906" }
 
 [features]
 ape = ["dep:cosmo-build"]

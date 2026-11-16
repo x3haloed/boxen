@@ -13,11 +13,9 @@ and displays a typed message and its echo, and closes the window normally.
 Windows can launch a byte-identical copy with an `.exe` extension. On macOS,
 run `bash ./boxen-guest-client.com` from the directory containing the artifact.
 
-The Apple Silicon feasibility run opened the native window using a temporary
-app bundle around the loader. Typing, Backspace, and Enter-to-echo passed.
-Shift+Enter, Send, and normal window close still need a physical-input check
-on macOS. The backend reports Shift through AppKit's modifier-change events,
-which may differ from how automation injects a shortcut.
+On Apple Silicon, the APE opened a native window. Physical input verified
+Shift+Enter and Send with local echo. With the `softer_gui` 5.0.1 close fix,
+clicking the red close button ended the APE process with exit status zero.
 
 The [pilot infrastructure](infra/main.tf) defines two service accounts and two
 directional Pub/Sub topics with one pull subscription each. Each service
