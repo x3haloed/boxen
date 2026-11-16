@@ -7,7 +7,7 @@ external dispatch receipts; connector runners own native service protocols and
 their own credentials. There is no automatic conversion of private narration to
 outgoing communication. Anonymous workload threads retain request/response tools.
 
-[Guest chat](guest-chat.md) is a bundled loopback runner with one fixed resident binding. Its `guest_chat_send` and `guest_chat_read` actions accept exact-ID text and page only the bound conversation. Explicit outgoing messages and their local availability receipts commit together in the correspondence journal. The runner has no claim or external dispatch step.
+[Guest chat](guest-chat.md) binds one resident to one guest conversation. The Pub/Sub runner uses the instance-scoped `guest_chat_send` and `guest_chat_read` actions to accept exact-ID messages and page only that conversation. Explicit resident replies are committed with their local receipts before the runner publishes them to Pub/Sub.
 
 ## Type, instance, account and binding
 

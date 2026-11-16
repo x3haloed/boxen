@@ -86,15 +86,6 @@ impl Store {
         }
         Ok(path)
     }
-    pub(crate) fn preview_mime(&self, a: &Attachment) -> Option<&'static str> {
-        a.validate().ok()?;
-        let mut header = [0; 12];
-        let count = File::open(self.path(a)).ok()?.read(&mut header).ok()?;
-        match crate::media::kind(&header[..count]) {
-            Some(("image", mime)) => Some(mime),
-            _ => None,
-        }
-    }
     pub(crate) fn capture(&self, name: &str, bytes: &[u8]) -> Result<Attachment> {
         capture(name, bytes, |request| self.operation(&request))
     }

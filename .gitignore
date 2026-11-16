@@ -115,3 +115,6 @@ $RECYCLE.BIN/
 # Local runtime state, build-tool caches, and verification scratch.
 /work/
 __pycache__/
+
+# Local artifacts from the retired Guest Chat provisioning pilot.
+/guest-client/infra/

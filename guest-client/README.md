@@ -12,8 +12,6 @@ before sending. Click an image thumbnail to preview it in the window. Other
 attachments open a Save dialog. The Windows APE uses an in-app picker for file
 selection and saving. The resident sends files through its existing guest-chat tool.
 
-From this directory, `cargo run --locked -- --loopback` opens a local-only
-window with in-memory echo for input testing.
 To build the portable artifact, use Boxen's pinned Cosmopolitan toolchain cache
 and run `cargo build --locked --release --features ape`. The artifact is
 `target/cosmo/release/boxen-guest-client.com`.

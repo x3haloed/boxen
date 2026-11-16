@@ -4,7 +4,7 @@ use crate::{
     setup::Installer,
 };
 use boxen_guest_transport::{
-    Attachment, FILE_LIMIT, GUEST_BODY_LIMIT, MAX_FILES, Message, Presence, Result, hash_id, new_id,
+    Attachment, FILE_LIMIT, GUEST_BODY_LIMIT, MAX_FILES, Presence, Result, new_id,
 };
 use image::{ImageReader, RgbaImage};
 use softer_gui::{
@@ -447,7 +447,6 @@ impl Picker {
 struct Chat {
     session: Option<Session>,
     history: Arc<Vec<Entry>>,
-    local_files: HashMap<String, Arc<[u8]>>,
     revision: u64,
     resident: String,
     presence: Presence,
@@ -492,19 +491,13 @@ impl Setup {
 
 impl Chat {
     fn new(session: Option<Session>) -> Self {
-        let (resident, connection, presence) = if session.is_some() {
-            ("Guest chat", "Connecting", Presence::Offline)
-        } else {
-            ("Local chat", "Local preview", Presence::Ready)
-        };
         Self {
             session,
             history: Arc::default(),
-            local_files: HashMap::new(),
             revision: 0,
-            resident: resident.into(),
-            presence,
-            connection: connection.into(),
+            resident: "Guest chat".into(),
+            presence: Presence::Offline,
+            connection: "Connecting".into(),
             notice: None,
             scroll: 0,
             history_bounds: (0, 0, 0),
@@ -561,37 +554,18 @@ impl Chat {
         if self.draft.text.trim().is_empty() && self.draft_files.is_empty() {
             return;
         }
-        if let Some(session) = &self.session {
-            let files = self
-                .draft_files
-                .iter()
-                .map(|file| (file.name.clone(), file.bytes.as_ref()));
-            if let Err(error) = session.send(&self.draft.text, files) {
-                self.notice = Some(format!("Message kept in draft. {error}"));
-                return;
-            }
-            self.refresh();
-        } else {
-            let mut message = Message::new("0".repeat(64), self.draft.text.clone(), Vec::new());
-            for file in &self.draft_files {
-                let digest = hash_id(&file.bytes);
-                self.local_files.insert(digest.clone(), file.bytes.clone());
-                message.files.push(Attachment {
-                    name: file.name.clone(),
-                    digest,
-                    size: file.bytes.len() as u64,
-                });
-            }
-            let history = Arc::make_mut(&mut self.history);
-            history.push(Entry {
-                sent: true,
-                message: message.clone(),
-            });
-            history.push(Entry {
-                sent: false,
-                message,
-            });
+        let Some(session) = &self.session else {
+            return;
+        };
+        let files = self
+            .draft_files
+            .iter()
+            .map(|file| (file.name.clone(), file.bytes.as_ref()));
+        if let Err(error) = session.send(&self.draft.text, files) {
+            self.notice = Some(format!("Message kept in draft. {error}"));
+            return;
         }
+        self.refresh();
         self.draft = Draft::default();
         self.draft_files.clear();
         self.scroll = 0;
@@ -714,14 +688,8 @@ impl Chat {
     }
 
     fn bytes(&self, file: &Attachment) -> Result<Arc<[u8]>> {
-        match &self.session {
-            Some(session) => Ok(session.read_file(file)?.into()),
-            None => self
-                .local_files
-                .get(&file.digest)
-                .cloned()
-                .ok_or("Attachment unavailable".into()),
-        }
+        let session = self.session.as_ref().ok_or("Attachment unavailable")?;
+        Ok(session.read_file(file)?.into())
     }
 
     fn view_file(&mut self, name: String, bytes: Arc<[u8]>, gui: &mut Gui, save_nonimage: bool) {
@@ -1202,16 +1170,11 @@ impl Chat {
             if self.thumbnails.len() > 128 {
                 self.thumbnails.clear();
             }
-            let format = match &self.session {
-                Some(session) => session
-                    .file_prefix(file)
-                    .ok()
-                    .and_then(|prefix| image::guess_format(&prefix).ok()),
-                None => self
-                    .local_files
-                    .get(&file.digest)
-                    .and_then(|bytes| image::guess_format(bytes).ok()),
-            };
+            let format = self
+                .session
+                .as_ref()
+                .and_then(|session| session.file_prefix(file).ok())
+                .and_then(|prefix| image::guess_format(&prefix).ok());
             let thumbnail = if format.is_some_and(|format| format.can_read()) {
                 self.bytes(file).ok().and_then(|bytes| picture(&bytes, 128))
             } else {

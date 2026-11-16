@@ -12,7 +12,6 @@ fn main() -> Result<()> {
     let mut config = None;
     let mut data = None;
     let mut check = false;
-    let mut loopback = false;
     let mut setup_mode = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -27,22 +26,15 @@ fn main() -> Result<()> {
                 ));
             }
             Some("--check") => check = true,
-            Some("--loopback") => loopback = true,
             Some("--setup") => setup_mode = true,
             Some("--help" | "-h") => {
                 println!(
-                    "boxen-guest-client [--config PATH] [--data-dir PATH] [--check | --setup]\nboxen-guest-client --loopback"
+                    "boxen-guest-client [--config PATH] [--data-dir PATH] [--check | --setup]"
                 );
                 return Ok(());
             }
             _ => return Err("unexpected guest client argument".into()),
         }
-    }
-    if loopback && (config.is_some() || data.is_some() || check || setup_mode) {
-        return Err("--loopback runs without connection settings".into());
-    }
-    if loopback {
-        return ui::run(None, None);
     }
     if check && setup_mode {
         return Err("--check and --setup are separate modes".into());

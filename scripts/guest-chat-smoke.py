@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise a guest browser origin against real Boxen processes and a controlled Codex."""
+"""Exercise the guest correspondence controls used by the Pub/Sub runner."""
 import base64
 import concurrent.futures
+import hashlib
 import json
 import pathlib
 import secrets
@@ -11,10 +12,9 @@ import sys
 import tempfile
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 
-from smoke_helpers import fake_codex
+from smoke_helpers import PipeLines, fake_codex
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BINARY = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / 'target/release/boxen').resolve()
@@ -27,11 +27,11 @@ def port():
         return listener.getsockname()[1]
 
 
-def request(url, payload=None, headers=None, status=200):
+def request(url, payload, headers, status):
     req = urllib.request.Request(
         url,
         headers={'Content-Type': 'application/json', **(headers or {})},
-        data=payload if isinstance(payload, bytes) else json.dumps(payload).encode() if payload is not None else None,
+        data=json.dumps(payload).encode(),
     )
     try:
         response = urllib.request.urlopen(req, timeout=6)
@@ -56,10 +56,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-guest-chat-') as directory:
     home = pathlib.Path(directory) / 'daemon'
     cli = COMMAND + ['--data-dir', str(home)]
     machine = subprocess.check_output(cli + ['identity'], text=True).strip()
-    peer, ui, chat_port = port(), port(), port()
+    peer, ui = port(), port()
     control = f'http://127.0.0.1:{ui}'
-    origin = f'http://127.0.0.1:{chat_port}'
-    headers = {'X-Boxen-Chat': '1'}
     children = []
 
     def start_daemon():
@@ -68,17 +66,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-guest-chat-') as directory:
                    '--codex', str(fake_codex())], stdout=subprocess.PIPE, text=True,
         )
         children.append(process)
-        lines = [process.stdout.readline() for _ in range(3)]
+        stdout = PipeLines(process.stdout)
+        lines = [stdout.get() for _ in range(3)]
         assert 'Local controls:' in lines[-1], lines
-        return process
-
-    def start_chat(instance):
-        process = subprocess.Popen(
-            cli + ['guest-chat', '--instance', instance, '--url', control, '--listen', f'127.0.0.1:{chat_port}'],
-            stdout=subprocess.PIPE, text=True,
-        )
-        children.append(process)
-        assert process.stdout.readline().strip() == f'Guest chat origin: {origin}'
         return process
 
     def stop(process):
@@ -110,18 +100,36 @@ with tempfile.TemporaryDirectory(prefix='boxen-guest-chat-') as directory:
             cli + ['guest-chat-create', resident_id, '--url', control], text=True, timeout=10,
         ))['definition']['id']
 
+    def chat(action, status=200, connector=None, **fields):
+        connector = connector or instance
+        return api('messaging', runner=connector, status=status,
+                   args={'action': 'guest_chat_' + action, 'instance': connector, **fields})
+
     def page(after=0, status=200):
-        return request(origin + f'/messages?after={after}', headers=headers, status=status)
+        return chat('read', status=status, after=after)
 
     def send(body, ident=None, status=200, attachments=None):
-        payload = {'id': ident or secrets.token_hex(32), 'body': body}
+        fields = {'id': ident or secrets.token_hex(32), 'body': body}
         if attachments is not None:
-            payload['attachments'] = attachments
-        return request(origin + '/messages', payload, headers, status)
+            fields['attachments'] = attachments
+        return chat('send', status=status, **fields)
 
-    def upload(name, data, status=200, extra_headers=None):
-        return request(origin + '/uploads?name=' + urllib.parse.quote(name), data,
-                       {**headers, 'Content-Type': 'application/octet-stream', **(extra_headers or {})}, status)
+    def upload(name, data):
+        file = {'name': name, 'size': len(data), 'digest': hashlib.sha256(data).hexdigest()}
+        current = chat('upload', transfer={'action': 'status', 'file': file})
+        while not current['complete']:
+            offset = current['next']
+            chunk = data[offset:offset + 192 * 1024]
+            current = chat('upload', transfer={'action': 'write', 'file': file, 'offset': offset,
+                                               'data': base64.b64encode(chunk).decode()})
+            assert current['next'] == offset + len(chunk)
+        return file
+
+    def assert_original(message_id, index, expected):
+        file = chat('attachment', message_id=message_id, index=index)
+        assert file['size'] == len(expected)
+        assert file['digest'] == hashlib.sha256(expected).hexdigest()
+        assert (home / 'attachments' / file['digest']).read_bytes() == expected
 
     def inbox(target):
         return messaging('inbox', conversation='resident:' + target)['messages']
@@ -132,15 +140,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-guest-chat-') as directory:
         other = resident('Other assistant')
         instance = create(agent)
         other_instance = create(agent)
-        runner = start_chat(instance)
-        assert b'<textarea' in request(origin + '/')
         assert page()['resident'] == 'Guest assistant' and page()['status'] == 'ready'
         assert page()['messages'] == []
-        request(origin + '/messages', status=403)
-        request(origin + '/messages', {'body': 'cross-site'}, {**headers, 'Sec-Fetch-Site': 'cross-site'}, 403)
-        request(origin + '/', headers={'Host': 'untrusted.example'}, status=403)
-        request(origin + '/api/operation', {'op': 'resident_list'}, headers, 404)
-        request(origin + '/messages', {'body': 'forged routing', 'id': secrets.token_hex(32), 'resident': other}, headers, 400)
         send('x' * 8193, status=422)
         api('messaging', runner=instance, status=422, args={'action': 'guest_chat_read', 'instance': other_instance})
         api('messaging', runner=instance, status=422, args={'action': 'ingest', 'instance': instance})
@@ -173,7 +174,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-guest-chat-') as directory:
         tail = until(lambda: (p if len((p := page(first['next_after']))['messages']) == 2 else None))
         assert [m['sender'] for m in tail['messages']] == ['guest', 'resident']
         assert tail['messages'][-1]['body'] == 'Explicit guest reply'
-        assert set(tail['messages'][-1]) == {'id', 'sender', 'body', 'at'}
+        assert set(tail['messages'][-1]) == {'id', 'sender', 'body'}
         assert messaging('status', id=tail['messages'][-1]['id'])['delivery']['status'] == 'accepted'
         assert messaging('outbox', instance=instance)['messages'] == []
         assert len([m for m in inbox(agent) if m['body'] == body]) == 1
@@ -181,28 +182,20 @@ with tempfile.TemporaryDirectory(prefix='boxen-guest-chat-') as directory:
         png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ1sAAAAASUVORK5CYII=')
         reply_file = pathlib.Path(directory) / 'resident.png'
         reply_file.write_bytes(png)
-        upload('cross-site', b'denied', status=403, extra_headers={'Sec-Fetch-Site': 'cross-site'})
         image = upload('guest image.png', png)
         blob = b'<html>arbitrary bytes</html>' * 20500
         document = upload('example.html', blob)
         empty = upload('empty.txt', b'')
-        send('', status=422, attachments=[{**image, 'proof': secrets.token_hex(32)}])
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            overlapping = b'concurrent' * 62000
-            uploads = list(pool.map(lambda n: upload(f'parallel-{n}.bin', overlapping), range(2)))
-        assert uploads[0]['file']['digest'] == uploads[1]['file']['digest']
+        send('', status=422, attachments=[{**image, 'digest': secrets.token_hex(32)}])
         ident = secrets.token_hex(32)
         receipt = send('', ident, attachments=[image, document, empty])
         assert send('', ident, attachments=[image, document, empty]) == receipt
         send('', ident, status=422, attachments=[image])
         received = until(lambda: next((m for m in inbox(agent) if m['id'] == receipt['id'] and m['presented_in']), None))
         assert [item['name'] for item in received['attachments']] == ['guest image.png', 'example.html', 'empty.txt']
-        asset = origin + '/attachments/' + receipt['id']
-        assert request(asset + '/0', headers=headers) == png
-        assert request(asset + '/1?download', headers=headers) == blob
-        assert request(asset + '/2?download', headers=headers) == b''
-        request(asset + '/0', status=403)
-        request(asset + '/0', headers={**headers, 'Sec-Fetch-Site': 'cross-site'}, status=403)
+        assert_original(receipt['id'], 0, png)
+        assert_original(receipt['id'], 1, blob)
+        assert_original(receipt['id'], 2, b'')
         api('messaging', runner=other_instance, status=422, args={
             'action': 'guest_chat_attachment', 'instance': other_instance, 'message_id': receipt['id'], 'index': 0,
         })
@@ -212,30 +205,25 @@ with tempfile.TemporaryDirectory(prefix='boxen-guest-chat-') as directory:
         }
         send('MESSAGING:' + json.dumps(files_in_reply))
         outgoing = until(lambda: next((m for m in page()['messages'] if m['sender'] == 'resident' and m.get('attachments')), None))
-        assert outgoing['attachments'] == [{'name': reply_file.name, 'size': len(png), 'image': True}]
-        assert request(origin + f'/attachments/{outgoing["id"]}/0', headers=headers) == png
-        with urllib.request.urlopen(urllib.request.Request(asset + '/1', headers=headers), timeout=6) as response:
-            assert response.headers.get_content_type() == 'application/octet-stream'
-            assert response.headers['Content-Disposition'].startswith('attachment;')
+        assert outgoing['attachments'] == [{'size': len(png)}]
+        assert_original(outgoing['id'], 0, png)
         until(lambda: page()['status'] == 'ready')
         api('resident_update', id=agent, patch={'expected_revision': 1, 'auto_activate': False})
         assert page()['status'] == 'offline'
         before_restart = page()['messages']
         reply_file.unlink()
 
-        stop(runner)
         stop(daemon)
         daemon = start_daemon()
-        runner = start_chat(instance)
         assert page()['messages'] == before_restart
-        assert request(origin + f'/attachments/{outgoing["id"]}/0', headers=headers) == png
+        assert_original(outgoing['id'], 0, png)
         assert send(body, submission) == one
         messaging('update', instance=instance, expected_revision=1, enabled=False)
         page(status=422)
         send('After disable', status=422)
         messaging('update', instance=instance, expected_revision=2, enabled=True)
         assert page()['messages'] == before_restart
-        print('Guest chat passed status, attachment round trips, message isolation, exact retry, restart, and disable checks')
+        print('Guest runner controls passed presence, attachments, isolation, exact retries, restart, and disable checks')
     finally:
         for child in reversed(children):
             stop(child)

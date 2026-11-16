@@ -981,11 +981,11 @@ pub fn operation(
                         let messages: Vec<_> = messages.iter().map(|message| {
                             let mut item = json!({
                                 "id":message.id,"sender":if message.sender == guest {"guest"} else {"resident"},
-                                "body":message.body,"at":message.accepted_at,
+                                "body":message.body,
                             });
                             if !message.attachments.is_empty() {
                                 item["attachments"] = json!(message.attachments.iter().map(|file|
-                                    json!({"name":file.name,"size":file.size,"image":jobs.attachments.preview_mime(file).is_some()})
+                                    json!({"size":file.size})
                                 ).collect::<Vec<_>>());
                             }
                             item
@@ -1337,7 +1337,7 @@ fn guest_chat_send(jobs: &Jobs, owner: &str, id: &str, args: &Value) -> Result<V
         .transpose()?
         .unwrap_or_default();
     if (body.trim().is_empty() && attachments.is_empty())
-        || body.len() > crate::guest_chat::MAX_MESSAGE
+        || body.len() > boxen_guest_transport::GUEST_BODY_LIMIT
     {
         return Err("guest messages carry text up to 8 KiB or attachments".into());
     }
