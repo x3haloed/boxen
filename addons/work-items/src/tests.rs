@@ -1130,6 +1130,7 @@ struct WorkflowApi {
     actors: Mutex<BTreeMap<String, Value>>,
     correction: bool,
     auto_answer: bool,
+    omit_technical_acceptance: bool,
 }
 impl WorkflowApi {
     fn answer(&self, message: &Value, mut body: Value, sender: Value) {
@@ -1226,7 +1227,18 @@ impl Boxen for WorkflowApi {
                         let changes = self.correction
                             && request["role"] == "technical"
                             && request["review_round"] == 1;
-                        self.answer(&m,json!({"protocol":"boxen.review.v1","role":request["role"],"reviewed_commit":request["reviewed_commit"],"base_commit":request["base_commit"],"decision":if changes{"changes_required"}else{"pass"},"findings":if changes{vec![json!({"id":"wrong-state","blocking":true,"requested_change":"Exercise the correct state"})]}else{vec![]}}),m["to"].clone());
+                        let mut review = json!({"protocol":"boxen.review.v1","role":request["role"],"reviewed_commit":request["reviewed_commit"],"base_commit":request["base_commit"],"decision":if changes{"changes_required"}else{"pass"},"findings":if changes{vec![json!({"id":"wrong-state","blocking":true,"requested_change":"Exercise the correct state"})]}else{vec![]}});
+                        if !changes
+                            && request["contract"]["acceptance"].is_array()
+                            && !(self.omit_technical_acceptance && request["role"] == "technical")
+                        {
+                            let scenarios = &request["assignment"]["task"]["acceptance_criteria"];
+                            assert_eq!(*scenarios, request["interpretation"]["scenarios"]);
+                            review["acceptance"] = json!(scenarios.as_array().unwrap().iter().map(|scenario| {
+                                json!({"id":scenario["id"],"status":"verified","evidence":"Synthetic retained observation","assessment":"The recorded initial state, action, and result match this scenario"})
+                            }).collect::<Vec<_>>());
+                        }
+                        self.answer(&m, review, m["to"].clone());
                     }
                 } else if m["subject"].as_str().unwrap_or("").contains("assignment v") {
                     let c = self.s.connect()?;
@@ -1290,6 +1302,7 @@ fn workflow_fixture(
         actors: Mutex::new(BTreeMap::new()),
         correction,
         auto_answer: true,
+        omit_technical_acceptance: false,
     };
     let driver = WorkflowDriver {
         input,
@@ -1616,9 +1629,66 @@ fn automatic_loop_returns_findings_to_same_coder_and_publishes_exact_full_pr() {
         .unwrap();
     assert_eq!(driver.calls[evidence_call - 1], "verify_pr");
     assert_eq!(driver.commit, "3333333333333333333333333333333333333333");
+    let scenarios: String = f.s.connect().unwrap().query_row(
+        "SELECT json_extract(input,'$.assignment.task.acceptance_criteria') FROM assignments WHERE version=2",
+        [], |r| r.get(0)
+    ).unwrap();
+    let scenarios: Value = serde_json::from_str(&scenarios).unwrap();
+    let mail = api.mail.lock().unwrap();
+    for role in ["context", "technical"] {
+        let review = mail
+            .values()
+            .filter_map(|m| serde_json::from_str::<Value>(m["body"].as_str()?).ok())
+            .find(|body| {
+                body["protocol"] == "boxen.review-request.v1"
+                    && body["role"] == role
+                    && body["review_round"] == 2
+            })
+            .unwrap();
+        assert_eq!(
+            review["assignment"]["task"]["acceptance_criteria"],
+            scenarios
+        );
+        assert_eq!(review["interpretation"]["scenarios"], scenarios);
+        assert_eq!(review["reviewed_commit"], driver.commit);
+    }
+    drop(mail);
     let reopened = Store::open(f.s.path.clone()).unwrap();
     workflow::tick(&reopened, &f.cfg, &api, &settings, &mut driver).unwrap();
     assert_eq!(driver.calls.iter().filter(|v| *v == "create_pr").count(), 1);
+}
+#[test]
+fn incomplete_scenario_review_preserves_candidate_and_blocks_publication() {
+    let (f, mut api, settings, mut driver) = workflow_fixture(false);
+    api.omit_technical_acceptance = true;
+    for _ in 0..35 {
+        workflow_step(&f, &api, &settings, &mut driver);
+    }
+    let state = workflow::snapshot(&f.s).unwrap();
+    assert_eq!(state["attempts"][0]["stage"], "held", "{state}");
+    assert!(
+        !driver
+            .calls
+            .iter()
+            .any(|call| call == "push" || call == "create_pr")
+    );
+    let retained: String =
+        f.s.connect()
+            .unwrap()
+            .query_row("SELECT data FROM workflow_attempts", [], |r| r.get(0))
+            .unwrap();
+    let retained: Value = serde_json::from_str(&retained).unwrap();
+    assert!(
+        retained["pause_reason"]
+            .as_str()
+            .unwrap()
+            .contains("technical review pass")
+    );
+    assert_eq!(
+        retained["candidate"]["commit"],
+        "1111111111111111111111111111111111111111"
+    );
+    assert_eq!(retained["assignment_version"], 1);
 }
 #[test]
 fn board_handoff_reconciles_after_publication_and_restart() {

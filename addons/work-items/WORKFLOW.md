@@ -91,9 +91,11 @@ The normal path is:
    candidate report pins commit/base and observed results for every assigned
    scenario. Builds or private final narration do not substitute for this handoff.
 5. The configured context resident and a distinct technical-reviewer copy receive
-   separate exact-commit review requests. Findings return to the same coder through
-   a new retained assignment version. A new review round has new stable request IDs;
-   stale approvals and self-review cannot satisfy the current gate.
+   separate exact-commit review requests containing the coder's frozen scenarios.
+   Both passes record a verdict and supporting evidence for every assigned scenario.
+   Findings return to the same coder through a new retained assignment version.
+   A new review round has new stable request IDs. Earlier reviews apply to their
+   own candidate and round.
 6. Successful required reviews, current source, source hygiene, independently read
    cleanup state and configured publication authority permit a non-force push and
    regular PR creation. Intent is committed before creation. Remote readback checks
@@ -143,12 +145,21 @@ Optional `authoritative_answers` reference frozen ADO evidence and a configured
 `base_commit`, then supplies `decision` (`pass`, `changes_required`, `blocked`)
 and `findings`. Each finding has a stable ID, `blocking`, evidence and a specific
 requested change. A pass has no blocking findings and covers only its exact commit
-and role. It does not certify browser observations performed by another actor.
+and role. Review requests with an `acceptance` response contract require exactly
+one entry per assigned scenario ID on a pass. Each entry contains `id`,
+`status: "verified"`, a specific `evidence` reference (or a list of references),
+and an `assessment` tying the evidence to the starting state, action and observable
+result. Context review checks intent and preservation. Technical review checks
+the implementation and its evidence. Both can assess retained observations
+with the original actor's attribution or record independently reproduced observations.
+An incomplete pass holds publication with the candidate retained. Previously queued
+reviews keep their original response contract.
 
 The existing `boxen.work-report.v1` candidate includes full `commit` and `base`,
 normal summary/evidence/remaining/cleanup fields, and
-`validation.local_runtime_exercised: true`. `validation.acceptance` contains an
-`observed_pass` result and retained evidence for every assigned scenario ID.
+`validation.local_runtime_exercised: true`. `validation.acceptance` contains
+exactly one `observed_pass` result and a nonempty retained evidence reference
+(or list of references) for every assigned scenario ID.
 These are attributed worker observations; the independent reviews assess their
 substance. Allocation inspection explicitly does not claim runtime verification.
 

@@ -828,19 +828,38 @@ fn candidate(report: &Value) -> Result<()> {
         "Candidate lacks explicit real local runtime evidence"
     );
     ensure!(
-        report["validation"]["acceptance"]
-            .as_array()
-            .is_some_and(|v| !v.is_empty()
-                && v.iter()
-                    .all(|s| s["status"] == "observed_pass" && !s["evidence"].is_null())),
-        "Candidate lacks observed acceptance evidence"
-    );
-    ensure!(
         report["remaining"].as_array().is_some_and(|v| v.is_empty()),
         "Candidate reports remaining required work"
     );
     Ok(())
 }
+fn nonempty_text(value: &Value) -> bool {
+    value.as_str().is_some_and(|text| !text.trim().is_empty())
+}
+
+fn scenario_coverage(scenarios: &Value, results: &Value, status: &str) -> bool {
+    let (Some(scenarios), Some(results)) = (scenarios.as_array(), results.as_array()) else {
+        return false;
+    };
+    !scenarios.is_empty()
+        && scenarios.len() == results.len()
+        && scenarios.iter().all(|scenario| {
+            results
+                .iter()
+                .filter(|row| row["id"] == scenario["id"])
+                .count()
+                == 1
+        })
+        && results.iter().all(|row| {
+            let evidence = &row["evidence"];
+            row["status"] == status
+                && (nonempty_text(evidence)
+                    || evidence
+                        .as_array()
+                        .is_some_and(|refs| !refs.is_empty() && refs.iter().all(nonempty_text)))
+        })
+}
+
 fn reviews_pass(context: &Value, technical: &Value) -> bool {
     [context, technical].iter().all(|r| {
         r["decision"] == "pass"
@@ -1509,21 +1528,16 @@ fn advance(
                 );
             }
             a.data["candidate"] = report.clone();
-            let expected = a.data["interpretation"]["scenarios"]
-                .as_array()
-                .context("Acceptance scenarios missing")?;
-            let observed = report["validation"]["acceptance"].as_array();
-            let coverage = observed.is_some_and(|rows| {
-                expected.iter().all(|scenario| {
-                    rows.iter()
-                        .filter(|row| {
-                            row["id"] == scenario["id"] && row["status"] == "observed_pass"
-                        })
-                        .count()
-                        == 1
-                })
-            });
-            if !coverage {
+            let scenarios = &input["assignment"]["task"]["acceptance_criteria"];
+            ensure!(
+                *scenarios == a.data["interpretation"]["scenarios"],
+                "Frozen assignment scenarios differ from the interpretation"
+            );
+            if !scenario_coverage(
+                scenarios,
+                &report["validation"]["acceptance"],
+                "observed_pass",
+            ) {
                 return correction(
                     s,
                     cfg,
@@ -1556,6 +1570,8 @@ fn advance(
                 );
             }
             a.data["candidate"] = report;
+            // Requests already queued before an upgrade retain their original response contract.
+            a.data["review_acceptance_required"] = json!(true);
             save(s, a, "request_reviews")
         }
         "request_reviews" => {
@@ -1567,14 +1583,26 @@ fn advance(
                 "Coder cannot satisfy independent review"
             );
             api.call(json!({"op":"resident_definition","args":{"action":"instantiate","spec":{"id":reviewer,"definition_id":settings.review_definition,"definition_revision":settings.review_revision,"overrides":{"name":format!("technical-reviewer~{reviewer}")}}}}))?;
+            let frozen_assignment = assignment(s, a)?["assignment"].clone();
             for (role, to) in [
                 ("context", settings.context_resident.clone()),
                 ("technical", reviewer),
             ] {
-                let body = json!({"protocol":"boxen.review-request.v1","role":role,"review_round":a.data["assignment_version"],"reviewed_commit":a.data["candidate"]["commit"],"base_commit":a.data["candidate"]["base"],"interpretation":a.data["interpretation"],"candidate":a.data["candidate"],"project_pack_root":cfg.pack_root,"assignment":assignment(s,a)?["assignment"],
+                let body = json!({"protocol":"boxen.review-request.v1","role":role,"review_round":a.data["assignment_version"],"reviewed_commit":a.data["candidate"]["commit"],"base_commit":a.data["candidate"]["base"],"interpretation":a.data["interpretation"],"candidate":a.data["candidate"],"project_pack_root":cfg.pack_root,"assignment":frozen_assignment,
                     "contract":{"protocol":"boxen.review.v1","role":role,"reviewed_commit":a.data["candidate"]["commit"],"base_commit":a.data["candidate"]["base"],"decision":"pass|changes_required|blocked","findings":[{"id":"stable-finding","blocking":false,"evidence":"source/check reference","requested_change":"specific correction"}]},
                     "meaning":"An explicit JSON response to the authenticated reply_to, with matching request_id, attempt_id, work_item_id, source_digest, role, reviewed_commit, base_commit and envelope in_reply_to, records this review. Pass covers this exact commit and role only. Context review assesses intent/preservation; technical review independently inspects the actual diff and failure paths. Private narration is not a decision; review does not authorize source edits, merge or deployment."});
                 let mut body = body;
+                if a.data["review_acceptance_required"] == true {
+                    body["contract"]["acceptance"] = json!([{
+                        "id":"assigned scenario ID",
+                        "status":"verified",
+                        "evidence":"specific retained observation or independently reproduced evidence reference",
+                        "assessment":"how the evidence covers the assigned setup, action and observable result"
+                    }]);
+                    body["acceptance_review"] = json!(
+                        "The frozen scenarios in assignment.task.acceptance_criteria are the same ones the coder received. A pass includes exactly one verified acceptance entry per scenario ID. A verified entry explains how a specific retained observation or independent reproduction establishes that scenario at this commit, including the starting state and the action that triggers the expected result. Coder observations retain their original attribution. The context review checks that the scenarios represent the source intent and that the evidence demonstrates it. The technical review checks that the implementation and evidence support the exact behavior, including relevant failure paths. Missing or contradictory evidence can produce changes_required or blocked with a finding identifying the affected scenario."
+                    );
+                }
                 if settings.project["visual_evidence_required"] == true {
                     body["visual_evidence_review"] = json!(
                         "Read the candidate's proposed PR screenshots from the assigned evidence directory. Review whether they demonstrate the changed behavior with minimal frames, match this commit, and exclude credentials, account details and non-synthetic data. If screenshots do not apply, review the specific reason. Missing, inappropriate or insufficient evidence is a blocking finding."
@@ -1623,6 +1651,30 @@ fn advance(
                 );
             }
             if reviews_pass(&context, &technical) {
+                if a.data["review_acceptance_required"] == true {
+                    for (role, review) in [("context", &context), ("technical", &technical)] {
+                        let rows = &review["acceptance"];
+                        if !scenario_coverage(
+                            &a.data["interpretation"]["scenarios"],
+                            rows,
+                            "verified",
+                        ) || !rows.as_array().is_some_and(|entries| {
+                            entries
+                                .iter()
+                                .all(|entry| nonempty_text(&entry["assessment"]))
+                        }) {
+                            return held(
+                                s,
+                                cfg,
+                                settings,
+                                a,
+                                &format!(
+                                    "The {role} review pass lacks a verified assessment with evidence for every assigned acceptance scenario"
+                                ),
+                            );
+                        }
+                    }
+                }
                 save(s, a, "publish_ready")
             } else if context["decision"] == "blocked" || technical["decision"] == "blocked" {
                 held(s, cfg, settings, a, "Required review is blocked")
