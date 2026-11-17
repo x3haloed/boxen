@@ -71,8 +71,12 @@ class Replacement:
     def copy(self, source):
         if self.elevated and source.is_dir():
             subprocess.run(['sudo', '/usr/bin/ditto', str(source), str(self.next)], check=True)
+            # ditto preserves restrictive source modes. The installed bundle
+            # needs to be readable and traversable outside the root account.
+            subprocess.run(['sudo', '/bin/chmod', '-R', 'a+rX', str(self.next)], check=True)
         elif self.elevated:
             subprocess.run(['sudo', '/usr/bin/install', '-m', '0755', str(source), str(self.next)], check=True)
+            subprocess.run(['sudo', '/bin/chmod', '0755', str(self.next)], check=True)
         else:
             shutil.copy2(source, self.next)
 
@@ -112,6 +116,13 @@ def replace_all(sources, targets, elevated=False):
             replacement.copy(source)
         for replacement in replacements:
             replacement.install()
+        if elevated:
+            daemon, desktop = targets
+            for executable in (daemon, desktop / 'Contents/MacOS/boxen-desktop'):
+                if not os.access(executable, os.R_OK | os.X_OK):
+                    raise PermissionError(f'Installed executable is inaccessible to the build user: {executable}')
+            subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict',
+                            str(desktop)], check=True)
     except KeyboardInterrupt:
         # An interrupted external rename may have succeeded before returning.
         # Preserve both staged and backup files for the operator to inspect.
