@@ -10,6 +10,8 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+const COMMAND_APPROVAL: &str = "item/commandExecution/requestApproval";
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct RunSettings {
     pub target: Option<String>,
@@ -676,9 +678,13 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     if let Some(error) = data.watches.get(&live_tag).and_then(|w| w.error.as_ref()) {
         ui.label(format!("Reconnecting to activity · {error}"));
     }
-    if !activity && let Some(t) = data.transcripts.get(&live_tag) {
+    if let Some(t) = data.transcripts.get(&live_tag) {
         for row in &t.rows {
-            if row.request.is_some() {
+            if row
+                .request
+                .as_ref()
+                .is_some_and(|request| !activity || request["method"] == COMMAND_APPROVAL)
+            {
                 backend_request(ui, row, key, live_id, actions);
             }
         }
@@ -1020,8 +1026,10 @@ fn render_rows(
     for (i, row) in rows.iter().enumerate() {
         if view::incident(row) {
             view::activity_rows(ui, &rows[start..i]);
-            if live && row.request.is_some() {
-                backend_request(ui, row, key, run, actions);
+            if live && let Some(request) = &row.request {
+                if request["method"] != COMMAND_APPROVAL {
+                    backend_request(ui, row, key, run, actions);
+                }
             } else {
                 view::activity_row(ui, row);
             }
@@ -1041,6 +1049,17 @@ fn backend_request(
     let method = req["method"].as_str().unwrap_or("");
     let p = &req["params"];
     ui.push_id((&row.id, run), |ui| {
+        if method == COMMAND_APPROVAL {
+            if let Some(decision) = command_approval(ui, p) {
+                actions.push(Action::Respond(
+                    key.clone(),
+                    run.into(),
+                    req["id"].clone(),
+                    json!({"decision":decision}),
+                ));
+            }
+            return;
+        }
         let elicitation = method == "mcpServer/elicitation/request";
         ui.strong(if method.contains("requestApproval") || elicitation {
             "Approval requested"
@@ -1171,6 +1190,84 @@ fn backend_request(
     });
 }
 
+fn command_approval(ui: &mut egui::Ui, params: &Value) -> Option<Value> {
+    let legacy = [json!("accept"), json!("decline"), json!("cancel")];
+    let decisions = params["availableDecisions"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&legacy);
+    let command = params["command"].as_str();
+    ui.horizontal_wrapped(|ui| {
+        ui.strong("Approval requested");
+        if let Some(command) = command
+            && ui.small_button("Copy command").clicked()
+        {
+            ui.ctx().copy_text(command.to_owned());
+        }
+    });
+    egui::ScrollArea::vertical()
+        .id_salt("approval-details")
+        .min_scrolled_height(0.)
+        .max_height((ui.available_height() * 0.35).clamp(0., 120.))
+        .show(ui, |ui| {
+            if let Some(reason) = params["reason"].as_str() {
+                ui.label(reason);
+            }
+            if let Some(cwd) = params["cwd"].as_str() {
+                ui.weak(format!("Directory · {cwd}"));
+            }
+            if let Some(host) = params["networkApprovalContext"]["host"].as_str() {
+                ui.label(format!("Network host · {host}"));
+            }
+            if let Some(command) = command {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(command).monospace())
+                        .wrap()
+                        .selectable(true),
+                );
+            }
+            for decision in decisions {
+                let rule = &decision["acceptWithExecpolicyAmendment"]["execpolicy_amendment"];
+                if rule.is_array() {
+                    ui.weak("Proposed command rule");
+                    ui.add(
+                        egui::Label::new(crate::model::display(rule))
+                            .wrap()
+                            .selectable(true),
+                    );
+                }
+            }
+        });
+    let mut selected = None;
+    ui.horizontal_wrapped(|ui| {
+        for decision in decisions {
+            let label = match decision.as_str() {
+                Some("accept") => "Approve once".into(),
+                Some("acceptForSession") => "Approve for session".into(),
+                Some("decline") => "Decline".into(),
+                Some("cancel") => "Cancel turn".into(),
+                _ if decision["acceptWithExecpolicyAmendment"]["execpolicy_amendment"]
+                    .is_array() =>
+                {
+                    "Approve and save command rule".into()
+                }
+                _ => {
+                    let rule = &decision["applyNetworkPolicyAmendment"]["network_policy_amendment"];
+                    match (rule["action"].as_str(), rule["host"].as_str()) {
+                        (Some("allow"), Some(host)) => format!("Always allow {host}"),
+                        (Some("deny"), Some(host)) => format!("Always deny {host}"),
+                        _ => continue,
+                    }
+                }
+            };
+            if ui.button(label).clicked() {
+                selected = Some(decision.clone());
+            }
+        }
+    });
+    selected
+}
+
 fn backend_json_input(ui: &mut egui::Ui, label: &str) -> Option<Value> {
     let field = ui.make_persistent_id(label);
     let mut text = ui
@@ -1196,9 +1293,9 @@ fn backend_json_input(ui: &mut egui::Ui, label: &str) -> Option<Value> {
 mod tests {
     use super::*;
     use crate::model::Transcript;
+    use egui::{Event, FullOutput, Modifiers, PointerButton, Pos2, Rect, pos2, vec2};
 
-    fn click_request(transcript: &Transcript, label: &str) -> Action {
-        use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
+    fn click_request(transcript: &Transcript, label: &str, prompt_text: &str) -> Action {
         let ctx = egui::Context::default();
         let key = ThreadKey {
             peer: "peer".into(),
@@ -1224,26 +1321,29 @@ mod tests {
         };
         let (output, actions) = frame(vec![]);
         assert!(actions.is_empty(), "Rendering or replay answered a request");
-        let text: Vec<_> = output
-            .shapes
-            .iter()
-            .filter_map(|shape| {
-                if let egui::epaint::Shape::Text(text) = &shape.shape {
-                    Some(text)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(
-            text.iter()
-                .any(|text| text.galley.job.text == "Allow Computer Use to use Example App?")
-        );
-        let position = text
-            .iter()
-            .find(|text| text.galley.job.text == label)
-            .map(|text| text.pos + text.galley.size() / 2.)
-            .expect("visible response button");
+        assert!(visible_text(&output, prompt_text).is_some());
+        let position = visible_text(&output, label).expect("visible response button");
+        let (_, mut actions) = click(frame, position);
+        assert_eq!(actions.len(), 1);
+        actions.remove(0)
+    }
+
+    fn visible_text(output: &FullOutput, label: &str) -> Option<Pos2> {
+        output.shapes.iter().find_map(|shape| {
+            if let egui::epaint::Shape::Text(text) = &shape.shape
+                && text.galley.job.text == label
+            {
+                let center = text.pos + text.galley.size() / 2.;
+                return shape.clip_rect.contains(center).then_some(center);
+            }
+            None
+        })
+    }
+
+    fn click(
+        mut frame: impl FnMut(Vec<Event>) -> (FullOutput, Vec<Action>),
+        position: Pos2,
+    ) -> (FullOutput, Vec<Action>) {
         frame(vec![
             Event::PointerMoved(position),
             Event::PointerButton {
@@ -1253,14 +1353,89 @@ mod tests {
                 modifiers: Modifiers::NONE,
             },
         ]);
-        let (_, mut actions) = frame(vec![Event::PointerButton {
+        frame(vec![Event::PointerButton {
             pos: position,
             button: PointerButton::Primary,
             pressed: false,
             modifiers: Modifiers::NONE,
-        }]);
-        assert_eq!(actions.len(), 1);
-        actions.remove(0)
+        }])
+    }
+
+    #[test]
+    fn long_command_approval_is_clickable_in_a_short_pane() {
+        let key = ThreadKey {
+            peer: "peer".into(),
+            id: "thread".into(),
+        };
+        let tag = run_key(&key.peer, "run");
+        let command = "echo sample output\n".repeat(200);
+        let offered_rule =
+            json!({"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["echo"]}});
+        let request = json!({"seq":1,"kind":"backend","data":{
+            "id":0,"method":COMMAND_APPROVAL,"params":{
+                "command":command,"availableDecisions":["accept",offered_rule,"cancel"]
+            }
+        }});
+        let screen = Rect::from_min_size(pos2(0., 0.), vec2(280., 200.));
+        for (activity, label, decision) in [
+            (false, "Approve once", json!("accept")),
+            (true, "Approve once", json!("accept")),
+            (true, "Approve and save command rule", offered_rule),
+            (true, "Cancel turn", json!("cancel")),
+        ] {
+            let ctx = egui::Context::default();
+            let mut data = Data::default();
+            view::switch(&mut data, &key, activity, None);
+            let runs = [json!({"status":"waiting","record":{"spec":{
+                "id":"run","thread_id":key.id,"backend":"codex","prompt":"Fixture"
+            }}})];
+            data.catalogs
+                .insert(key.peer.clone(), crate::model::catalog(&key.peer, &runs));
+            data.transcripts
+                .entry(tag.clone())
+                .or_default()
+                .apply(&request)
+                .unwrap();
+            let frame = |data: &mut Data, events| {
+                let mut actions = vec![];
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| panel(ui, data, &key, &mut actions),
+                );
+                (output, actions)
+            };
+            let (output, actions) = frame(&mut data, vec![]);
+            assert!(actions.is_empty());
+            assert!(visible_text(&output, "Decline").is_none());
+            let position = visible_text(&output, label).expect("visible decision in short pane");
+            assert!(screen.contains(position));
+            let copy = visible_text(&output, "Copy command").expect("visible copy button");
+            let (copied, actions) = click(|events| frame(&mut data, events), copy);
+            assert!(actions.is_empty());
+            assert!(copied.platform_output.commands.iter().any(|output| {
+                matches!(output, egui::OutputCommand::CopyText(value) if value == &command)
+            }));
+            let (_, actions) = click(|events| frame(&mut data, events), position);
+            let [Action::Respond(target, run, request_id, result)] = actions.as_slice() else {
+                panic!("expected exactly one response");
+            };
+            assert_eq!(
+                (target, run.as_str(), request_id, result),
+                (&key, "run", &json!(0), &json!({"decision": decision}))
+            );
+            data.transcripts
+                .get_mut(&tag)
+                .unwrap()
+                .apply(&json!({"seq":2,"kind":"request_answered","data":{"request_id":0}}))
+                .unwrap();
+            let (output, actions) = frame(&mut data, vec![]);
+            assert!(actions.is_empty());
+            assert!(visible_text(&output, label).is_none());
+        }
     }
 
     #[test]
@@ -1272,7 +1447,8 @@ mod tests {
         ] {
             let mut transcript = Transcript::default();
             transcript.apply(&json!({"seq":1,"kind":"backend","data":{"id":0,"method":"mcpServer/elicitation/request","params":{"serverName":"fixture","message":"Allow Computer Use to use Example App?","mode":"form","requestedSchema":{"type":"object","properties":{}}}}})).unwrap();
-            let Action::Respond(key, run, request_id, result) = click_request(&transcript, label)
+            let Action::Respond(key, run, request_id, result) =
+                click_request(&transcript, label, "Allow Computer Use to use Example App?")
             else {
                 panic!("response action")
             };
@@ -1288,7 +1464,7 @@ mod tests {
 
     #[test]
     #[ignore = "scripts/desktop-smoke.py supplies private paired daemons"]
-    fn real_daemon_boundary_elicitation() {
+    fn real_daemon_boundary_backend_requests() {
         use crate::client::{Bus, Client, Update};
         use crate::model::Destination;
         use std::{
@@ -1299,13 +1475,15 @@ mod tests {
         let client = Client::new(std::env::var("BOXEN_GUI_TEST_URL").unwrap(), &home).unwrap();
         let destination: Destination =
             serde_json::from_str(&std::env::var("BOXEN_GUI_TEST_DEST").unwrap()).unwrap();
-        for (label, expected) in [
-            ("Approve", "ACCEPT"),
-            ("Decline", "DECLINE"),
-            ("Cancel", "CANCEL"),
+        let elicitation_text = "Allow Computer Use to use Example App?";
+        for (label, prompt, prompt_text) in [
+            ("Approve", "ELICITATION_ACCEPT", elicitation_text),
+            ("Decline", "ELICITATION_DECLINE", elicitation_text),
+            ("Cancel", "ELICITATION_CANCEL", elicitation_text),
+            ("Approve once", "LONG_COMMAND_REVIEW", "Approval requested"),
         ] {
             let id = crate::new_id();
-            client.operation(&destination, json!({"op":"start","spec":{"id":id,"thread_id":id,"backend":"codex","model":"fixture","prompt":format!("ELICITATION_{expected}")}})).unwrap();
+            client.operation(&destination, json!({"op":"start","spec":{"id":id,"thread_id":id,"backend":"codex","model":"fixture","prompt":prompt}})).unwrap();
             let bus = Bus::new(egui::Context::default());
             client.watch(
                 destination.clone(),
@@ -1329,7 +1507,7 @@ mod tests {
                         }
                         if !answered && transcript.rows.iter().any(|row| row.request.is_some()) {
                             let Action::Respond(_, _, request_id, result) =
-                                click_request(&transcript, label)
+                                click_request(&transcript, label, prompt_text)
                             else {
                                 panic!("response action")
                             };

@@ -92,9 +92,13 @@ A peer address locates an already-pinned identity; it grants no new trust.
   submits; cancellation is a separate control.
 
 Pending backend requests appear in Messages and Activity with their original
-question and response controls. Command approvals and MCP permission requests
-offer Approve, Decline and Cancel. MCP requests show the server and supplied
-parameter labels; nonempty forms expose their schema and a JSON values editor.
+question and response controls. Pending command approvals sit above history in
+both views. The full command is scrollable and copyable, with the backend's
+offered decisions below the details. **Approve once** applies to the pending
+command. Session and policy options have separate labels when offered.
+MCP permission requests offer Approve, Decline and Cancel and show the server
+and supplied parameter labels. Nonempty forms expose their schema and a JSON
+values editor.
 Other backend requests remain visible with a JSON response editor. Replies use
 the existing authenticated control path after an explicit response action.
 Replay preserves pending requests. An answered or backend-resolved request loses
@@ -167,10 +171,13 @@ cursor replay, repeated transparent stream renewal, final response and exact-ID
 retry. Tests shorten the observation lease to 500 ms so several renewals occur
 inside one controlled backend workload. The backend is `tests/fake-codex.py`;
 these checks do not claim real-model inference evidence.
-The same boundary test replays MCP permission requests, clicks each response
-through the desktop renderer, sends it across the paired transport, and checks
-the backend's exact response and resolved state. Projection tests also cover
-numeric request ID zero, repeated replay and backend-side resolution.
+The boundary test clicks MCP permission responses and a one-time approval for
+a long command through the desktop renderer, sends the decisions across the
+paired transport, and checks the backend's exact response and resolved state.
+A short-pane pointer test covers both conversation views, full command copying,
+and removal of the decision controls after replay of the answer. Projection
+tests also cover numeric request ID zero, repeated replay and backend-side
+resolution.
 
 Native UI checks additionally exercise preview/pin, palette search/Enter,
 message submission with live remote activity, moving conversation and list panes

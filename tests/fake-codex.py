@@ -124,6 +124,17 @@ def work(prompt):
             result = responses.pop(0)
         assert result == {"action": expected, "content": {} if expected == "accept" else None}, result
         notification("serverRequest/resolved", {"requestId": 0})
+    if prompt == "LONG_COMMAND_REVIEW":
+        emit({"id": 0, "method": "item/commandExecution/requestApproval", "params": {
+            "threadId": thread, "turnId": "fixture-turn", "itemId": "command",
+            "command": "echo sample output\n" * 200,
+            "availableDecisions": ["accept", {"acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": ["echo"]}}, "cancel"]}})
+        with response_ready:
+            assert response_ready.wait_for(lambda: 0 in responses, timeout=20), "command was not answered"
+            result = responses.pop(0)
+        assert result == {"decision": "accept"}, result
+        notification("serverRequest/resolved", {"requestId": 0})
     if "APPROVAL" in prompt and not prompt.startswith("TOOL_APPROVALS:"):
         emit({"id": "approval-1", "method": "item/commandExecution/requestApproval", "params": {"threadId": thread, "turnId": "fixture-turn", "command": "fixture command", "itemId": "command"}})
         while not approved.wait(0.02) and not cancel.is_set():

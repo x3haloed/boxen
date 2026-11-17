@@ -60,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
             if 'cwd' not in spec:
                 expected=homes[1].resolve()/'threads'/ident
                 assert accepted['record']['automatic_cwd'] and expected.is_dir()
-                assert pathlib.Path(accepted['record']['spec']['cwd'])==expected
+                assert pathlib.Path(accepted['record']['spec']['cwd']).samefile(expected)
                 assert not (homes[0]/'threads'/ident).exists()
                 deadline=time.monotonic()+10
                 while (snapshot:=operation({'op':'get','id':ident}))['status']!='completed':
