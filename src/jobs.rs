@@ -7,8 +7,9 @@ use crate::{
     state,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Value, json, value::RawValue};
 use std::{
+    borrow::Cow,
     collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
@@ -197,7 +198,7 @@ mod tests {
         drop(run);
         drop(reopened);
 
-        let reopened = Jobs::open(path, "missing-codex".into(), owner.clone()).unwrap();
+        let reopened = Jobs::open(path.clone(), "missing-codex".into(), owner.clone()).unwrap();
         let run = reopened.get(&owner, &id).unwrap();
         let (first, snapshot) = run.batch(2, false).unwrap();
         assert_eq!(snapshot.last_seq, 5);
@@ -214,6 +215,13 @@ mod tests {
         assert_eq!(context[1].data["text"], "retained");
         drop(run);
         drop(reopened);
+        OpenOptions::new()
+            .append(true)
+            .open(path.join(&id).join("events.jsonl"))
+            .unwrap()
+            .write_all(b"{\"seq\":6,\"at\":0,\"kind\":\"backend\",\"data\":[1,]}\n")
+            .unwrap();
+        assert!(Jobs::open(path, "missing-codex".into(), owner).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
@@ -375,6 +383,61 @@ pub fn terminal(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
 }
 
+#[derive(Deserialize)]
+struct JournalRow<'a> {
+    seq: u64,
+    #[serde(rename = "at")]
+    _at: u64,
+    #[serde(borrow)]
+    kind: Cow<'a, str>,
+    #[serde(borrow)]
+    data: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct BackendRoute<'a> {
+    #[serde(borrow)]
+    method: Cow<'a, str>,
+}
+
+#[derive(Deserialize)]
+struct InferenceRoute<'a> {
+    #[serde(borrow)]
+    event: InferenceFrameType<'a>,
+}
+
+#[derive(Deserialize)]
+struct InferenceFrameType<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Cow<'a, str>,
+}
+
+#[derive(Default)]
+enum EventProjection {
+    #[default]
+    None,
+    NativeSession,
+    CompletedItem,
+    InferenceHealth,
+}
+
+impl EventProjection {
+    fn backend(method: &str) -> Self {
+        match method {
+            "thread/started" => Self::NativeSession,
+            "item/completed" => Self::CompletedItem,
+            _ => Self::None,
+        }
+    }
+
+    fn inference(kind: &str) -> Self {
+        match kind {
+            "response_headers" | "exchange_failed" => Self::InferenceHealth,
+            _ => Self::None,
+        }
+    }
+}
+
 /// Derived from the authoritative JSONL journal. Payloads are read on demand.
 struct Journal {
     path: PathBuf,
@@ -401,33 +464,31 @@ impl Journal {
         self.ends.last().copied().unwrap_or(0)
     }
 
-    fn index(&mut self, event: &Event, bytes: usize) {
+    fn index(&mut self, kind: &str, bytes: usize, projection: EventProjection) {
         let index = self.ends.len();
         self.ends.push(self.len() + bytes as u64);
-        if let Some(indices) = self.by_kind.get_mut(&event.kind) {
+        if let Some(indices) = self.by_kind.get_mut(kind) {
             indices.push(index);
         } else {
-            self.by_kind.insert(event.kind.clone(), vec![index]);
+            self.by_kind.insert(kind.into(), vec![index]);
         }
-        // Index the few backend records used in projections independently of
-        // streamed deltas and raw inference frames.
-        match event.kind.as_str() {
-            "backend" if event.data["method"] == "thread/started" => {
-                self.native_sessions.push(index);
-            }
-            "backend" if event.data["method"] == "item/completed" => {
-                self.completed_items.push(index);
-            }
-            "inference_frame"
-                if matches!(
-                    event.data["event"]["type"].as_str(),
-                    Some("response_headers" | "exchange_failed")
-                ) =>
-            {
-                self.inference_health_frames.push(index);
-            }
-            _ => {}
+        match projection {
+            EventProjection::None => {}
+            EventProjection::NativeSession => self.native_sessions.push(index),
+            EventProjection::CompletedItem => self.completed_items.push(index),
+            EventProjection::InferenceHealth => self.inference_health_frames.push(index),
         }
+    }
+
+    fn index_event(&mut self, event: &Event, bytes: usize) {
+        let projection = match event.kind.as_str() {
+            "backend" => EventProjection::backend(event.data["method"].as_str().unwrap_or("")),
+            "inference_frame" => {
+                EventProjection::inference(event.data["event"]["type"].as_str().unwrap_or(""))
+            }
+            _ => EventProjection::None,
+        };
+        self.index(&event.kind, bytes, projection);
     }
 
     fn positions(&self, kind: &str) -> &[usize] {
@@ -484,7 +545,7 @@ impl Journal {
             file.set_len(previous_len).and_then(|()| file.sync_data())?;
             return Err(error.into());
         }
-        self.index(event, bytes.len());
+        self.index_event(event, bytes.len());
         Ok(())
     }
 }
@@ -776,12 +837,29 @@ fn load_run(path: &std::path::Path, id: &str) -> Result<Arc<Run>> {
             discarded_tail = line.len();
             break;
         }
-        let event: Event = serde_json::from_slice(&line).map_err(|_| "corrupt event log")?;
-        if event.seq != snapshot.last_seq + 1 {
+        // Validate the envelope and retain just metadata for normal journal rows.
+        // Decoding arbitrary provider output and tool payloads here builds large
+        // transient heaps on portable allocators even if each value is dropped.
+        let row: JournalRow<'_> = serde_json::from_slice(&line).map_err(|_| "corrupt event log")?;
+        if row.seq != snapshot.last_seq + 1 {
             return Err("event log sequence mismatch".into());
         }
-        project(&mut snapshot, &event);
-        journal.index(&event, line.len());
+        let projection = match row.kind.as_ref() {
+            "backend" => serde_json::from_str::<BackendRoute<'_>>(row.data.get())
+                .map(|event| EventProjection::backend(&event.method))
+                .unwrap_or_default(),
+            "inference_frame" => serde_json::from_str::<InferenceRoute<'_>>(row.data.get())
+                .map(|frame| EventProjection::inference(&frame.event.kind))
+                .unwrap_or_default(),
+            "status" | "backend_thread" => {
+                let event = serde_json::from_slice(&line).map_err(|_| "corrupt event log")?;
+                project(&mut snapshot, &event);
+                EventProjection::None
+            }
+            _ => EventProjection::None,
+        };
+        snapshot.last_seq = row.seq;
+        journal.index(&row.kind, line.len(), projection);
     }
     logging::record(
         if discarded_tail == 0 {

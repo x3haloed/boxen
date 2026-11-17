@@ -361,7 +361,7 @@ impl Jobs {
             serde_json::to_writer(&mut bytes, &event)?;
             bytes.push(b'\n');
             project(&mut snapshot, &event);
-            journal.index(&event, bytes.len() - start);
+            journal.index_event(&event, bytes.len() - start);
         }
         state::write_new(&staging.join("events.jsonl"), &bytes)?;
         // Interrupted staging is never a run; complete files are published together.
