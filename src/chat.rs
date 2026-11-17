@@ -12,13 +12,17 @@ pub fn exchange(
     endpoint: &str,
     key: Option<&str>,
     body: &Value,
-    seconds: u64,
+    deadline_seconds: Option<u64>,
     emit: &mut impl FnMut(Value) -> Result<()>,
 ) -> Result<()> {
     let agent = ureq::Agent::config_builder()
         .max_redirects(0)
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(seconds)))
+        .timeout_global(deadline_seconds.map(Duration::from_secs))
+        .timeout_resolve(Some(Duration::from_secs(20)))
+        .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_send_request(Some(Duration::from_secs(30)))
+        .timeout_send_body(Some(Duration::from_secs(30)))
         .build()
         .new_agent();
     let mut request = agent.post(endpoint).header("Accept", "text/event-stream");

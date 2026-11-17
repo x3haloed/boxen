@@ -111,13 +111,23 @@ fn preview(record: &Value) -> Value {
 }
 impl Source {
     pub fn from_runs(runs: &[Arc<Run>]) -> Result<Self> {
-        let mut entries = Vec::new();
-        let mut events = Vec::new();
+        let mut source = Self {
+            entries: Vec::new(),
+            events: Vec::new(),
+        };
         for run in runs {
+            let mut after = 0;
+            source.extend_run(run, &mut after)?;
+        }
+        Ok(source)
+    }
+    pub(crate) fn extend_run(&mut self, run: &Run, after: &mut u64) -> Result<()> {
+        let (events, through) = run.context_events_after(*after)?;
+        if !events.is_empty() {
             let snapshot = run.snapshot();
-            for event in run.context_events()? {
+            for event in events {
                 if event.kind == "inference_message" {
-                    entries.push(Entry {
+                    self.entries.push(Entry {
                         id: format!("{}:{}", snapshot.record.spec.id, event.seq),
                         at: event.at,
                         message: event.data,
@@ -126,11 +136,12 @@ impl Source {
                         } else {json!({"run_id":snapshot.record.spec.id,"thread_id":snapshot.record.spec.thread_id,"backend":snapshot.record.spec.backend,"model":if snapshot.record.spec.model.is_empty(){crate::inference::DEFAULT_MODEL}else{&snapshot.record.spec.model},"resident_id":snapshot.record.spec.resident_id,"scheduled":snapshot.record.scheduled})},
                     });
                 } else {
-                    events.push(json!({"id":format!("{}:{}",snapshot.record.spec.id,event.seq),"at":event.at,"kind":event.kind,"data":event.data}));
+                    self.events.push(json!({"id":format!("{}:{}",snapshot.record.spec.id,event.seq),"at":event.at,"kind":event.kind,"data":event.data}));
                 }
             }
         }
-        Ok(Self { entries, events })
+        *after = through;
+        Ok(())
     }
     pub fn boundary(&self) -> Option<&Value> {
         self.events

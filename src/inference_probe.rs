@@ -80,9 +80,13 @@ pub fn run(command: &str, mut args: Vec<String>) -> Result<()> {
         || json!({"endpoint":endpoint}),
         || Value::Null,
     );
-    let result = crate::chat::exchange(&endpoint, key.as_deref(), &body, seconds, &mut |event| {
-        journal.append(event)
-    });
+    let result = crate::chat::exchange(
+        &endpoint,
+        key.as_deref(),
+        &body,
+        Some(seconds),
+        &mut |event| journal.append(event),
+    );
     // Transport setup errors are sanitized at the boundary; HTTP error bodies are not formatted.
     if let Err(error) = &result {
         let reason = error.to_string();

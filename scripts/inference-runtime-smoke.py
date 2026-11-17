@@ -29,6 +29,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
         messages=body['messages'];last_user=max(i for i,m in enumerate(messages) if m['role']=='user')
         prompt=messages[last_user]['content'];after=messages[last_user+1:]
         tools=[m for m in after if m['role']=='tool']
+        if prompt=='QUIET_HEADERS':time.sleep(130)
         self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('X-Provider-Name','fixture-only');self.send_header('X-Generation-Id','fixture-generation');self.end_headers()
         def emit(value):
             self.wfile.write(('data: '+json.dumps(value)+'\n\n').encode());self.wfile.flush()
@@ -42,6 +43,22 @@ class Provider(http.server.BaseHTTPRequestHandler):
             emit(frame({'content':value[:len(value)//2],'future_field':{'kept':True},'reasoning_details':[{'index':0,'type':'reasoning.encrypted','data':'fixture-opaque','id':'opaque-1'}]}))
             time.sleep(.12);emit(frame({'content':value[len(value)//2:]}));emit(frame(finish='stop'))
         try:
+            if prompt in {'LONG_STREAM', 'QUIET_STREAM', 'ABANDON_STREAM'}:
+                emit(frame({'content':'begin '}))
+                if prompt=='ABANDON_STREAM':
+                    time.sleep(8)
+                    return
+                if prompt=='QUIET_STREAM':
+                    time.sleep(130)
+                else:
+                    for _ in range(13):
+                        time.sleep(10)
+                        emit(frame({'reasoning':'working'}))
+                emit(frame({'content':'completed'}))
+                emit(frame(finish='stop'))
+                self.wfile.write(b'data: [DONE]\n\n')
+                self.wfile.flush()
+                return
             if prompt=='SLOW_HTTP':time.sleep(10);return
             if prompt.startswith(('Mailbox activation.','Message activation.')):
                 batch=json.loads(prompt.split('\n',1)[1]);direction=batch['directions']
@@ -87,6 +104,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
                         text('BUILT_IN_WORK_COMPLETE')
                     else:call('boxen_work',{'action':'read','request_id':'built-in-child','after':value.get('next_after',0),'wait_ms':20000})
             elif prompt=='CHILD_REQUEST':text('CHILD_RESPONSE')
+            elif prompt=='QUIET_HEADERS':text('delayed headers')
             elif prompt=='FOLLOWUP':
                 assert any(m.get('reasoning_details') for m in messages if m['role']=='assistant')
                 assert any(m.get('future_field')=={'kept':True} for m in messages)
@@ -158,6 +176,32 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
             assert time.monotonic()<deadline;time.sleep(.1)
         return api({'op':'client_inbox','client_id':client},local=True)['messages']
     try:
+        idle_policy=data[1]/'runtime-policy.json'
+        idle_policy.write_text(json.dumps({'inference_idle_timeout_seconds':2}))
+        abandoned=start('ABANDON_STREAM')
+        idle_policy.unlink()  # The accepted run retains its own policy.
+        abandoned_events,abandoned_state=collect(abandoned)
+        assert abandoned_state['status']=='interrupted'
+        assert any(e['kind']=='inference_frame' and
+                   e['data']['event'].get('idle_timeout_seconds')==2 for e in abandoned_events)
+        print('PASS explicit inactivity policy is captured and recorded on abandonment')
+        if '--long-stream' in sys.argv[2:]:
+            start_time=time.monotonic()
+            productive=start('LONG_STREAM')
+            quiet=start('QUIET_STREAM')
+            late_headers=start('QUIET_HEADERS')
+            quiet_events,ended=collect(quiet)
+            assert ended['status']=='completed', ended['status']
+            details=[e['data']['detail'] for e in quiet_events if e['kind']=='status']
+            assert details.count('Waiting for the inference provider. The run remains active.')==1
+            assert details.count('The inference provider resumed responding')==1
+            _,ended=collect(productive)
+            assert ended['status']=='completed', ended['status']
+            assert result(productive)['response']==result(quiet)['response']=='begin completed'
+            assert collect(late_headers)[1]['status']=='completed'
+            assert result(late_headers)['response']=='delayed headers'
+            assert time.monotonic()-start_time >= 130
+            print('PASS productive and quiet SSE beyond the former wall-clock limit with visible wait and recovery')
         assert api({'op':'runtime_info'})['backends'][1]['configured']
         log=directory/'runtime-log.jsonl';api({'op':'log_file','path':str(log),'filter':{'targets':['runtime'],'events':['inference.']}})
         run_id=secrets.token_hex(32)

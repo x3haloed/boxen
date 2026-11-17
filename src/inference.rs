@@ -91,7 +91,8 @@ pub fn worker() -> Result<()> {
         &config.endpoint,
         key.as_deref(),
         &input["body"],
-        120,
+        // The parent supervises observable SSE progress and owns cancellation.
+        None,
         &mut |event| {
             println!("{event}");
             std::io::stdout().flush()?;
@@ -289,7 +290,13 @@ fn exchange(
             }
         }
     });
-    let deadline = Instant::now() + Duration::from_secs(125);
+    const WAIT_NOTICE: Duration = Duration::from_secs(60);
+    let abandonment = record
+        .runtime_policy
+        .inference_idle_timeout_seconds
+        .map(|seconds| Duration::from_secs(u64::from(seconds)));
+    let mut waiting_reported = false;
+    let mut last_frame = Instant::now();
     let mut retained = Vec::new();
     let mut bytes = 0;
     loop {
@@ -297,11 +304,23 @@ fn exchange(
             run.status("cancelled","Inference connection closed on cancellation; upstream computation or billing may already have occurred")?;
             return Ok(None);
         }
-        if Instant::now() > deadline {
-            return Err("inference worker exceeded its request deadline".into());
-        }
         match events.recv_timeout(Duration::from_millis(50)) {
             Ok(Ok(event)) => {
+                if waiting_reported
+                    && matches!(
+                        event["type"].as_str(),
+                        Some("response_headers" | "provider_frame")
+                    )
+                {
+                    run.status("running", "The inference provider resumed responding")?;
+                    run.diagnostic(
+                        Level::Info,
+                        "inference.exchange_resumed",
+                        || json!({"step":step,"purpose":purpose,"quiet_ms":last_frame.elapsed().as_millis()}),
+                        || Value::Null,
+                    );
+                    waiting_reported = false;
+                }
                 bytes += serde_json::to_vec(&event)?.len();
                 if bytes > 16 * 1024 * 1024 {
                     return Err("inference exchange exceeds 16 MiB".into());
@@ -350,6 +369,7 @@ fn exchange(
                 let failed = event["type"] == "exchange_failed";
                 let failure_reason=event["reason"].as_str().unwrap_or("inference provider exchange failed; partial output remains retained and has not been accepted as conversation state").to_owned();
                 retained.push(event);
+                last_frame = Instant::now();
                 if failed {
                     run.diagnostic(
                         Level::Warn,
@@ -370,7 +390,37 @@ fn exchange(
                 }
             }
             Ok(Err(error)) => return Err(error.into()),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let quiet = last_frame.elapsed();
+                if abandonment.is_some_and(|limit| quiet >= limit) {
+                    let reason =
+                        "inference exchange abandoned under the configured inactivity policy";
+                    run.append(
+                        "inference_frame",
+                        json!({"step":step,"purpose":purpose,"event":{"type":"exchange_failed","reason":reason,"idle_timeout_seconds":record.runtime_policy.inference_idle_timeout_seconds}}),
+                    )?;
+                    run.diagnostic(
+                        Level::Warn,
+                        "inference.exchange_abandoned",
+                        || json!({"step":step,"purpose":purpose,"idle_ms":quiet.as_millis()}),
+                        || Value::Null,
+                    );
+                    return Err(reason.into());
+                }
+                if !waiting_reported && quiet >= WAIT_NOTICE {
+                    run.status(
+                        "running",
+                        "Waiting for the inference provider. The run remains active.",
+                    )?;
+                    run.diagnostic(
+                        Level::Info,
+                        "inference.exchange_waiting",
+                        || json!({"step":step,"purpose":purpose,"frames":retained.len(),"idle_ms":quiet.as_millis()}),
+                        || Value::Null,
+                    );
+                    waiting_reported = true;
+                }
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err("inference worker ended before exchange completion".into());
             }
@@ -622,7 +672,17 @@ pub fn execute(
     if let Some(r) = &resident {
         run.append("resident_context",json!({"resident_id":r.id,"revision":r.revision,"machine_id":r.machine_id,"used_bytes":r.used_bytes(),"quota_bytes":r.quota_bytes}))?;
     }
-    let mut view = context::View::new(history.settings(spec), &history.source(&run)?)?;
+    let context_started = Instant::now();
+    let mut source = history.source()?;
+    let mut context_cursor = 0;
+    source.extend_run(&run, &mut context_cursor)?;
+    let mut view = context::View::new(history.settings(spec), &source)?;
+    run.diagnostic(
+        Level::Debug,
+        "inference.context.loaded",
+        || json!({"elapsed_ms":context_started.elapsed().as_millis()}),
+        || Value::Null,
+    );
     let mut system = format!(
         "This is Boxen's built-in agent runtime on machine {} ({}/{}). The working directory is {}. Shell execution has Full access under the selected host account's operating-system permissions and credential context. Tools describe their effects. Tool results marked unknown do not establish whether an effect occurred; repeating an effectful call can duplicate its effects.",
         run.snapshot()
@@ -698,8 +758,15 @@ pub fn execute(
             return Ok(());
         }
         apply_steering(&run, &mut pending, &mut Vec::new())?;
-        let source = history.source(&run)?;
+        let context_started = Instant::now();
+        source.extend_run(&run, &mut context_cursor)?;
         let plan = view.plan(&source)?;
+        run.diagnostic(
+            Level::Debug,
+            "inference.context.planned",
+            || json!({"step":step,"elapsed_ms":context_started.elapsed().as_millis()}),
+            || Value::Null,
+        );
         let first = view.needs_boundary(&plan);
         if first {
             let mut summary = if view.settings.mode == context::Mode::Summary {
@@ -919,8 +986,8 @@ pub fn execute(
                     if args["action"] == "compact" {
                         view.force = true;
                     }
-                    history
-                        .source(&run)?
+                    source.extend_run(&run, &mut context_cursor)?;
+                    source
                         .operation(
                             &run,
                             args,

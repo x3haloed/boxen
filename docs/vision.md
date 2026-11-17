@@ -24,6 +24,8 @@ Movement authority is configurable. Users can require explicit direction or gran
 
 Find a way to recover and make the incident legible. Useful uptime with an honest record of what went wrong beats aborting over uncertainty. Correctness should support continued life, without requiring agents or humans to collect receipts and certify state before every next step. Preserve uncertainty, isolate failures, and provide a path forward. Recovery must not silently repeat tool effects, erase evidence, or claim lossless continuity when reconstruction was partial.
 
+Autonomous work can continue for days without a human reply. A quiet period alone does not end a run under the default policy.
+
 ## Communication and activation
 
 Identity-bearing agents have durable message intake. Boxen mail is the bundled connector; external messaging services attach through independently configured instances with explicit account, credential and resident bindings. Receiving information, getting execution time, and sending are independent, allowing batched inputs, self-directed activations, and optional replies. Assistant output is private narration rather than an implicit outgoing message. Identity-less threads instead remain request/response control channels for workloads, addressable by thread ID through distinct tools.

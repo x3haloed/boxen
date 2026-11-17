@@ -12,6 +12,8 @@ pub struct Policy {
     pub max_output_tokens: Option<u32>,
     pub max_message_sends: Option<u32>,
     pub max_exchanges: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_idle_timeout_seconds: Option<u32>,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -21,6 +23,7 @@ impl Default for Policy {
             max_output_tokens: Some(2048),
             max_message_sends: Some(16),
             max_exchanges: Some(16),
+            inference_idle_timeout_seconds: None,
         }
     }
 }
@@ -51,6 +54,11 @@ impl Policy {
                 .is_some_and(|n| !(1..=65536).contains(&n))
         {
             return Err("runtime policy numeric ranges are output tokens 1–131072, message attempts 0–256, exchanges 1–65536; null removes the corresponding cap".into());
+        }
+        if self.inference_idle_timeout_seconds == Some(0) {
+            return Err(
+                "inference_idle_timeout_seconds is a positive number of seconds or null".into(),
+            );
         }
         if self.providers.len() > 16
             || self.providers.iter().any(|p| {

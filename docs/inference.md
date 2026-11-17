@@ -47,7 +47,9 @@ A crash or cancellation between an assistant call and its durable result leaves 
 
 The built-in runtime now has selectable summary compaction and summary-free verbatim continuity, backed by the same original journals, exact paged history, source bundles, coverage records, and provenance. Anonymous threads default to summary; residents default to verbatim. Policy selection is independent of communication style. Settings, failure behavior, bounds, and verification are documented in [built-in context policies](context.md). The former 512 KiB whole-run projection is retired.
 
-Other initial bounds: 16 inference exchanges per activation, 2048 requested output tokens per exchange, 120 seconds per HTTP request plus a supervisor deadline, 24 MiB outbound request, 1 MiB SSE line/frame, and 16 MiB received exchange data. The host's existing eight-active-run limit remains. Provider accounting, tool schemas, and media budgeting need broader work before these become general-purpose resource policies.
+Other initial bounds: 16 inference exchanges per activation, 2048 requested output tokens per exchange, bounded DNS and connection setup and request transmission, 24 MiB outbound request, 1 MiB SSE line/frame, and 16 MiB received exchange data. The host's existing eight-active-run limit remains. Provider accounting, tool schemas, and media budgeting need broader work before these become general-purpose resource policies.
+
+The built-in runtime applies setup deadlines to DNS, connection establishment and request transmission. There is no default deadline for a provider to reply or finish streaming. After 60 seconds without a response header or frame, Boxen records a waiting notice while the run remains active. It records resumed activity when the next response arrives. A host can opt into exchange abandonment by setting `inference_idle_timeout_seconds` to a positive integer in `runtime-policy.json`. Omission or `null` allows indefinite waiting until the provider responds, transport fails, or the run is cancelled. The accepted run retains its policy. This setting measures exchange inactivity and imposes no overall run lifetime.
 
 Cancel closes an inference child promptly; upstream processing or billing may already have occurred. Cancel during a shell call records uncertain effects and terminates its owned process group on the verified Unix path. Anonymous steering queues for the next inference boundary, including after a running tool; resident correspondence remains mailbox input for a later activation. Arbitrary backend input-response controls are explicitly rejected because this runtime has no such pending request.
 
@@ -59,6 +61,8 @@ Run the deterministic integration proof with either artifact:
 
 ```sh
 python3 scripts/inference-runtime-smoke.py target/release/boxen
+# The optional timing check runs for just over two minutes.
+python3 scripts/inference-runtime-smoke.py target/release/boxen --long-stream
 python3 scripts/inference-runtime-smoke.py target/cosmo/release/boxen.com
 ```
 

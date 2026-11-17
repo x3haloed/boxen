@@ -207,12 +207,11 @@ mod tests {
         let (last, _) = run.batch(3, false).unwrap();
         assert_eq!(last.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![4, 5]);
         assert_eq!(last[0].data["text"], large);
-        let context = run.context_events().unwrap();
-        assert_eq!(
-            context.iter().map(|e| e.seq).collect::<Vec<_>>(),
-            vec![3, 5]
-        );
-        assert_eq!(context[1].data["text"], "retained");
+        let (context, cursor) = run.context_events_after(3).unwrap();
+        assert_eq!(cursor, 5);
+        assert_eq!(context.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![5]);
+        assert_eq!(context[0].data["text"], "retained");
+        assert!(run.context_events_after(cursor).unwrap().0.is_empty());
         drop(run);
         drop(reopened);
         OpenOptions::new()
@@ -584,15 +583,26 @@ impl Run {
             payload,
         );
     }
-    pub fn context_events(&self) -> Result<Vec<Event>> {
-        self.events_of(&[
+    pub(crate) fn context_events_after(&self, after: u64) -> Result<(Vec<Event>, u64)> {
+        let inner = self.inner.lock().unwrap();
+        let kinds = [
             "inference_message",
             "context_boundary",
             "context_bundle",
             "context_note",
             "context_compact_requested",
             "context_exposure",
-        ])
+        ];
+        let positions = Journal::ordered(kinds.iter().flat_map(|kind| {
+            let positions = inner.journal.positions(kind);
+            let start = positions.partition_point(|index| (*index as u64) < after);
+            positions[start..].iter().copied()
+        }));
+        let events = inner
+            .journal
+            .read(positions.into_iter())
+            .collect::<Result<_>>()?;
+        Ok((events, inner.snapshot.last_seq))
     }
     pub fn cancellation_requested(&self) -> bool {
         self.inner.lock().unwrap().cancel_requested
@@ -621,15 +631,6 @@ impl Run {
             .journal
             .read(inner.journal.positions(kind).iter().copied())
             .collect()
-    }
-    fn events_of(&self, kinds: &[&str]) -> Result<Vec<Event>> {
-        let inner = self.inner.lock().unwrap();
-        let positions = Journal::ordered(
-            kinds
-                .iter()
-                .flat_map(|kind| inner.journal.positions(kind).iter().copied()),
-        );
-        inner.journal.read(positions.into_iter()).collect()
     }
     pub fn owner(&self) -> String {
         self.inner.lock().unwrap().snapshot.record.owner.clone()
@@ -917,10 +918,8 @@ impl History {
     pub fn journal_directory(&self) -> &std::path::Path {
         &self.directory
     }
-    pub fn source(&self, current: &Arc<Run>) -> Result<crate::context::Source> {
-        let mut runs = self.runs.clone();
-        runs.push(current.clone());
-        crate::context::Source::from_runs(&runs)
+    pub fn source(&self) -> Result<crate::context::Source> {
+        crate::context::Source::from_runs(&self.runs)
     }
     pub fn settings(&self, spec: &Spec) -> crate::context::Settings {
         spec.context
