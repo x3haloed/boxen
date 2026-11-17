@@ -110,12 +110,12 @@ fn preview(record: &Value) -> Value {
     p
 }
 impl Source {
-    pub fn from_runs(runs: &[Arc<Run>]) -> Self {
+    pub fn from_runs(runs: &[Arc<Run>]) -> Result<Self> {
         let mut entries = Vec::new();
         let mut events = Vec::new();
         for run in runs {
             let snapshot = run.snapshot();
-            for event in run.context_events() {
+            for event in run.context_events()? {
                 if event.kind == "inference_message" {
                     entries.push(Entry {
                         id: format!("{}:{}", snapshot.record.spec.id, event.seq),
@@ -130,7 +130,7 @@ impl Source {
                 }
             }
         }
-        Self { entries, events }
+        Ok(Self { entries, events })
     }
     pub fn boundary(&self) -> Option<&Value> {
         self.events

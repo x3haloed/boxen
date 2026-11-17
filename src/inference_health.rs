@@ -7,7 +7,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 
-pub(crate) fn project(runs: &[Arc<Run>]) -> Vec<Value> {
+pub(crate) fn project(runs: &[Arc<Run>]) -> Result<Vec<Value>> {
     let mut ordered = runs.to_vec();
     ordered.sort_by_key(|r| {
         let s = r.snapshot();
@@ -21,7 +21,16 @@ pub(crate) fn project(runs: &[Arc<Run>]) -> Vec<Value> {
             continue;
         }
         let mut headers: BTreeMap<(u64, String), Option<u64>> = BTreeMap::new();
-        for e in &inner.events {
+        let positions = jobs::Journal::ordered(
+            inner
+                .journal
+                .inference_health_frames
+                .iter()
+                .chain(inner.journal.positions("inference_exchange_completed"))
+                .copied(),
+        );
+        for e in inner.journal.read(positions.into_iter()) {
+            let e = e?;
             let purpose = e.data["purpose"].as_str().unwrap_or("workload").to_owned();
             if e.kind == "inference_exchange_completed" {
                 for ((thread, p, _), v) in rows.iter_mut() {
@@ -31,9 +40,6 @@ pub(crate) fn project(runs: &[Arc<Run>]) -> Vec<Value> {
                         v["resolved_run_id"] = json!(s.record.spec.id);
                     }
                 }
-                continue;
-            }
-            if e.kind != "inference_frame" {
                 continue;
             }
             let frame = &e.data["event"];
@@ -90,25 +96,25 @@ pub(crate) fn project(runs: &[Arc<Run>]) -> Vec<Value> {
             v["resolved_run_id"] = Value::Null;
         }
     }
-    rows.into_values().collect()
+    Ok(rows.into_values().collect())
 }
-pub(crate) fn context(runs: &[Arc<Run>]) -> String {
-    let mut rows = project(runs);
+pub(crate) fn context(runs: &[Arc<Run>]) -> Result<String> {
+    let mut rows = project(runs)?;
     if rows.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
     rows.sort_by_key(|v| std::cmp::Reverse(v["last_at"].as_u64().unwrap_or(0)));
     let total = rows.len();
     rows.truncate(8);
-    format!(
+    Ok(format!(
         "\nInference health is a coalesced projection of retained execution records, not correspondence. Counts describe observed failed exchanges. A resolved incident means a later exchange completed, not that earlier work succeeded. Earlier tool effects are not automatically repeated. Recent incident categories: {} of {}. {}",
         rows.len(),
         total,
         json!(rows)
-    )
+    ))
 }
 impl Jobs {
-    pub fn inference_health(&self, owner: &str, offset: usize) -> Value {
+    pub fn inference_health(&self, owner: &str, offset: usize) -> Result<Value> {
         let runs: Vec<_> = self
             .runs
             .lock()
@@ -117,7 +123,7 @@ impl Jobs {
             .filter(|r| r.snapshot().record.owner == owner)
             .cloned()
             .collect();
-        let mut rows = project(&runs);
+        let mut rows = project(&runs)?;
         rows.sort_by_key(|v| {
             (
                 v["active"] != true,
@@ -135,7 +141,9 @@ impl Jobs {
             || json!({"total":total,"offset":offset,"returned":page.len()}),
             || Value::Null,
         );
-        json!({"incidents":page,"total":total,"next_offset":if next<total{Some(next)}else{None}})
+        Ok(
+            json!({"incidents":page,"total":total,"next_offset":if next<total{Some(next)}else{None}}),
+        )
     }
     pub fn resume_inference(
         self: &Arc<Self>,

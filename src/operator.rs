@@ -211,7 +211,7 @@ pub fn operation(jobs: &Arc<Jobs>, actor: &str, request: &Value) -> Result<Value
                 for owner in jobs.owners() {
                     let mut offset = 0;
                     loop {
-                        let page = jobs.inference_health(&owner, offset);
+                        let page = jobs.inference_health(&owner, offset)?;
                         rows.extend(page["incidents"].as_array().cloned().unwrap_or_default());
                         if let Some(next) = page["next_offset"].as_u64() {
                             offset = next as usize;

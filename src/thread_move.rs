@@ -436,7 +436,9 @@ impl Jobs {
                 let run = self.operator_run(&file.run)?;
                 self.attachments
                     .transfer(&run.snapshot().record.spec.attachments, &send)?;
-                for event in &run.inner.lock().unwrap().events {
+                let inner = run.inner.lock().unwrap();
+                for event in inner.journal.read(0..inner.journal.ends.len()) {
+                    let event = event?;
                     if let Some(files) = event.data.get("attachments").and_then(Value::as_array) {
                         let files: Vec<crate::attachments::Attachment> =
                             serde_json::from_value(Value::Array(files.clone()))?;

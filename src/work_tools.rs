@@ -112,7 +112,7 @@ fn work_machine(jobs: &Arc<Jobs>, run: &Run, args: &Value) -> Result<Machine> {
     {
         for event in jobs
             .operator_run(&previous.record.spec.id)?
-            .retained_events("work_request")
+            .retained_events("work_request")?
         {
             let rank = ids
                 .iter()
@@ -320,14 +320,14 @@ fn request(jobs: &Arc<Jobs>, run: &Arc<Run>, call_id: &str, args: &Value) -> Res
         .remove("request_id");
     intent["machine"] = json!(machine.key);
     let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&intent)?));
-    let mut receipts = run.retained_events("work_request");
+    let mut receipts = run.retained_events("work_request")?;
     if args["request_id"].is_string() {
         for previous in jobs.operator_list().into_iter().filter(|s| {
             s.record.spec.thread_id == record.spec.thread_id && s.record.spec.id != record.spec.id
         }) {
             receipts.extend(
                 jobs.operator_run(&previous.record.spec.id)?
-                    .retained_events("work_request"),
+                    .retained_events("work_request")?,
             );
         }
     }
@@ -665,7 +665,7 @@ fn control(
         _ => return Err("Unknown work control".into()),
     };
     if let Some(old) = run
-        .retained_events("work_control")
+        .retained_events("work_control")?
         .into_iter()
         .find(|e| e.data["call_id"] == call_id)
     {
@@ -676,7 +676,7 @@ fn control(
             return Err("This call id already identifies another control".into());
         }
         if let Some(accepted) = run
-            .retained_events("work_control_accepted")
+            .retained_events("work_control_accepted")?
             .into_iter()
             .find(|e| e.data["call_id"] == call_id)
         {

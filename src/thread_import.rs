@@ -347,37 +347,32 @@ impl Jobs {
             .join(state::random_hex()?);
         state::private_dir(&staging)?;
         state::write_new(&staging.join("record.json"), &serde_json::to_vec(&record)?)?;
-        let mut bytes = Vec::new();
-        for event in &events {
-            serde_json::to_writer(&mut bytes, event)?;
-            bytes.push(b'\n');
-        }
-        state::write_new(&staging.join("events.jsonl"), &bytes)?;
+        let published = self.directory.join(&id);
+        let mut journal = Journal::new(published.join("events.jsonl"));
         let mut snapshot = Snapshot {
             record,
             status: "starting".into(),
             backend_thread: None,
             last_seq: 0,
         };
-        for event in &events {
-            project(&mut snapshot, event);
+        let mut bytes = Vec::new();
+        for event in events {
+            let start = bytes.len();
+            serde_json::to_writer(&mut bytes, &event)?;
+            bytes.push(b'\n');
+            project(&mut snapshot, &event);
+            journal.index(&event, bytes.len() - start);
         }
-        // Complete files are published together. Windows cannot rename a directory
-        // while a journal inside it is open, even when the file shares deletes.
-        // Interrupted staging is never a run; published history is recoverable.
-        let published = self.directory.join(&id);
+        state::write_new(&staging.join("events.jsonl"), &bytes)?;
+        // Interrupted staging is never a run; complete files are published together.
         fs::rename(&staging, &published)?;
-        let file = OpenOptions::new()
-            .append(true)
-            .open(published.join("events.jsonl"))?;
         runs.insert(
             snapshot.record.spec.id.clone(),
             Arc::new(Run {
                 inner: Mutex::new(Inner {
                     cancel_requested: false,
                     snapshot: snapshot.clone(),
-                    events,
-                    file,
+                    journal,
                     control: None,
                 }),
                 changed: Condvar::new(),

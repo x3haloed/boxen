@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -186,7 +186,33 @@ mod tests {
         drop(run);
         drop(jobs);
         let reopened = Jobs::open(path.clone(), "missing-codex".into(), owner.clone()).unwrap();
-        assert_eq!(reopened.get(&owner, &id).unwrap().snapshot().last_seq, 2);
+        let run = reopened.get(&owner, &id).unwrap();
+        assert_eq!(run.snapshot().last_seq, 2);
+        let large = "🌱".repeat(655_360);
+        run.append("inference_message", json!({"text":large}))
+            .unwrap();
+        run.append("backend", json!({"text":large})).unwrap();
+        run.append("context_note", json!({"text":"retained"}))
+            .unwrap();
+        drop(run);
+        drop(reopened);
+
+        let reopened = Jobs::open(path, "missing-codex".into(), owner.clone()).unwrap();
+        let run = reopened.get(&owner, &id).unwrap();
+        let (first, snapshot) = run.batch(2, false).unwrap();
+        assert_eq!(snapshot.last_seq, 5);
+        assert_eq!(first.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3]);
+        assert_eq!(first[0].data["text"], large);
+        let (last, _) = run.batch(3, false).unwrap();
+        assert_eq!(last.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![4, 5]);
+        assert_eq!(last[0].data["text"], large);
+        let context = run.context_events().unwrap();
+        assert_eq!(
+            context.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![3, 5]
+        );
+        assert_eq!(context[1].data["text"], "retained");
+        drop(run);
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -349,11 +375,124 @@ pub fn terminal(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
 }
 
+/// Derived from the authoritative JSONL journal. Payloads are read on demand.
+struct Journal {
+    path: PathBuf,
+    ends: Vec<u64>,
+    by_kind: HashMap<String, Vec<usize>>,
+    native_sessions: Vec<usize>,
+    completed_items: Vec<usize>,
+    inference_health_frames: Vec<usize>,
+}
+
+impl Journal {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            ends: Vec::new(),
+            by_kind: HashMap::new(),
+            native_sessions: Vec::new(),
+            completed_items: Vec::new(),
+            inference_health_frames: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> u64 {
+        self.ends.last().copied().unwrap_or(0)
+    }
+
+    fn index(&mut self, event: &Event, bytes: usize) {
+        let index = self.ends.len();
+        self.ends.push(self.len() + bytes as u64);
+        if let Some(indices) = self.by_kind.get_mut(&event.kind) {
+            indices.push(index);
+        } else {
+            self.by_kind.insert(event.kind.clone(), vec![index]);
+        }
+        // Index the few backend records used in projections independently of
+        // streamed deltas and raw inference frames.
+        match event.kind.as_str() {
+            "backend" if event.data["method"] == "thread/started" => {
+                self.native_sessions.push(index);
+            }
+            "backend" if event.data["method"] == "item/completed" => {
+                self.completed_items.push(index);
+            }
+            "inference_frame"
+                if matches!(
+                    event.data["event"]["type"].as_str(),
+                    Some("response_headers" | "exchange_failed")
+                ) =>
+            {
+                self.inference_health_frames.push(index);
+            }
+            _ => {}
+        }
+    }
+
+    fn positions(&self, kind: &str) -> &[usize] {
+        self.by_kind
+            .get(kind)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    fn ordered(positions: impl Iterator<Item = usize>) -> Vec<usize> {
+        let mut positions: Vec<_> = positions.collect();
+        positions.sort_unstable();
+        positions
+    }
+
+    fn read(&self, positions: impl Iterator<Item = usize>) -> impl Iterator<Item = Result<Event>> {
+        let mut reader = None;
+        let mut position = 0;
+        let mut line = Vec::new();
+        positions.map(move |index| {
+            let reader = match &mut reader {
+                Some(reader) => reader,
+                None => reader.insert(BufReader::new(File::open(&self.path)?)),
+            };
+            let start = index.checked_sub(1).map_or(0, |prior| self.ends[prior]);
+            let end = self.ends[index];
+            if start != position {
+                reader.seek_relative(i64::try_from(start)? - i64::try_from(position)?)?;
+            }
+            line.resize(usize::try_from(end - start)?, 0);
+            reader.read_exact(&mut line)?;
+            position = end;
+            let event: Event = serde_json::from_slice(&line)?;
+            if line.last() != Some(&b'\n') || event.seq != index as u64 + 1 {
+                return Err("event journal no longer matches its index".into());
+            }
+            Ok(event)
+        })
+    }
+
+    fn latest(&self, kind: &str) -> Result<Option<Event>> {
+        self.read(self.positions(kind).last().copied().into_iter())
+            .next()
+            .transpose()
+    }
+
+    fn append(&mut self, event: &Event, bytes: &[u8]) -> Result<()> {
+        let mut file = OpenOptions::new().write(true).open(&self.path)?;
+        let previous_len = self.len();
+        if file.seek(SeekFrom::End(0))? != previous_len {
+            return Err("event journal length no longer matches its index".into());
+        }
+        if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_data()) {
+            file.set_len(previous_len).and_then(|()| file.sync_data())?;
+            return Err(error.into());
+        }
+        self.index(event, bytes.len());
+        Ok(())
+    }
+}
+
 struct Inner {
     cancel_requested: bool,
     snapshot: Snapshot,
-    events: Vec<Event>,
-    file: File,
+    journal: Journal,
     control: Option<mpsc::Sender<Control>>,
 }
 
@@ -384,66 +523,52 @@ impl Run {
             payload,
         );
     }
-    pub fn context_events(&self) -> Vec<Event> {
-        self.inner
-            .lock()
-            .unwrap()
-            .events
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.kind.as_str(),
-                    "inference_message"
-                        | "context_boundary"
-                        | "context_bundle"
-                        | "context_note"
-                        | "context_compact_requested"
-                        | "context_exposure"
-                )
-            })
-            .cloned()
-            .collect()
+    pub fn context_events(&self) -> Result<Vec<Event>> {
+        self.events_of(&[
+            "inference_message",
+            "context_boundary",
+            "context_bundle",
+            "context_note",
+            "context_compact_requested",
+            "context_exposure",
+        ])
     }
     pub fn cancellation_requested(&self) -> bool {
         self.inner.lock().unwrap().cancel_requested
     }
-    pub fn runtime_context(&self) -> String {
+    pub fn runtime_context(&self) -> Result<String> {
         let inner = self.inner.lock().unwrap();
         let mut record = inner.snapshot.record.clone();
-        if let Some(event) = inner
-            .events
-            .iter()
-            .rev()
-            .find(|event| event.kind == "execution_context")
-        {
-            record.execution = serde_json::from_value(event.data.clone()).ok();
+        if let Some(event) = inner.journal.latest("execution_context")? {
+            record.execution = serde_json::from_value(event.data).ok();
         }
-        record.execution_context()
+        Ok(record.execution_context())
     }
-    fn reasoning_setting(&self) -> (Option<String>, u64) {
+    fn reasoning_setting(&self) -> Result<(Option<String>, u64)> {
         let inner = self.inner.lock().unwrap();
-        if let Some(event) = inner
-            .events
-            .iter()
-            .rev()
-            .find(|e| e.kind == "thread_reasoning_changed")
-        {
-            return (
+        if let Some(event) = inner.journal.latest("thread_reasoning_changed")? {
+            return Ok((
                 event.data["reasoning_effort"].as_str().map(str::to_owned),
                 event.seq,
-            );
+            ));
         }
-        (inner.snapshot.record.reasoning_effort.clone(), 0)
+        Ok((inner.snapshot.record.reasoning_effort.clone(), 0))
     }
-    pub fn retained_events(&self, kind: &str) -> Vec<Event> {
-        self.inner
-            .lock()
-            .unwrap()
-            .events
-            .iter()
-            .filter(|e| e.kind == kind)
-            .cloned()
+    pub fn retained_events(&self, kind: &str) -> Result<Vec<Event>> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .journal
+            .read(inner.journal.positions(kind).iter().copied())
             .collect()
+    }
+    fn events_of(&self, kinds: &[&str]) -> Result<Vec<Event>> {
+        let inner = self.inner.lock().unwrap();
+        let positions = Journal::ordered(
+            kinds
+                .iter()
+                .flat_map(|kind| inner.journal.positions(kind).iter().copied()),
+        );
+        inner.journal.read(positions.into_iter()).collect()
     }
     pub fn owner(&self) -> String {
         self.inner.lock().unwrap().snapshot.record.owner.clone()
@@ -468,10 +593,18 @@ impl Run {
         }
         bytes.push(b'\n');
         // Retain before publication. Readers never observe an unretained event.
-        inner.file.write_all(&bytes)?;
-        inner.file.sync_data()?;
+        inner.journal.append(&event, &bytes).inspect_err(|error| {
+            let record = &inner.snapshot.record;
+            logging::record(
+                Level::Warn,
+                Target::State,
+                "events.journal_append_failed",
+                Context::run(&record.spec.id, &record.spec.thread_id, &record.owner),
+                || json!({"sequence":event.seq,"kind":kind,"error":error.to_string()}),
+                || Value::Null,
+            );
+        })?;
         project(&mut inner.snapshot, &event);
-        inner.events.push(event.clone());
         self.changed.notify_all();
         let record = &inner.snapshot.record;
         logging::record(
@@ -493,29 +626,21 @@ impl Run {
         if terminal(&inner.snapshot.status) {
             return Err("ended runs cannot accept new message attempts".into());
         }
-        if let Some(prior) = inner
-            .events
-            .iter()
-            .find(|e| e.kind == "message_send_reserved" && e.data["call_id"] == call_id)
-        {
-            return if prior.data["fingerprint"] == fingerprint {
-                Ok(())
-            } else {
-                Err("message call ID already identifies different input".into())
-            };
+        let reserved = inner.journal.positions("message_send_reserved");
+        for prior in inner.journal.read(reserved.iter().copied()) {
+            let prior = prior?;
+            if prior.data["call_id"] == call_id {
+                return if prior.data["fingerprint"] == fingerprint {
+                    Ok(())
+                } else {
+                    Err("message call ID already identifies different input".into())
+                };
+            }
         }
-        let count = inner
-            .events
-            .iter()
-            .filter(|e| e.kind == "message_send_reserved")
-            .count();
+        let count = reserved.len();
         let limit = inner.snapshot.record.runtime_policy.max_message_sends;
         if limit.is_some_and(|limit| count >= limit as usize) {
-            if !inner
-                .events
-                .iter()
-                .any(|e| e.kind == "message_send_limited")
-            {
+            if inner.journal.positions("message_send_limited").is_empty() {
                 self.append_locked(&mut inner, "message_send_limited", json!({"limit":limit,"detail":"Further new message attempts in this run are paused. Accepted messages remain accepted; a later activation has a new budget."}))?;
             }
             drop(inner);
@@ -558,17 +683,16 @@ impl Run {
                 .0;
         }
         let mut size = 0;
-        let events = inner
-            .events
-            .iter()
-            .skip(after as usize)
-            .take(128)
-            .take_while(|event| {
-                size += serde_json::to_vec(event).map(|v| v.len()).unwrap_or(0);
-                size <= 5 * 1024 * 1024
-            })
-            .cloned()
-            .collect();
+        let mut events = Vec::new();
+        let positions = (after as usize..inner.journal.ends.len()).take(128);
+        for event in inner.journal.read(positions) {
+            let event = event?;
+            size += serde_json::to_vec(&event)?.len();
+            if size > 5 * 1024 * 1024 {
+                break;
+            }
+            events.push(event);
+        }
         let record = &inner.snapshot.record;
         logging::record(
             Level::Trace,
@@ -635,36 +759,47 @@ fn load_run(path: &std::path::Path, id: &str) -> Result<Arc<Run>> {
         backend_thread: None,
         last_seq: 0,
     };
-    let mut events = Vec::new();
-    let mut complete_bytes = 0;
     let mut reader = BufReader::new(File::open(&log_path)?);
+    let mut journal = Journal::new(log_path);
+    let mut line = Vec::new();
+    let mut discarded_tail = 0;
     loop {
-        let mut line = Vec::new();
+        line.clear();
         if reader.read_until(b'\n', &mut line)? == 0 {
             break;
         }
         if !line.ends_with(b"\n") {
             // An uncommitted final record was never published.
-            OpenOptions::new()
-                .write(true)
-                .open(&log_path)?
-                .set_len(complete_bytes)?;
+            let file = OpenOptions::new().write(true).open(&journal.path)?;
+            file.set_len(journal.len())?;
+            file.sync_data()?;
+            discarded_tail = line.len();
             break;
         }
         let event: Event = serde_json::from_slice(&line).map_err(|_| "corrupt event log")?;
         if event.seq != snapshot.last_seq + 1 {
             return Err("event log sequence mismatch".into());
         }
-        complete_bytes += line.len() as u64;
         project(&mut snapshot, &event);
-        events.push(event);
+        journal.index(&event, line.len());
     }
+    logging::record(
+        if discarded_tail == 0 {
+            Level::Debug
+        } else {
+            Level::Warn
+        },
+        Target::State,
+        "events.journal_indexed",
+        Context::run(id, &snapshot.record.spec.thread_id, &snapshot.record.owner),
+        || json!({"events":snapshot.last_seq,"bytes":journal.len(),"discarded_tail_bytes":discarded_tail}),
+        || Value::Null,
+    );
     Ok(Arc::new(Run {
         inner: Mutex::new(Inner {
             cancel_requested: false,
             snapshot,
-            events,
-            file: OpenOptions::new().append(true).open(log_path)?,
+            journal,
             control: None,
         }),
         changed: Condvar::new(),
@@ -679,34 +814,32 @@ pub struct History {
     pub native_import: Option<thread_import::Provenance>,
 }
 impl History {
-    pub fn native_session_path(&self, id: &str) -> Option<PathBuf> {
+    pub fn native_session_path(&self, id: &str) -> Result<Option<PathBuf>> {
         if let Some(imported) = &self.native_import
             && imported.backend_thread_id == id
             && let Some(path) = imported.metadata["path"].as_str()
         {
-            return Some(PathBuf::from(path));
+            return Ok(Some(PathBuf::from(path)));
         }
-        self.runs.iter().rev().find_map(|run| {
-            run.inner
-                .lock()
-                .unwrap()
-                .events
-                .iter()
-                .rev()
-                .find_map(|event| {
-                    let thread = &event.data["params"]["thread"];
-                    (event.kind == "backend"
-                        && event.data["method"] == "thread/started"
-                        && thread["id"] == id)
-                        .then(|| thread["path"].as_str().map(PathBuf::from))
-                        .flatten()
-                })
-        })
+        for run in self.runs.iter().rev() {
+            let inner = run.inner.lock().unwrap();
+            let positions = inner.journal.native_sessions.iter().rev().copied();
+            for event in inner.journal.read(positions) {
+                let event = event?;
+                let thread = &event.data["params"]["thread"];
+                if thread["id"] == id
+                    && let Some(path) = thread["path"].as_str()
+                {
+                    return Ok(Some(PathBuf::from(path)));
+                }
+            }
+        }
+        Ok(None)
     }
     pub fn journal_directory(&self) -> &std::path::Path {
         &self.directory
     }
-    pub fn source(&self, current: &Arc<Run>) -> crate::context::Source {
+    pub fn source(&self, current: &Arc<Run>) -> Result<crate::context::Source> {
         let mut runs = self.runs.clone();
         runs.push(current.clone());
         crate::context::Source::from_runs(&runs)
@@ -722,7 +855,7 @@ impl History {
             })
             .unwrap_or_default()
     }
-    pub fn inference_health_context(&self) -> String {
+    pub fn inference_health_context(&self) -> Result<String> {
         inference_health::context(&self.runs)
     }
     pub fn transcript_context(&self) -> String {
@@ -744,7 +877,8 @@ impl History {
             let inner = run.inner.lock().unwrap();
             let id = &inner.snapshot.record.spec.id;
             let journal = self.directory.join(id).join("events.jsonl");
-            for event in &inner.events {
+            for event in inner.journal.read(0..inner.journal.ends.len()) {
+                let event = event?;
                 total += 1;
                 if event.kind == "backend"
                     && !matches!(
@@ -1248,7 +1382,7 @@ impl Jobs {
             }
             let spec = self.anonymous_thread_spec(owner, id)?;
             let head = self.get(owner, &spec.id)?;
-            let (mut effort, mut seq) = head.reasoning_setting();
+            let (mut effort, mut seq) = head.reasoning_setting()?;
             let mut version = format!("{}:{seq}", spec.id);
             if let Some(patch) = &patch {
                 if patch.expected_version != version {
@@ -1314,7 +1448,7 @@ impl Jobs {
             return Err("Boxen history projection tools apply to the built-in inference runtime; managed runtimes retain native history controls".into());
         }
         let mutating = terminal(&last.snapshot().status);
-        let result = crate::context::Source::from_runs(&runs).operation(
+        let result = crate::context::Source::from_runs(&runs)?.operation(
             last,
             args.clone(),
             mutating,
@@ -1526,7 +1660,7 @@ impl Jobs {
                         || Value::Null,
                     )
                 });
-            for event in run.retained_events("observation_batch") {
+            for event in run.retained_events("observation_batch")? {
                 if let Some(batches) = event.data["batches"].as_array()
                     && let Err(error) =
                         jobs.observations
@@ -1935,24 +2069,35 @@ impl Jobs {
         if inner.snapshot.record.resident.is_some() {
             return Err("identity-bearing agents expose messages through mailboxes; thread results address identity-less workloads".into());
         }
-        let response = inner.events.iter().rev().find_map(|e| {
-            let item = &e.data["params"]["item"];
-            if e.kind == "assistant_message" {
-                return e.data["text"].as_str().map(str::to_owned);
+        let done = terminal(&inner.snapshot.status);
+        let mut response = None;
+        if done {
+            let positions = Journal::ordered(
+                inner
+                    .journal
+                    .positions("assistant_message")
+                    .iter()
+                    .chain(&inner.journal.completed_items)
+                    .copied(),
+            );
+            for event in inner.journal.read(positions.into_iter().rev()) {
+                let event = event?;
+                let item = &event.data["params"]["item"];
+                response = if event.kind == "assistant_message" {
+                    event.data["text"].as_str().map(str::to_owned)
+                } else if item["type"] == "agentMessage"
+                    && (item["phase"].is_null() || item["phase"] == "final_answer")
+                {
+                    item["text"].as_str().map(str::to_owned)
+                } else {
+                    None
+                };
+                if response.is_some() {
+                    break;
+                }
             }
-            if e.kind == "backend"
-                && e.data["method"] == "item/completed"
-                && item["type"] == "agentMessage"
-                && (item["phase"].is_null() || item["phase"] == "final_answer")
-            {
-                item["text"].as_str().map(str::to_owned)
-            } else {
-                None
-            }
-        });
-        Ok(
-            json!({"snapshot":inner.snapshot,"done":terminal(&inner.snapshot.status),"response":if terminal(&inner.snapshot.status){response}else{None}}),
-        )
+        }
+        Ok(json!({"snapshot":inner.snapshot,"done":done,"response":response}))
     }
     pub fn get(&self, owner: &str, id: &str) -> Result<Arc<Run>> {
         valid_id(id)?;
@@ -2579,7 +2724,7 @@ impl Jobs {
                         .into(),
                 );
             }
-            runs[&head.record.spec.id].reasoning_setting().0
+            runs[&head.record.spec.id].reasoning_setting()?.0
         } else {
             if let Some(effort) = &spec.reasoning_effort {
                 crate::reasoning::validate(&spec.backend, effort)?;
@@ -2683,10 +2828,7 @@ impl Jobs {
                     backend_thread: None,
                     last_seq: 0,
                 },
-                events: Vec::new(),
-                file: OpenOptions::new()
-                    .append(true)
-                    .open(path.join("events.jsonl"))?,
+                journal: Journal::new(path.join("events.jsonl")),
                 control: Some(sender),
             }),
             changed: Condvar::new(),

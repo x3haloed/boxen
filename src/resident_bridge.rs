@@ -287,7 +287,7 @@ fn call(
         return Err("bridge call ID exceeds its bound".into());
     }
     if let Some(old) = run
-        .retained_events("resident_bridge_call")
+        .retained_events("resident_bridge_call")?
         .into_iter()
         .find(|e| e.data["call_id"] == call_id)
     {
@@ -295,7 +295,7 @@ fn call(
             return Err("bridge call ID already identifies another input".into());
         }
         return match run
-            .retained_events("resident_bridge_result")
+            .retained_events("resident_bridge_result")?
             .into_iter()
             .find(|e| e.data["call_id"] == call_id)
         {

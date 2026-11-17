@@ -467,7 +467,7 @@ pub fn execute(
     let residents = jobs.residents.clone();
     let record = run.snapshot().record;
     if let (Some(execution), Some(id)) = (&record.execution, &resume)
-        && let Some(path) = history.native_session_path(id)
+        && let Some(path) = history.native_session_path(id)?
     {
         execution.own_native_session(&path, id)?;
         run.diagnostic(
@@ -506,7 +506,7 @@ pub fn execute(
     {
         trigger_context.push_str(&format!("\nRecovery incident: {recovery}\nPrevious tool effects may already have occurred. This new request does not replay those effects."));
     }
-    let execution_context = run.runtime_context();
+    let execution_context = run.runtime_context()?;
     let resident = record.resident;
     if promoted {
         trigger_context.push_str(&format!("\nResident attachment (Boxen-authored runtime context, separate from the message authors and the saved native instructions):\n{}",residents.instructions(resident.as_ref().unwrap())));

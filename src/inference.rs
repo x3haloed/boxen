@@ -606,7 +606,7 @@ pub fn execute(
     let record = run.snapshot().record;
     let trigger_context = record.trigger_context();
     let observation_context = record.observation_context();
-    let execution_context = run.runtime_context();
+    let execution_context = run.runtime_context()?;
     let resident = record.resident;
     if let Some(recovery) = &record.recovery {
         run.append("recovery_notice", recovery.clone())?;
@@ -622,7 +622,7 @@ pub fn execute(
     if let Some(r) = &resident {
         run.append("resident_context",json!({"resident_id":r.id,"revision":r.revision,"machine_id":r.machine_id,"used_bytes":r.used_bytes(),"quota_bytes":r.quota_bytes}))?;
     }
-    let mut view = context::View::new(history.settings(spec), &history.source(&run))?;
+    let mut view = context::View::new(history.settings(spec), &history.source(&run)?)?;
     let mut system = format!(
         "This is Boxen's built-in agent runtime on machine {} ({}/{}). The working directory is {}. Shell execution has Full access under the selected host account's operating-system permissions and credential context. Tools describe their effects. Tool results marked unknown do not establish whether an effect occurred; repeating an effectful call can duplicate its effects.",
         run.snapshot()
@@ -643,7 +643,7 @@ pub fn execute(
         system.push_str(&jobs.residents.instructions(r));
     }
     system.push_str(&history.transcript_context());
-    system.push_str(&history.inference_health_context());
+    system.push_str(&history.inference_health_context()?);
     system.push_str(&trigger_context);
     system.push_str(&execution_context);
     if let Some(recovery) = &record.recovery {
@@ -698,7 +698,7 @@ pub fn execute(
             return Ok(());
         }
         apply_steering(&run, &mut pending, &mut Vec::new())?;
-        let source = history.source(&run);
+        let source = history.source(&run)?;
         let plan = view.plan(&source)?;
         let first = view.needs_boundary(&plan);
         if first {
@@ -920,7 +920,7 @@ pub fn execute(
                         view.force = true;
                     }
                     history
-                        .source(&run)
+                        .source(&run)?
                         .operation(
                             &run,
                             args,

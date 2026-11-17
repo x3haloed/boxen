@@ -1115,8 +1115,8 @@ impl Events {
             }
         }
         let _release = Release(self, source.spec.id.clone());
-        let mut events = run.retained_events("adapter_call_started");
-        events.extend(run.retained_events("adapter_call_result"));
+        let mut events = run.retained_events("adapter_call_started")?;
+        events.extend(run.retained_events("adapter_call_result")?);
         if let Some(done) = events
             .iter()
             .find(|e| e.kind == "adapter_call_result" && e.data["call_id"] == call_id)

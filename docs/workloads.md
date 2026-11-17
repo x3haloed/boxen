@@ -139,7 +139,7 @@ The authenticated submitting machine owns API access to its runs. Other paired i
 
 ## Retention and recovery
 
-Executing-machine state lives under `BOXEN_HOME/runs/RUN_ID/`: immutable `record.json` and append-only `events.jsonl`. Files use the private data directory's Unix permissions. Events contain sequence number, timestamp, kind, and payload. Snapshot status and backend thread references are projections of the journal, not a second mutable authority. A filesystem lock prevents two daemons from owning the same runs directory.
+Executing-machine state lives under `BOXEN_HOME/runs/RUN_ID/`: immutable `record.json` and append-only `events.jsonl`. Files use the private data directory's Unix permissions. Events contain sequence number, timestamp, kind, and payload. Snapshot status and backend thread references are projections of the journal, not a second mutable authority. A filesystem lock prevents two daemons from owning the same runs directory. The daemon validates journals and builds a lightweight byte-offset index at startup. Replay and history projections read payloads from the original journals as needed, so idle memory does not include a second copy of retained payloads.
 
 Watchers request events after a sequence cursor. The daemon replays the backlog and then waits for new events. A reconnecting viewer discards already-applied events and detects sequence gaps. Transport fragmentation preserves large JSON events and Unicode content across Noise frames. Authoritative completed backend items replace their interim rendered text.
 
