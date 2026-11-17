@@ -1060,6 +1060,7 @@ struct WorkflowDriver {
     lose_create: bool,
     question_posted: bool,
     lose_question: bool,
+    lose_board_update: bool,
     commit: String,
 }
 impl workflow::Driver for WorkflowDriver {
@@ -1105,6 +1106,17 @@ impl workflow::Driver for WorkflowDriver {
             }
             "verify_pr" => {
                 json!({"ok":true,"id":23,"url":"https://example.invalid/pr/23","is_draft":false,"active":true,"commit":self.commit,"work_item_id":1,"autocomplete":false})
+            }
+            "move_pr_review" => {
+                let handoff = &request["handoff"];
+                assert_eq!(handoff["expected_revision"], 1);
+                assert_eq!(handoff["from"], "Doing");
+                assert_eq!(handoff["pr"], 23);
+                if self.lose_board_update {
+                    self.lose_board_update = false;
+                    bail!("Unknown board update outcome");
+                }
+                json!({"ok":true,"item":1,"pr":23,"state":"moved","revision":3,"column":handoff["column"]})
             }
             _ => bail!("Unexpected project operation"),
         })
@@ -1254,6 +1266,7 @@ fn workflow_fixture(
         allow_new_copies: true,
         publication: true,
         post_clarifications: false,
+        board_pr_review: None,
         authority: "Explicit synthetic test authority".into(),
         context_resident: hash("context"),
         review_definition: hash("reviewer"),
@@ -1285,6 +1298,7 @@ fn workflow_fixture(
         lose_create: false,
         question_posted: false,
         lose_question: false,
+        lose_board_update: false,
         commit: String::new(),
     };
     (f, api, settings, driver)
@@ -1605,6 +1619,58 @@ fn automatic_loop_returns_findings_to_same_coder_and_publishes_exact_full_pr() {
     let reopened = Store::open(f.s.path.clone()).unwrap();
     workflow::tick(&reopened, &f.cfg, &api, &settings, &mut driver).unwrap();
     assert_eq!(driver.calls.iter().filter(|v| *v == "create_pr").count(), 1);
+}
+#[test]
+fn board_handoff_reconciles_after_publication_and_restart() {
+    let (f, api, mut settings, mut driver) = workflow_fixture(false);
+    settings.board_pr_review = Some("In PR Review".into());
+    driver.lose_board_update = true;
+    let c = f.s.connect().unwrap();
+    c.execute(
+        "UPDATE ado_items SET raw=json_set(raw,'$.fields.\"Example.Column\"','Doing') WHERE id=1",
+        [],
+    )
+    .unwrap();
+    for _ in 0..35 {
+        workflow_step(&f, &api, &settings, &mut driver);
+        if driver.calls.iter().any(|v| v == "move_pr_review") {
+            break;
+        }
+    }
+    let status = workflow::snapshot(&f.s).unwrap();
+    assert_eq!(status["attempts"][0]["stage"], "published", "{status}");
+    assert_eq!(status["attempts"][0]["board_handoff"]["state"], "pending");
+    let work: (String, i64) = c
+        .query_row("SELECT state,holds_slot FROM work", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(work, ("finished".into(), 0));
+    // Model the mirror seeing the PR link before it sees the move.
+    c.execute(
+        "UPDATE ado_items SET revision=2,raw=json_set(raw,'$.rev',2) WHERE id=1",
+        [],
+    )
+    .unwrap();
+    c.execute("UPDATE workflow_attempts SET next_due=0", [])
+        .unwrap();
+    let reopened = Store::open(f.s.path.clone()).unwrap();
+    for _ in 0..3 {
+        workflow::tick(&reopened, &f.cfg, &api, &settings, &mut driver).unwrap();
+    }
+    let status = workflow::snapshot(&reopened).unwrap();
+    let attempts = status["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1, "{status}");
+    assert_eq!(attempts[0]["board_handoff"]["state"], "moved");
+    assert_eq!(driver.calls.iter().filter(|v| *v == "create_pr").count(), 1);
+    assert_eq!(
+        driver
+            .calls
+            .iter()
+            .filter(|v| *v == "move_pr_review")
+            .count(),
+        2
+    );
 }
 #[test]
 fn uncertain_pr_creation_is_reconciled_without_a_second_create() {

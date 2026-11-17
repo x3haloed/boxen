@@ -67,6 +67,8 @@ pub struct Settings {
     pub publication: bool,
     #[serde(default)]
     pub post_clarifications: bool,
+    #[serde(default)]
+    pub board_pr_review: Option<String>,
     pub authority: String,
     pub context_resident: String,
     pub review_definition: String,
@@ -106,6 +108,14 @@ impl Settings {
             self.items.iter().all(|n| *n > 0),
             "Workflow item scope uses positive IDs"
         );
+        if let Some(column) = &self.board_pr_review {
+            ensure!(
+                !column.trim().is_empty()
+                    && column.len() <= 128
+                    && !matches!(column.as_str(), "To Do" | "Doing"),
+                "PR handoff requires a downstream board column"
+            );
+        }
         ensure!(
             self.notify_to["type"] == "client" || self.notify_to["type"] == "resident",
             "Workflow observer is a typed mailbox address"
@@ -726,7 +736,15 @@ fn discover(s: &Store, settings: &Settings) -> Result<()> {
         )? {
             continue;
         }
-        let busy:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM workflow_attempts WHERE source=?1 AND item=?2 AND stage NOT IN('published','held','no_action','superseded'))",params![source,item],|r|r.get(0))?;
+        let busy:bool=c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workflow_attempts a JOIN ado_items i ON i.source=a.source AND i.id=a.item
+             WHERE a.source=?1 AND a.item=?2 AND (
+                a.stage NOT IN('published','held','no_action','superseded')
+                OR json_extract(a.data,'$.board_handoff.state')='pending'
+                OR (json_extract(a.data,'$.board_handoff.state')='moved'
+                    AND i.revision<=json_extract(a.data,'$.board_handoff.revision'))
+             ))",
+            params![source,item],|r|r.get(0))?;
         if busy {
             continue;
         }
@@ -739,7 +757,7 @@ fn discover(s: &Store, settings: &Settings) -> Result<()> {
 
 pub fn snapshot(s: &Store) -> Result<Value> {
     let c = s.connect()?;
-    let rows=c.prepare("SELECT id,item,digest,stage,error FROM workflow_attempts ORDER BY created DESC LIMIT 200")?.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"item":r.get::<_,i64>(1)?,"digest":r.get::<_,String>(2)?,"stage":r.get::<_,String>(3)?,"error":r.get::<_,Option<String>>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows=c.prepare("SELECT id,item,digest,stage,error,json_extract(data,'$.board_handoff') FROM workflow_attempts ORDER BY created DESC LIMIT 200")?.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"item":r.get::<_,i64>(1)?,"digest":r.get::<_,String>(2)?,"stage":r.get::<_,String>(3)?,"error":r.get::<_,Option<String>>(4)?,"board_handoff":r.get::<_,Option<String>>(5)?.and_then(|v|serde_json::from_str::<Value>(&v).ok())})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(json!({"attempts":rows}))
 }
 fn idle(api: &impl Boxen, resident: &str) -> Result<bool> {
@@ -1770,8 +1788,76 @@ fn advance(
                     a.data["assignment_version"].as_i64(),
                 ),
             )?;
+            if let Some(column) = settings
+                .board_pr_review
+                .as_ref()
+                .filter(|_| !source_changed_after_publication && receipt["active"] == true)
+            {
+                let board = ado::config(s)?;
+                a.data["board_handoff"] = json!({
+                    "state":"pending",
+                    "column":column,
+                    "column_field":board.board_column_field,
+                    "project_id":board.project_id,
+                    "project_name":board.project,
+                    "expected_revision":latest["revision"],
+                    "from":latest["evidence"]["item"]["fields"][&board.board_column_field],
+                    "pr":receipt["id"]
+                });
+            }
             notify(s, cfg, settings, a, "published", receipt)?;
             save(s, a, "published")
+        }
+        "published" => {
+            let handoff = &a.data["board_handoff"];
+            if settings.board_pr_review.as_deref() != handoff["column"].as_str()
+                || (!settings.items.is_empty() && !settings.items.contains(&a.item))
+            {
+                return Ok(());
+            }
+            let board = ado::config(s)?;
+            ensure!(
+                handoff["column_field"] == board.board_column_field
+                    && handoff["project_id"] == board.project_id
+                    && handoff["project_name"] == board.project,
+                "Board binding changed after publication"
+            );
+            let result = driver.call(
+                "move_pr_review",
+                &json!({
+                    "assignment":assignment(s,a)?["assignment"],
+                    "candidate":a.data["candidate"],
+                    "handoff":handoff
+                }),
+            )?;
+            ensure!(
+                result["item"] == a.item
+                    && result["pr"] == handoff["pr"]
+                    && (result["state"] == "skipped"
+                        || (result["state"] == "moved"
+                            && result["column"] == handoff["column"]
+                            && positive_ado_number(&result["revision"]).is_some())),
+                "Board handoff readback differs from publication"
+            );
+            a.data["board_handoff"]["state"] = result["state"].clone();
+            a.data["board_handoff"]["revision"] = result["revision"].clone();
+            a.data["board_handoff"]["detail"] = result["detail"].clone();
+            let mut c = s.connect()?;
+            let tx = c.transaction()?;
+            tx.execute(
+                "UPDATE workflow_attempts SET data=?2,error=NULL,next_due=0 WHERE id=?1",
+                params![a.id, a.data.to_string()],
+            )?;
+            let detail = json!({"attempt":a.id,"item":a.item,"result":result});
+            Store::log(
+                &tx,
+                a.data["job_id"].as_str().unwrap_or(&a.id),
+                "workflow.board_handoff",
+                detail.clone(),
+            )?;
+            tx.commit()?;
+            event("workflow.board_handoff", detail);
+            Ok(())
         }
         _ => Ok(()),
     }
@@ -1833,7 +1919,18 @@ pub fn tick(
     discover(s, settings)?;
     flush(s, cfg, settings, api)?;
     let c = s.connect()?;
-    let ids=c.prepare("SELECT id FROM workflow_attempts WHERE stage NOT IN('published','held','no_action','superseded') AND next_due<=?1 ORDER BY checked,created,id LIMIT 32")?.query_map([now()],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let ids = c
+        .prepare(
+            "SELECT id FROM workflow_attempts WHERE next_due<=?1 AND (
+             stage NOT IN('published','held','no_action','superseded')
+             OR (stage='published' AND json_extract(data,'$.board_handoff.state')='pending'
+                 AND json_extract(data,'$.board_handoff.column')=?2)
+         ) ORDER BY checked,created,id LIMIT 32",
+        )?
+        .query_map(params![now(), settings.board_pr_review], |r| {
+            r.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     for id in ids {
         let mut a = load(s, &id)?;
         c.execute(

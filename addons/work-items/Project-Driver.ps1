@@ -208,8 +208,102 @@ function Sql([string]$query) {
     if($LASTEXITCODE -ne 0){throw 'SQL ownership/readiness inspection failed'}
     return ($text -join "`n").Trim()
 }
+function Move-PrReview {
+    $a=Assigned
+    $handoff=$request.handoff
+    $item=[long]$a.work_item.id
+    $prId=[long]$handoff.pr
+    $expected=[long]$handoff.expected_revision
+    $field=[string]$handoff.column_field
+    $column=[string]$handoff.column
+    if($item -le 0 -or $prId -le 0 -or $expected -le 0 -or
+       $field -notmatch '^WEF_[0-9a-f]{32}_Kanban\.Column$' -or
+       $handoff.from -cnotin @('To Do','Doing') -or
+       !$column.Trim() -or $column.Length -gt 128 -or $column -in @('To Do','Doing') -or
+       $handoff.project_id -notmatch '^[0-9a-f-]{36}$' -or
+       $project.repository_id -notmatch '^[0-9a-f-]{36}$'){
+        throw 'Invalid PR board handoff binding'
+    }
+    $artifact=[Uri]::UnescapeDataString("vstfs:///Git/PullRequestId/$($handoff.project_id)/$($project.repository_id)/$prId")
+    $get=@('boards','work-item','show','--id',([string]$item),'--expand','relations')
+    $wi=Azure $get
+    if($wi.id -ne $item -or $wi.fields['System.TeamProject'] -cne $handoff.project_name -or
+       !$wi.fields.Contains($field)){throw 'Work item is outside the configured board binding'}
+    $linked=@($wi.relations | Where-Object {
+        $_.rel -ceq 'ArtifactLink' -and [Uri]::UnescapeDataString([string]$_.url) -ieq $artifact
+    }).Count -gt 0
+    $receipt=@{ok=$true;item=$item;pr=$prId;revision=$wi.rev;column=$wi.fields[$field]}
+    if($linked -and $receipt.column -ceq $column){
+        $receipt.state='moved'
+        return $receipt
+    }
+    $receipt.state='skipped'
+    if($receipt.column -cne $handoff.from -or !$linked){
+        $receipt.detail='The source column or exact PR link changed'
+        return $receipt
+    }
+    if($wi.rev -ne $expected){
+        # PR creation itself adds an artifact-link revision. Only that exact
+        # change can stand between the reviewed source and this handoff.
+        $receipt.detail='The work item revision changed after review'
+        if($wi.rev -ne ($expected+1)){return $receipt}
+        $changes=Azure @('devops','invoke','--area','wit','--resource','updates','--api-version','7.1',
+            '--route-parameters',('project='+$handoff.project_id),('id='+$item),
+            '--query-parameters',('$skip='+($expected-1)),'$top=3')
+        $updates=@($changes.value | Where-Object {$_.rev -eq $wi.rev})
+        if($updates.Count -ne 1){return $receipt}
+        $u=$updates[0]
+        $metadata=@('System.AuthorizedAs','System.AuthorizedDate','System.ChangedBy','System.ChangedDate',
+            'System.PersonId','System.Rev','System.RevisedDate','System.Watermark')
+        if(@($u.fields.Keys | Where-Object {$_ -cnotin $metadata}).Count -or
+           @($u.relations.Keys | Where-Object {$_ -cne 'added'}).Count -or
+           @($u.relations.added).Count -ne 1 -or $u.relations.added[0].rel -cne 'ArtifactLink' -or
+           [Uri]::UnescapeDataString([string]$u.relations.added[0].url) -ine $artifact){return $receipt}
+        $receipt.Remove('detail')
+    }
+    $pr=Azure @('repos','pr','show','--id',([string]$prId))
+    if($pr.pullRequestId -ne $prId -or $pr.repository.id -cne $project.repository_id -or
+       $pr.targetRefName -cne ('refs/heads/'+$a.target_ref) -or $pr.status -cne 'active' -or
+       $pr.isDraft -ne $false -or $pr.autoCompleteSetBy -or $pr.lastMergeSourceCommit.commitId -cne $request.candidate.commit){
+        $receipt.detail='The linked PR no longer matches the active reviewed candidate'
+        return $receipt
+    }
+    $python=[string]$project.azure_python
+    if(!$python){throw 'Board handoff requires the configured Azure CLI Python runtime'}
+    $extension=& $python -I -B -X utf8 -m azure.cli extension show --name azure-devops --query path --output tsv 2>$null
+    if($LASTEXITCODE -ne 0 -or !$extension){throw 'Azure DevOps CLI extension is unavailable'}
+    # The SDK serializes JSON Patch arrays with the required media type.
+    $code=@'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from azext_devops.dev.common.services import get_work_item_tracking_client
+from azext_devops.devops_sdk.v5_0.work_item_tracking.models import JsonPatchOperation
+
+organization, item, revision, column_field, source, destination = sys.argv[2:]
+path = "/fields/" + column_field
+patch = [
+    JsonPatchOperation(op="test", path="/rev", value=int(revision)),
+    JsonPatchOperation(op="test", path=path, value=source),
+    JsonPatchOperation(op="replace", path=path, value=destination),
+]
+get_work_item_tracking_client(organization).update_work_item(patch, int(item))
+'@
+    $code | & $python -I -B -X utf8 - $extension $project.azure_organization $item $wi.rev $field $handoff.from $column 2>$null
+    if($LASTEXITCODE -ne 0){throw 'Azure board update failed; the next observation reconciles the result'}
+    $readback=Azure $get
+    if($readback.id -ne $item -or $readback.fields['System.TeamProject'] -cne $handoff.project_name -or
+       $readback.fields[$field] -cne $column -or $readback.rev -le $wi.rev -or
+       !($readback.relations | Where-Object {
+           $_.rel -ceq 'ArtifactLink' -and [Uri]::UnescapeDataString([string]$_.url) -ieq $artifact
+       })){
+        throw 'Board move requires readback of the requested column and a newer revision'
+    }
+    return @{ok=$true;item=$item;pr=$prId;state='moved';revision=$readback.rev;column=$column}
+}
 try {
     $result=switch($inputRecord.operation) {
+        'move_pr_review' { Move-PrReview }
         'plan' {
             $target=Source-Identity
             if($request.job_id -notmatch '^[0-9a-f]{64}$' -or $request.attempt -notmatch '^[0-9a-f]{64}$'){throw 'Stable job/attempt IDs required'}

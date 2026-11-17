@@ -30,7 +30,45 @@ fn main() {
     };
     let quote = |s: &str| format!("{s:?}");
     let repo = "22222222-2222-4222-8222-222222222222";
-    if contains("repos") && contains("show") && !contains("pr") {
+    let project = "11111111-1111-4111-8111-111111111111";
+    let field = "WEF_11111111111111111111111111111111_Kanban.Column";
+    let artifact = format!("vstfs:///Git/PullRequestId/{project}%2f{repo}%2f23");
+    if contains("extension") {
+        println!("fixture-extension");
+    } else if contains("fixture-extension") {
+        let fixture = fs::read_to_string(root.join("board")).unwrap();
+        let (rev, column) = fixture.split_once('|').unwrap();
+        assert_eq!(
+            &args[args.len() - 5..],
+            ["1", rev, field, column, "In PR Review"]
+        );
+        if env::var_os("BOXEN_PROJECT_RACE_PATCH").is_some() {
+            fs::write(root.join("board"), "3|Awaiting Staging").unwrap();
+            std::process::exit(1);
+        }
+        fs::write(
+            root.join("board"),
+            format!("{}|In PR Review", rev.parse::<u64>().unwrap() + 1),
+        )
+        .unwrap();
+        if env::var_os("BOXEN_PROJECT_LOSE_PATCH").is_some() {
+            std::process::exit(1);
+        }
+    } else if contains("boards") {
+        let fixture = fs::read_to_string(root.join("board")).unwrap();
+        let (rev, column) = fixture.split_once('|').unwrap();
+        println!(
+            "{{\"id\":1,\"rev\":{rev},\"fields\":{{\"System.TeamProject\":\"Example\",\"{field}\":{}}},\"relations\":[{{\"rel\":\"ArtifactLink\",\"url\":{}}}]}}",
+            quote(column),
+            quote(&artifact)
+        );
+    } else if contains("updates") {
+        assert!(contains("id=1"));
+        println!(
+            "{{\"value\":[{{\"rev\":2,\"fields\":{{\"System.Rev\":{{\"newValue\":2}}}},\"relations\":{{\"added\":[{{\"rel\":\"ArtifactLink\",\"url\":{}}}]}}}}]}}",
+            quote(&artifact)
+        );
+    } else if contains("repos") && contains("show") && !contains("pr") {
         println!(
             "{{\"id\":\"{repo}\",\"remoteUrl\":{}}}",
             quote(&env::var("BOXEN_PROJECT_REMOTE").unwrap())

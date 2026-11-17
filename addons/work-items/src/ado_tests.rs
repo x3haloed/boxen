@@ -109,7 +109,13 @@ fn mirror_reopen_deduplicates_and_keeps_reassigned_closed_items() -> Result<()> 
     sync_once(&reopened, &cfg, &mut api)?;
     assert_eq!(event_count(&s)?, count);
     api.discover.clear();
+    api.wi["rev"] = json!(2);
+    api.wi["fields"][&cfg.board_column_field] = json!("In PR Review");
+    sync_once(&reopened, &cfg, &mut api)?;
+    assert_eq!(revision(&s)?, 2);
+    assert_eq!(snapshot(&s, 0)?["items"][0]["eligible"], false);
     api.wi["rev"] = json!(3);
+    api.wi["fields"][&cfg.board_column_field] = json!("Awaiting Staging");
     api.wi["fields"]["System.AssignedTo"] = json!({"uniqueName":"reviewer@example.invalid"});
     api.wi["fields"]["System.State"] = json!("Closed");
     api.comment_version = 2;

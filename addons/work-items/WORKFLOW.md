@@ -229,6 +229,27 @@ edit arbitrary project data. The supplied driver targets one local Windows proje
 cross-host allocation and other project runtime recipes are separate adapters.
 No deployment or staging acceptance is inferred merely from a merged PR.
 
+### PR review board handoff
+
+An operator can set the optional top-level `board_pr_review` setting to the
+exact destination column on the mirrored team board, for example
+`"In PR Review"`. The default leaves board writes disabled. The Windows
+project driver uses its configured Azure CLI Python runtime and existing
+Azure sign-in. The team-specific column mapping and account's work-item
+write access must support the requested transition.
+
+The mirror continues following known items in downstream columns. New
+development intake still uses To Do and Doing. A newly verified active PR
+can queue a board handoff after the assignment and publication are finalized.
+Existing publication receipts do not queue retroactively. The driver checks
+the linked work item, repository, target and reviewed commit before moving
+the card. Only the exact PR artifact link revision can follow the frozen
+work-item revision before the move. A revision-checked update and readback
+preserve concurrent changes and reconcile lost responses. The publication
+record retains the pending, moved or skipped handoff independently of
+assignment completion. A handoff in flight does not start more development
+from an older board snapshot.
+
 Verification includes the existing supervision/assignment suites and new workflow
 protocol fixtures for correction, source invalidation, capacity, forgery, restart and
 lost PR-create response. `tests/project-driver-smoke.py --pwsh ABS_PWSH` uses real

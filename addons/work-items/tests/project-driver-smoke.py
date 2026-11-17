@@ -16,12 +16,14 @@ with tempfile.TemporaryDirectory(prefix='boxen-project-driver-')as temporary:
  project={'repository_root':str(repo),'remote_url':env['BOXEN_PROJECT_REMOTE'],'target_ref':'main','repository_id':'22222222-2222-4222-8222-222222222222','azure_project':'Example','azure_organization':'https://dev.azure.com/example','azure_python':str(fixture),'workspace_root':str(root/'project workspace'),'evidence_root':str(root/'evidence'),'database_prefix':'Synthetic','database_server':'fixture','frontend_port':49001,'backend_port':49002,'browser_context':str(root/'browser'),'tenant_id_base':90000,'ef_tool':str(fixture),'powershell_executable':str(args.pwsh),'login_registration_reference':'Synthetic normal login route','external_dependencies':[],'runtime_process_names':['dotnet','node','WebApp']}
  project['git_executable']=str(git_fixture)
  count=0
- def call(operation,request):
+ def call(operation,request,expected_success=True):
   global count
   count+=1;p=root/f'{count}.json';reply=root/f'{count}.reply.json';p.write_text(json.dumps({'operation':operation,'project':project,'request':request}),encoding='utf-8')
   result=subprocess.run([str(args.pwsh),'-NoProfile','-NonInteractive','-File',str(script),'-RequestPath',str(p),'-ReplyPath',str(reply)],env=env,capture_output=True,text=True,encoding='utf-8',timeout=90)
   value=json.loads(reply.read_text(encoding='utf-8-sig')) if reply.exists()else{}
-  assert result.returncode==0,(operation,value,result.stderr);assert value['ok'];return value
+  assert (result.returncode==0)==expected_success,(operation,value,result.stderr)
+  assert value['ok']==expected_success
+  return value
  a=call('plan',{'job_id':'a'*64,'attempt':'b'*64,'item':1,'version':1,'previous':None})['assignment'];a.update(job_id='a'*64,work_item={'id':1})
  call('prepare',{'assignment':a,'pack_root':str(pack)});call('prepare',{'assignment':a,'pack_root':str(pack)})
  work=pathlib.Path(a['worktree']);(work/'source.txt').write_text('candidate\n');git('add','source.txt',cwd=work);git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','candidate',cwd=work)
@@ -34,5 +36,27 @@ with tempfile.TemporaryDirectory(prefix='boxen-project-driver-')as temporary:
  assert call('create_pr',{'assignment':a,'candidate':candidate,'interpretation':interpretation})['id']==23
  assert call('find_pr',{'assignment':a,'candidate':candidate})['prs'][0]['id']==23
  receipt=call('verify_pr',{'assignment':a,'candidate':candidate,'id':23});assert receipt['commit']==candidate['commit']and receipt['is_draft']is False and receipt['autocomplete']is False
+ board=root/'board'
+ handoff={'assignment':a,'candidate':candidate,'handoff':{
+     'pr':23,'from':'Doing','column':'In PR Review','expected_revision':1,
+     'project_id':'11111111-1111-4111-8111-111111111111','project_name':'Example',
+     'column_field':'WEF_11111111111111111111111111111111_Kanban.Column'}}
+ board.write_text('4|Doing')
+ assert call('move_pr_review',handoff)['state']=='skipped'
+ assert board.read_text()=='4|Doing'
+ board.write_text('2|Doing')
+ env['BOXEN_PROJECT_RACE_PATCH']='1'
+ call('move_pr_review',handoff,expected_success=False)
+ del env['BOXEN_PROJECT_RACE_PATCH']
+ assert call('move_pr_review',handoff)['state']=='skipped'
+ assert board.read_text()=='3|Awaiting Staging'
+ board.write_text('2|Doing')
+ env['BOXEN_PROJECT_LOSE_PATCH']='1'
+ call('move_pr_review',handoff,expected_success=False)
+ del env['BOXEN_PROJECT_LOSE_PATCH']
+ assert call('move_pr_review',handoff)['state']=='moved'
+ assert board.read_text()=='3|In PR Review'
+ board.write_text('2|Doing')
+ assert call('move_pr_review',handoff)['revision']==3
  q={'item':1,'key':'c'*64,'question':'Which visible field is intended?'};assert not call('find_question',q)['found'];call('post_question',q);assert call('find_question',q)['found']
- print(json.dumps({'ok':True,'real_git_worktree_and_push':True,'idempotent_prepare':True,'dirty_candidate_rejected':True,'full_pr_flags_and_multiline_body':True,'remote_receipt':True,'clarification_lookup_and_post':True,'azure_and_sql':'native fixtures, no real service traffic'}))
+ print(json.dumps({'ok':True,'real_git_worktree_and_push':True,'idempotent_prepare':True,'dirty_candidate_rejected':True,'full_pr_flags_and_multiline_body':True,'remote_receipt':True,'clarification_lookup_and_post':True,'board_handoff':True,'azure_and_sql':'native fixtures, no real service traffic'}))
