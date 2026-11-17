@@ -78,6 +78,8 @@ A peer address locates an already-pinned identity; it grants no new trust.
   **Start thread** uses this machine, the default Codex model, and a working area
   under the executing daemon's data directory at `threads/<thread-id>`. Expand
   **Run settings** in the dialog to choose the machine, directory, runtime, or model.
+  The Codex dropdown loads models from Codex on the selected machine and includes
+  **Default model**. OpenRouter accepts a model ID as text.
   When the daemon queues the first run, the dialog closes and the thread opens
   in **Messages**. A rejected submission preserves the draft and settings.
   When queue status is uncertain, the catalog checks for the same request ID and

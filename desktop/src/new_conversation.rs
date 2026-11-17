@@ -2,6 +2,7 @@ use crate::{
     Action, Data, Desktop,
     attachments::{self, Target},
     client::{self, Pending},
+    codex_models::Catalogs,
     conversation,
     model::{Destination, ThreadKey},
     new_id,
@@ -31,15 +32,14 @@ impl Default for Settings {
 }
 
 impl Settings {
-    fn destination(&self, data: &Data) -> Option<Destination> {
+    fn destination(
+        &self,
+        destinations: &[Destination],
+        local: &Destination,
+    ) -> Option<Destination> {
         match &self.machine {
-            Some(key) => data
-                .saved
-                .destinations
-                .iter()
-                .find(|d| &d.key == key)
-                .cloned(),
-            None if !data.local_key.is_empty() => Some(conversation::local(data)),
+            Some(key) => destinations.iter().find(|d| &d.key == key).cloned(),
+            None if !local.key.is_empty() => Some(local.clone()),
             None => None,
         }
     }
@@ -51,7 +51,6 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
     let pending = data.saved.new_thread_request.as_deref();
     let sending = pending.is_some_and(|id| data.sending.contains(id));
     let editable = pending.is_none();
-    let destination = data.saved.new_thread_settings.destination(data);
     let local = conversation::local(data);
     let working = data
         .preparing
@@ -119,16 +118,32 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
                 preparation.errors.clear();
             }
         }
-        if data.show_new_thread_settings {
+        let model_valid = if data.show_new_thread_settings {
             ui.add_enabled_ui(editable, |ui| {
                 settings(
                     ui,
                     &mut data.saved.new_thread_settings,
                     &data.saved.destinations,
-                    &data.local_key,
-                );
-            });
-        }
+                    &local,
+                    &data.codex_models,
+                    actions,
+                )
+            })
+            .inner
+        } else {
+            data.codex_models.can_submit(
+                data.saved
+                    .new_thread_settings
+                    .destination(&data.saved.destinations, &local)
+                    .as_ref(),
+                &data.saved.new_thread_settings.backend,
+                &data.saved.new_thread_settings.model,
+            )
+        };
+        let destination = data
+            .saved
+            .new_thread_settings
+            .destination(&data.saved.destinations, &local);
         if sending {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -140,6 +155,8 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
             ui.label("Queue status is unknown. Retrying uses the same request.");
         } else if destination.is_none() {
             ui.label("Waiting for the selected machine.");
+        } else if !model_valid {
+            ui.label("Choose an available model in Run settings.");
         }
         let text = &data.saved.new_thread_text;
         if text.len() > MESSAGE_LIMIT {
@@ -148,6 +165,7 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
         let can_start = editable
             && !working
             && destination.is_some()
+            && model_valid
             && text.len() <= MESSAGE_LIMIT
             && (!text.trim().is_empty() || !data.saved.new_thread_files.is_empty());
         ui.horizontal(|ui| {
@@ -201,7 +219,16 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
     }
 }
 
-fn settings(ui: &mut egui::Ui, settings: &mut Settings, destinations: &[Destination], local: &str) {
+fn settings(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    destinations: &[Destination],
+    local: &Destination,
+    catalogs: &Catalogs,
+    actions: &mut Vec<Action>,
+) -> bool {
+    let before_machine = settings.machine.clone();
+    let before_backend = settings.backend.clone();
     let machine_label = match &settings.machine {
         None => "This machine (default)",
         Some(key) => destinations
@@ -219,7 +246,7 @@ fn settings(ui: &mut egui::Ui, settings: &mut Settings, destinations: &[Destinat
                 .selected_text(machine_label)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut settings.machine, None, "This machine (default)");
-                    for d in destinations.iter().filter(|d| d.key != local) {
+                    for d in destinations.iter().filter(|d| d.key != local.key) {
                         ui.selectable_value(&mut settings.machine, Some(d.key.clone()), &d.label);
                     }
                 });
@@ -248,14 +275,30 @@ fn settings(ui: &mut egui::Ui, settings: &mut Settings, destinations: &[Destinat
                 });
             ui.end_row();
 
+            if settings.backend != before_backend
+                || (settings.backend == "codex" && settings.machine != before_machine)
+            {
+                settings.model.clear();
+            }
             ui.label("Model");
-            ui.add(
-                egui::TextEdit::singleline(&mut settings.model)
-                    .desired_width(width)
-                    .hint_text("Default model"),
-            );
+            let valid = if settings.backend == "codex" {
+                let destination = settings.destination(destinations, local);
+                ui.vertical(|ui| {
+                    catalogs.picker(ui, width, destination, &mut settings.model, actions)
+                })
+                .inner
+            } else {
+                ui.add(
+                    egui::TextEdit::singleline(&mut settings.model)
+                        .desired_width(width)
+                        .hint_text("Default model"),
+                );
+                true
+            };
             ui.end_row();
-        });
+            valid
+        })
+        .inner
 }
 
 impl Desktop {
@@ -264,9 +307,19 @@ impl Desktop {
             return;
         }
         let settings = &self.data.saved.new_thread_settings;
-        let Some(destination) = settings.destination(&self.data) else {
+        let Some(destination) = settings.destination(
+            &self.data.saved.destinations,
+            &conversation::local(&self.data),
+        ) else {
             return;
         };
+        if !self.data.codex_models.can_submit(
+            Some(&destination),
+            &settings.backend,
+            &settings.model,
+        ) {
+            return;
+        }
         let id = new_id();
         let spec = json!({
             "id": id, "thread_id": id, "backend": settings.backend,

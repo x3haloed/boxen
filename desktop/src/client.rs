@@ -36,6 +36,7 @@ pub struct SubmitError {
 }
 
 pub enum Update {
+    CodexModels(String, Result<crate::codex_models::Catalog, String>),
     ToolApprovals(String, Result<Value, String>),
     Mail(crate::correspondence::MailUpdate),
     Files(crate::attachments::FileUpdate),
@@ -81,6 +82,15 @@ impl Publisher {
     }
 }
 impl Client {
+    pub fn codex_models(&self, destination: Destination, publisher: Publisher) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            let result = client
+                .operation(&destination, json!({"op":"codex_models"}))
+                .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()));
+            publisher.send(Update::CodexModels(destination.key, result));
+        });
+    }
     pub fn tool_approvals(&self, destination: Destination, args: Value, publisher: Publisher) {
         let client = self.clone();
         std::thread::spawn(move || {
@@ -253,6 +263,11 @@ impl Client {
                     }
                     if let Some(model) = settings.model {
                         spec["model"] = json!(model);
+                    }
+                    if let Some(spec) = spec.as_object_mut() {
+                        // The first submission's effort initializes the thread. Later
+                        // runs inherit the effort saved on the executing daemon.
+                        spec.remove("reasoning_effort");
                     }
                     spec["id"] = json!(id);
                     spec["prompt"] = json!(text);
@@ -492,8 +507,30 @@ mod tests {
         let client = Client::new(std::env::var("BOXEN_GUI_TEST_URL").unwrap(), &home).unwrap();
         let dest: Destination =
             serde_json::from_str(&std::env::var("BOXEN_GUI_TEST_DEST").unwrap()).unwrap();
+        client.status().unwrap();
+        let local = client.local();
+        let models = Bus::new(egui::Context::default());
+        client.codex_models(local.clone(), models.publisher());
+        client.codex_models(dest.clone(), models.publisher());
+        for _ in 0..2 {
+            let Update::CodexModels(machine, result) =
+                models.rx.recv_timeout(Duration::from_secs(12)).unwrap()
+            else {
+                panic!("Expected a Codex catalog result");
+            };
+            let prefix = if machine == local.key {
+                "local"
+            } else {
+                assert_eq!(machine, dest.key);
+                "remote"
+            };
+            let catalog = result.unwrap();
+            assert_eq!(catalog.models.len(), 2);
+            assert_eq!(catalog.models[0].model, format!("{prefix}-primary"));
+            assert_eq!(catalog.models[1].model, format!("{prefix}-secondary"));
+        }
         let id = crate::new_id();
-        let spec = json!({"id":id,"thread_id":id,"backend":"codex","cwd":home,"model":"fixture","prompt":"SLOW desktop transport proof"});
+        let spec = json!({"id":id,"thread_id":id,"backend":"codex","cwd":home,"model":"remote-secondary","reasoning_effort":"low","prompt":"SLOW desktop transport proof"});
         let first = client
             .operation(&dest, json!({"op":"start","spec":spec}))
             .unwrap();
@@ -603,6 +640,7 @@ mod tests {
             _ => panic!("Catalog entry could not prepare a follow-up"),
         };
         let mut expected = first["record"]["spec"].clone();
+        expected.as_object_mut().unwrap().remove("reasoning_effort");
         expected["id"] = json!(next);
         expected["prompt"] = json!("WORKSPACE_SETTINGS_FIXTURE");
         expected["cwd"] = json!(cwd);

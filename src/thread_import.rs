@@ -1,9 +1,8 @@
 //! Read-only history import; future execution resumes the original native thread.
 use super::*;
+use crate::codex_reader::NativeReader;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::io::Read;
-use std::process::{Child, ChildStdin, Stdio};
 use std::time::Instant;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -98,7 +97,8 @@ impl Jobs {
                 "native history import awaits the configured account's macOS login session".into(),
             );
         }
-        let mut reader = NativeReader::open(&self.codex_path, owner, &execution)?;
+        let mut reader =
+            NativeReader::open(&self.codex_path, owner, &execution, "thread_import", None)?;
         let mut metadata = reader.request(
             "thread/read",
             json!({"threadId":spec.backend_thread_id,"includeTurns":false}),
@@ -123,7 +123,7 @@ impl Jobs {
         if serde_json::to_vec(&metadata)?.len() > 256 * 1024 {
             return Err("native thread metadata exceeds 256 KiB; no import was accepted".into());
         }
-        let turns = read_history(&mut reader, &spec.backend_thread_id)?;
+        let turns = read_history(&mut reader, owner, &spec.backend_thread_id)?;
         let after = reader.request(
             "thread/read",
             json!({"threadId":spec.backend_thread_id,"includeTurns":false}),
@@ -269,7 +269,7 @@ impl Jobs {
     }
 }
 
-fn read_history(reader: &mut NativeReader, id: &str) -> Result<Vec<Value>> {
+fn read_history(reader: &mut NativeReader, owner: &str, id: &str) -> Result<Vec<Value>> {
     let mut turns = Vec::new();
     let mut cursor: Option<String> = None;
     let mut cursors = HashSet::new();
@@ -291,7 +291,7 @@ fn read_history(reader: &mut NativeReader, id: &str) -> Result<Vec<Value>> {
             Level::Debug,
             Target::Runtime,
             "thread_import.history_page",
-            Context::peer(&reader.owner),
+            Context::peer(owner),
             || json!({"backend_thread_id":id,"turns":rows.len(),"has_more":!page["nextCursor"].is_null()}),
             || Value::Null,
         );
@@ -329,128 +329,6 @@ fn read_history(reader: &mut NativeReader, id: &str) -> Result<Vec<Value>> {
         }
     }
     Ok(turns)
-}
-
-/// Only metadata and history reads use this connection. No start/resume/turn calls.
-struct NativeReader {
-    child: Child,
-    stdin: ChildStdin,
-    incoming: mpsc::Receiver<std::result::Result<Value, String>>,
-    next_id: u64,
-    owner: String,
-}
-impl NativeReader {
-    fn open(binary: &str, owner: &str, execution: &crate::execution::Execution) -> Result<Self> {
-        let mut child = crate::codex_executable::launch(binary, crate::platform::host_os(),
-            |selected| execution.command(&selected.path)
-                .args(["app-server", "--listen", "stdio://"])
-                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn(),
-            |selected, retry| logging::record(Level::Debug, Target::Runtime,
-                "thread_import.reader_starting", Context::peer(owner),
-                ||json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"rediscovered":retry}), ||Value::Null),
-        ).inspect_err(|error| logging::record(Level::Error, Target::Runtime,
-            "thread_import.reader_start_failed", Context::peer(owner),
-            ||json!({"detail":error.to_string()}), ||Value::Null))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or("native reader stdin unavailable")?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or("native reader stdout unavailable")?;
-        let (send, incoming) = mpsc::sync_channel(4);
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            loop {
-                let mut line = Vec::new();
-                let result=match reader.by_ref().take(4*1024*1024+1).read_until(b'\n',&mut line){
-                    Ok(0)=>break,
-                    Ok(_) if line.len()>4*1024*1024=>Err("native read response exceeds 4 MiB; smaller history pages may be available".into()),
-                    Ok(_)=>serde_json::from_slice(&line).map_err(|e|format!("invalid native read response: {e}")),
-                    Err(e)=>Err(e.to_string()),
-                };
-                let failed = result.is_err();
-                if send.send(result).is_err() || failed {
-                    break;
-                }
-            }
-        });
-        let mut this = Self {
-            child,
-            stdin,
-            incoming,
-            next_id: 1,
-            owner: owner.into(),
-        };
-        this.request("initialize",json!({"clientInfo":{"name":"boxen","title":"Boxen","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
-        this.write(json!({"method":"initialized"}))?;
-        Ok(this)
-    }
-    fn write(&mut self, v: Value) -> Result<()> {
-        serde_json::to_writer(&mut self.stdin, &v)?;
-        self.stdin.write_all(b"\n")?;
-        self.stdin.flush()?;
-        Ok(())
-    }
-    fn request(&mut self, method: &str, params: Value) -> Result<Value> {
-        let id = self.next_id;
-        self.next_id += 1;
-        logging::record(
-            Level::Debug,
-            Target::Runtime,
-            "thread_import.native_request",
-            Context::peer(&self.owner),
-            || json!({"method":method,"backend_thread_id":params["threadId"],"request_id":id}),
-            || Value::Null,
-        );
-        self.write(json!({"id":id,"method":method,"params":params}))?;
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let message = self
-                .incoming
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .map_err(|e| format!("native {method} unavailable: {e}"))?
-                .map_err(|e| format!("native {method}: {e}"))?;
-            if message["id"] == id {
-                logging::record(
-                    Level::Debug,
-                    Target::Runtime,
-                    "thread_import.native_reply",
-                    Context::peer(&self.owner),
-                    || json!({"method":method,"request_id":id,"accepted":message["error"].is_null(),"error_code":message["error"]["code"]}),
-                    || Value::Null,
-                );
-                if !message["error"].is_null() {
-                    return Err(format!("native {method} rejected: {}", message["error"]).into());
-                }
-                return message
-                    .get("result")
-                    .cloned()
-                    .ok_or_else(|| "native read result unavailable".into());
-            }
-            if message.get("id").is_some() && message.get("method").is_some() {
-                return Err(
-                    "native read unexpectedly requested a client action; no action was executed"
-                        .into(),
-                );
-            }
-        }
-    }
-}
-impl Drop for NativeReader {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let status = self.child.wait();
-        logging::record(
-            Level::Debug,
-            Target::Runtime,
-            "thread_import.reader_stopped",
-            Context::peer(&self.owner),
-            || json!({"pid":self.child.id(),"status":status.map(|v|v.to_string()).unwrap_or_else(|e|e.to_string())}),
-            || Value::Null,
-        );
-    }
 }
 
 impl Jobs {

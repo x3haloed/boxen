@@ -10,6 +10,7 @@ mod chat;
 mod codex;
 #[path = "../shared/codex_executable.rs"]
 mod codex_executable;
+mod codex_reader;
 mod context;
 mod discord_connector;
 mod events;

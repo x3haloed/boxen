@@ -37,6 +37,7 @@ fn next_run_settings(
     data: &mut Data,
     key: &ThreadKey,
     enabled: bool,
+    codex: bool,
     actions: &mut Vec<Action>,
 ) {
     if ui
@@ -61,6 +62,7 @@ fn next_run_settings(
             if let Some(issue) = data.thread_issues.get(key) {
                 ui.label(issue);
             }
+            let before_target = settings.target.clone();
             egui::ComboBox::from_label("Machine")
                 .selected_text(settings.target.as_ref().map_or_else(
                     || view::destination(data, &key.peer).label,
@@ -87,18 +89,42 @@ fn next_run_settings(
             } else {
                 settings.cwd = None;
             }
+            if codex && settings.target != before_target {
+                settings.model = None;
+            }
             let mut change_model = settings.model.is_some();
             ui.checkbox(&mut change_model, "Choose a model");
-            if change_model {
+            let model_valid = if !change_model {
+                settings.model = None;
+                true
+            } else if codex {
+                let machine = settings.target.as_deref().unwrap_or(&key.peer);
+                let destination = view::destination(data, machine);
+                ui.vertical(|ui| {
+                    data.codex_models.picker(
+                        ui,
+                        210.,
+                        Some(destination),
+                        settings.model.get_or_insert_with(String::new),
+                        actions,
+                    )
+                })
+                .inner
+            } else {
                 ui.add(
                     egui::TextEdit::singleline(settings.model.get_or_insert_with(String::new))
                         .hint_text("Default model"),
                 );
-            } else {
-                settings.model = None;
-            }
-            ui.horizontal(|ui| (ui.button("Cancel").clicked(), ui.button("Done").clicked()))
-                .inner
+                true
+            };
+            ui.horizontal(|ui| {
+                (
+                    ui.button("Cancel").clicked(),
+                    ui.add_enabled(model_valid, egui::Button::new("Done"))
+                        .clicked(),
+                )
+            })
+            .inner
         });
     if modal.inner.1 && settings.target.is_some() {
         actions.push(Action::MoveConversation(key.clone(), settings));
@@ -558,6 +584,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                     .preparing_followups
                     .values()
                     .any(|target| target == key),
+            last.is_some_and(|run| run["record"]["spec"]["backend"] == "codex"),
             actions,
         );
         if activity {

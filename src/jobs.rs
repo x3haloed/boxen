@@ -785,6 +785,7 @@ pub struct Jobs {
     directory: PathBuf,
     runs: Mutex<HashMap<String, Arc<Run>>>,
     codex_path: String,
+    codex_catalog: Mutex<()>,
     pub inference: crate::inference::Config,
     _lock: File,
     pub residents: Arc<Residents>,
@@ -1332,6 +1333,40 @@ impl Jobs {
         );
         result
     }
+    pub fn codex_models(&self, owner: &str) -> Result<Value> {
+        let result = (|| -> Result<Value> {
+            // Catalog lookups make no changes and never hold workload admission.
+            let _query = self
+                .codex_catalog
+                .try_lock()
+                .map_err(|_| "A Codex model lookup is already running on this machine")?;
+            let execution = crate::execution::Execution::capture(
+                self.runtime_home().ok_or("run directory has no home")?,
+            )?;
+            if execution.desktop_available == Some(false)
+                && execution.mode == crate::execution::Mode::UserSession
+            {
+                return Err("Codex model lookup becomes available when the configured account has a macOS login session".into());
+            }
+            crate::codex_reader::models(&self.codex_path, owner, &execution)
+        })();
+        logging::record(
+            if result.is_ok() {
+                Level::Debug
+            } else {
+                Level::Warn
+            },
+            Target::Runtime,
+            "codex_models.lookup",
+            Context::peer(owner),
+            || {
+                json!({"accepted":result.is_ok(),
+                       "count":result.as_ref().ok().and_then(|v| v["models"].as_array()).map(Vec::len)})
+            },
+            || Value::Null,
+        );
+        result
+    }
     pub fn runtime_info(&self) -> Value {
         let mut info = json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]});
         info["platform"] =
@@ -1446,6 +1481,7 @@ impl Jobs {
             directory,
             runs: Mutex::new(HashMap::new()),
             codex_path,
+            codex_catalog: Mutex::new(()),
             inference,
             _lock: lock,
         });

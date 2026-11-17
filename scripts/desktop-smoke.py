@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
     try:
         tokens=[]
         for i in range(2):
-            process=subprocess.Popen(command+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{ports[i]}','--ui',f'127.0.0.1:{controls[i]}','--codex',str(fake_codex())],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+            process=subprocess.Popen(command+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{ports[i]}','--ui',f'127.0.0.1:{controls[i]}','--codex',str(fake_codex())],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,env=os.environ|{'BOXEN_FIXTURE_MODEL_MACHINE':('local','remote')[i]})
             processes.append(process)
             lines=[process.stdout.readline() for _ in range(3)]
             assert 'Local controls:' in lines[-1]

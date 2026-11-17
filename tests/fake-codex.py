@@ -301,6 +301,18 @@ for line in sys.stdin:
         continue
     if method == "initialize":
         result = {"userAgent": "fixture"}
+    elif method == "model/list":
+        assert request["params"].get("includeHidden") is False
+        machine = os.environ.get("BOXEN_FIXTURE_MODEL_MACHINE", "fixture")
+        cursor = request["params"].get("cursor")
+        if cursor is None:
+            result = {"data": [
+                {"id": f"{machine}-picker-id", "model": f"{machine}-primary", "displayName": f"{machine.title()} Primary"},
+                {"model": "hidden-fixture", "hidden": True},
+            ], "nextCursor": "more-models"}
+        else:
+            assert cursor == "more-models"
+            result = {"data": [{"model": f"{machine}-secondary", "displayName": f"{machine.title()} Secondary"}], "nextCursor": None}
     elif method == "thread/read" and import_root:
         assert request['params'].get('includeTurns') is False
         if request['params']['threadId'] != native_import_id:

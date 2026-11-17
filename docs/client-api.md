@@ -102,6 +102,15 @@ Native clients may also speak the existing peer protocol directly when they have
 
 Diagnostic subscriptions, file control, and the authenticated `infrastructure_history` operation are documented in [logging](logging.md). Workload events and bounded infrastructure history remain retained even when diagnostics are off. This slice offers neither offline history replicas nor automatic reconciliation of unknown tool side effects.
 
+## Codex model selection
+
+The operation `{"op":"codex_models"}` returns the selected machine's picker
+catalog as `{"models":[{"model":"example-model","label":"Example Model"}]}`.
+The destination daemon queries its configured Codex app-server under its
+workload account. Use `model` in submissions and display `label` in pickers.
+An empty model in a submission selects the machine's configured default.
+This query starts no thread or inference turn.
+
 ## Built-in inference events
 
 The authenticated operation `{"op":"runtime_info"}` reports available runtime kinds and configuration readiness without returning credentials. OpenRouter threads use the existing start/list/control/watch operations; resident creation adds optional `backend` (default `codex`). See [inference](inference.md) for configuration, lifecycle, limits and verification.
