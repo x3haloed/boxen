@@ -160,6 +160,44 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
     try:
         assert api({'op':'runtime_info'})['backends'][1]['configured']
         log=directory/'runtime-log.jsonl';api({'op':'log_file','path':str(log),'filter':{'targets':['runtime'],'events':['inference.']}})
+        run_id=secrets.token_hex(32)
+        spec={'id':run_id,'thread_id':run_id,'backend':'openrouter','model':'fixture','cwd':temp,
+              'prompt':'WAIT_EFFECT','reasoning_effort':'low'}
+        before=len(observed)
+        run=api({'op':'start','spec':spec})
+        until(run,'reasoning_delta')
+        settings={'op':'thread_reasoning','id':run_id}
+        prior=api(settings)
+        updated=api({**settings,'patch':{'expected_version':prior['version'],'reasoning_effort':'high'}})
+        assert collect(run)[1]['status']=='completed'
+        assert [b['reasoning'] for b in observed[before:]]==[{'effort':'low'}]*2
+        assert all(b['provider']['require_parameters'] for b in observed[before:])
+        processes[-1].kill();processes[-1].wait(timeout=5);tokens[1]=daemon(1)
+        assert api(settings)==updated
+        before=len(observed)
+        follow=start('FOLLOWUP',thread=run_id)
+        assert collect(follow)[1]['status']=='completed'
+        assert observed[before]['reasoning']=={'effort':'high'}
+        assert api({'op':'get','id':run_id})['record']['reasoning_effort']=='low'
+        prior=api(settings)
+        api({**settings,'patch':{'expected_version':prior['version'],'reasoning_effort':'default'}})
+        before=len(observed)
+        assert collect(start('FOLLOWUP',thread=run_id))[1]['status']=='completed'
+        assert 'reasoning' not in observed[before]
+        r=api({'op':'resident_create','spec':{'id':secrets.token_hex(32),'name':'Reasoning resident','cwd':temp,
+               'backend':'openrouter','model':'fixture','reasoning_effort':'minimal','auto_activate':False}})
+        for effort in ('minimal','max','default'):
+            if effort!='minimal':
+                r=api({'op':'resident_update','id':r['id'],'patch':{'expected_revision':r['revision'],
+                       'reasoning_effort':effort}})
+            before=len(observed)
+            activation=activate(r)
+            assert collect(activation)[1]['status']=='completed'
+            assert activation['record']['reasoning_effort']==effort
+            assert observed[before].get('reasoning')==(None if effort=='default' else {'effort':effort})
+        (directory/'effect.txt').unlink()
+        print('PASS OpenRouter reasoning wire values, strict routing, active run isolation, restart and default reset')
+
         coordination=start('AGENT_WORK');assert collect(coordination)[1]['status']=='completed'
         assert result(coordination)['response']=='BUILT_IN_WORK_COMPLETE'
         print('PASS built-in agent discovery and ordinary child work through the shared tool authority')
@@ -176,7 +214,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         interrupted=start('INTERRUPT_AFTER_EFFECT');assert collect(interrupted)[1]['status']=='interrupted'
         assert (directory/'uncertain.txt').read_text()=='once'
         # Restart the executing daemon. No prior prompt or tool is automatically submitted again.
-        processes[1].kill();processes[1].wait(timeout=5);tokens[1]=daemon(1)
+        processes[-1].kill();processes[-1].wait(timeout=5);tokens[1]=daemon(1)
         recovery=start('RECOVER',interrupted['record']['spec']['thread_id']);assert collect(recovery)[1]['status']=='completed'
         assert (directory/'uncertain.txt').read_text()=='once'
         print('PASS no truncated-call execution, malformed argument rejection, restart continuation and no completed-effect replay')

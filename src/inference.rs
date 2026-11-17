@@ -220,11 +220,11 @@ fn exchange(
     if payload.len() > media::REQUEST_LIMIT {
         return Err("inference request exceeds 24 MiB; full history remains retained".into());
     }
-    run.append("inference_attempt",json!({"step":step,"model":body["model"],"endpoint":config.endpoint,"request_bytes":payload.len(),"purpose":purpose}))?;
+    run.append("inference_attempt",json!({"step":step,"model":body["model"],"endpoint":config.endpoint,"request_bytes":payload.len(),"reasoning_effort":body["reasoning"]["effort"],"purpose":purpose}))?;
     run.diagnostic(
         Level::Info,
         "inference.exchange.starting",
-        || json!({"step":step,"model":body["model"],"bytes":payload.len(),"purpose":purpose}),
+        || json!({"step":step,"model":body["model"],"bytes":payload.len(),"reasoning_effort":body["reasoning"]["effort"],"purpose":purpose}),
         || body.clone(),
     );
     let record = run.snapshot().record;
@@ -808,6 +808,9 @@ pub fn execute(
             );
         }
         let mut body = json!({"model":model,"messages":wire_messages,"tools":tools,"stream":true,"stream_options":{"include_usage":true},"max_tokens":run.snapshot().record.runtime_policy.max_output_tokens,"provider":run.snapshot().record.runtime_policy.provider()});
+        if let Some(effort) = crate::reasoning::requested(record.reasoning_effort.as_deref()) {
+            body["reasoning"] = json!({"effort":effort});
+        }
         if policy.max_output_tokens.is_none() {
             body.as_object_mut().unwrap().remove("max_tokens");
         }

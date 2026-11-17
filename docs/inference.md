@@ -27,7 +27,7 @@ SSE parsing and conservative native-state projection are shared with the earlier
 
 The GUI and shell watchers receive assistant text, backend-exposed reasoning text, tool-argument fragments, shell output, and status as they occur. Closing a viewer does not stop the daemon's run. Reconnection uses the existing contiguous per-run sequence. Each exchange has its own step number; complete assistant messages reconcile streamed deltas without duplicating the displayed final response.
 
-Reasoning uses the selected model’s provider defaults. A universal reasoning-disable parameter rejects routes without that parameter under strict routing; Boxen does not send it. Returned reasoning text/state is still observed and retained. Real signed-state compatibility across models/routes is not established by this slice; indexed opaque-state fixture round trips are narrower evidence.
+Reasoning uses the model’s provider defaults unless an explicit [reasoning effort](reasoning.md) is saved for the conversation. A run captures that setting at acceptance. Returned reasoning text/state is observed and retained. Real signed-state compatibility across models/routes is not established by this slice; indexed opaque-state fixture round trips are narrower evidence.
 
 ## Tools and communication
 

@@ -265,6 +265,7 @@ pub fn resident_tool(
             Ok(serde_json::to_value(jobs.start(
                 owner,
                 Spec {
+                    reasoning_effort: None,
                     attachments: vec![],
                     resident_id: None,
                     context: None,

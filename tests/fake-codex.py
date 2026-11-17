@@ -366,8 +366,19 @@ for line in sys.stdin:
         if method == 'thread/resume' and (pathlib.Path(request['params']['cwd'])/'fixture-large-resume').exists():
             if not request['params'].get('excludeTurns', False):
                 result['thread']['turns'] = [{'id':'historical-large-turn','text':'x'*(4*1024*1024)}]
+    elif method == "config/read":
+        result = {"config": {"model_reasoning_effort": "medium"}}
     elif method == "turn/start":
+        params = request["params"]
+        prompt = params["input"][0]["text"]
+        direction = (json.loads(prompt.split("\n", 1)[1])["directions"]
+                     if prompt.startswith("Message activation.") else prompt)
+        if direction.startswith("EXPECT_EFFORT:"):
+            effort = direction.split(":", 1)[1]
+            expected = "medium" if effort == "default" else effort
+            assert params.get("effort") == expected, params
         if request["params"]["input"][0]["text"] == "WORKSPACE_MOVE_FIXTURE":
+            assert params["effort"] == "high"
             assert session_method == "thread/start"
             assert any(tool["name"]=="boxen_thread_files" for tool in session_params["dynamicTools"])
             assert "First thought" in session_params["developerInstructions"]

@@ -427,6 +427,14 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                         .transpose()?,
                 )?,
             )?),
+            "thread_reasoning" => jobs.thread_reasoning(
+                owner,
+                request["id"].as_str().ok_or("thread id required")?,
+                request
+                    .get("patch")
+                    .map(|v| serde_json::from_value(v.clone()))
+                    .transpose()?,
+            ),
             "context" => jobs.context_operation(
                 owner,
                 request["thread_id"].as_str().ok_or("thread_id required")?,
@@ -527,12 +535,11 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 .get(owner, request["id"].as_str().ok_or("resident id required")?)?
                 .value()),
             "resident_update" => {
-                let resident = jobs.residents.update(
+                let resident = jobs.update_resident(
                     owner,
                     request["id"].as_str().ok_or("resident id required")?,
                     serde_json::from_value(request["patch"].clone())?,
                 )?;
-                jobs.notify();
                 Ok(resident.value())
             }
             "thread_activity" => {

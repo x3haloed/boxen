@@ -192,6 +192,7 @@ impl Jobs {
                     .ok_or_else(|| "continuation did not accept an activation".into());
             }
             let mut spec: Spec = prior.record.spec;
+            spec.reasoning_effort = None;
             if prior.record.automatic_cwd {
                 spec.cwd.clear();
             }

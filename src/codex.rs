@@ -52,6 +52,7 @@ struct Rpc {
     next_id: u64,
     replies: HashMap<u64, Value>,
     awaiting: HashSet<u64>,
+    config_reply: Option<u64>,
     steering: HashMap<u64, Value>,
     pending: HashSet<String>,
     thread: Option<String>,
@@ -149,6 +150,9 @@ impl Rpc {
     fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.send(method, params)?;
         self.awaiting.insert(id);
+        if method == "config/read" {
+            self.config_reply = Some(id);
+        }
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if let Some(reply) = self.replies.remove(&id) {
@@ -168,6 +172,36 @@ impl Rpc {
             }
             self.tick()?;
         }
+    }
+    fn default_effort(&mut self, cwd: &str, session: &Value) -> Result<String> {
+        let config = self.request("config/read", json!({"cwd":cwd,"includeLayers":false}))?;
+        if let Some(effort) = config["effort"].as_str() {
+            return Ok(effort.into());
+        }
+        let model = session["model"]
+            .as_str()
+            .ok_or("Codex did not identify the session model")?;
+        let mut params = json!({"includeHidden":true,"limit":100});
+        if let Some(provider) = session["modelProvider"].as_str() {
+            params["modelProvider"] = json!(provider);
+        }
+        for _ in 0..8 {
+            let catalog = self.request("model/list", params.clone())?;
+            if let Some(effort) = catalog["data"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|entry| entry["model"] == model || entry["id"] == model)
+                .and_then(|entry| entry["defaultReasoningEffort"].as_str())
+            {
+                return Ok(effort.into());
+            }
+            let Some(cursor) = catalog["nextCursor"].as_str() else {
+                break;
+            };
+            params["cursor"] = json!(cursor);
+        }
+        Err("Codex reported no reasoning default for this model; an explicit supported level can start the next turn".into())
     }
     fn tick(&mut self) -> Result<()> {
         while let Ok(control) = self.controls.try_recv() {
@@ -249,7 +283,23 @@ impl Rpc {
         }
         Ok(())
     }
-    fn ingest(&mut self, message: Value) -> Result<()> {
+    fn ingest(&mut self, mut message: Value) -> Result<()> {
+        if let Some(id) = self.config_reply
+            && message.get("method").is_none()
+            && message["id"] == id
+        {
+            self.config_reply = None;
+            // Only this value is needed. Host configuration can carry credentials in
+            // arbitrary fields; the full response must never reach diagnostic payloads.
+            message = if message["error"].is_null() {
+                let effort = message["result"]["config"]["model_reasoning_effort"]
+                    .as_str()
+                    .filter(|effort| crate::reasoning::validate("codex", effort).is_ok());
+                json!({"id":id,"result":{"effort":effort}})
+            } else {
+                json!({"id":id,"error":{"message":"Codex did not return its effective configuration"}})
+            };
+        }
         self.run.diagnostic(Level::Trace,"rpc.received",||json!({"method":message["method"],"id":message["id"],"error":!message["error"].is_null()}),||message.clone());
         if message.get("method").is_none() {
             if let Some(id) = message["id"].as_u64() {
@@ -551,6 +601,7 @@ pub fn execute(
         next_id: 1,
         replies: HashMap::new(),
         awaiting: HashSet::new(),
+        config_reply: None,
         steering: HashMap::new(),
         pending: HashSet::new(),
         thread: None,
@@ -759,16 +810,33 @@ pub fn execute(
         run.status("cancelled", "Cancelled before inference started")?;
         return Ok(());
     }
-    run.status("running", "Starting Codex turn")?;
     let mut input = Vec::new();
     if !spec.prompt.is_empty() {
         input.push(json!({"type":"text","text":spec.prompt}));
     }
     input.push(json!({"type":"text","text":format!("Boxen provides the following current-run metadata independently of the request author. {}{}{}",trigger_context,execution_context,rpc.jobs.attachments.context(&spec.attachments))}));
-    let response = rpc.request(
-        "turn/start",
-        json!({"threadId":thread,"input":input,"summary":"auto"}),
-    )?;
+    // An omitted turn override resumes the previous effort. Explicit reset therefore
+    // resolves and sends a fresh default without changing the native thread.
+    let effort = match record.reasoning_effort.as_deref() {
+        Some("default") => Some(rpc.default_effort(&spec.cwd, &result)?),
+        value => value.map(str::to_owned),
+    };
+    if rpc.cancel_requested {
+        run.status("cancelled", "Cancelled before inference started")?;
+        return Ok(());
+    }
+    run.status("running", "Starting Codex turn")?;
+    let mut turn = json!({"threadId":thread,"input":input,"summary":"auto"});
+    if let Some(effort) = &effort {
+        turn["effort"] = json!(effort);
+    }
+    run.diagnostic(
+        Level::Info,
+        "backend.turn_requested",
+        || json!({"backend_thread_id":thread,"reasoning_effort":effort}),
+        || Value::Null,
+    );
+    let response = rpc.request("turn/start", turn)?;
     rpc.turn = response["turn"]["id"].as_str().map(str::to_owned);
     if !rpc.finished {
         run.status("running", "Codex is executing on this machine")?;

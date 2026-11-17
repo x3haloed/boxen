@@ -115,6 +115,7 @@ mod tests {
         let id = state::random_hex().unwrap();
         state::private_dir(&path.join(&id)).unwrap();
         let record = Record {
+            reasoning_effort: None,
             execution: None,
             automatic_cwd: false,
             after: None,
@@ -130,6 +131,7 @@ mod tests {
             mailbox: None,
             created_at: now(),
             spec: Spec {
+                reasoning_effort: None,
                 attachments: vec![],
                 context: None,
                 id: id.clone(),
@@ -195,6 +197,8 @@ pub fn valid_id(id: &str) -> Result<()> {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Spec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<crate::attachments::Attachment>,
 
@@ -222,6 +226,9 @@ pub struct Event {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Record {
+    /// Setting captured at acceptance; separate from the input used for exact-ID retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<crate::execution::Execution>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -412,6 +419,21 @@ impl Run {
             record.execution = serde_json::from_value(event.data.clone()).ok();
         }
         record.execution_context()
+    }
+    fn reasoning_setting(&self) -> (Option<String>, u64) {
+        let inner = self.inner.lock().unwrap();
+        if let Some(event) = inner
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.kind == "thread_reasoning_changed")
+        {
+            return (
+                event.data["reasoning_effort"].as_str().map(str::to_owned),
+                event.seq,
+            );
+        }
+        (inner.snapshot.record.reasoning_effort.clone(), 0)
     }
     pub fn retained_events(&self, kind: &str) -> Vec<Event> {
         self.inner
@@ -786,10 +808,10 @@ impl Jobs {
         self.directory.parent()
     }
 
-    fn scheduled_thread(&self, owner: &str, id: &str) -> Result<Spec> {
+    fn anonymous_thread_spec(&self, owner: &str, id: &str) -> Result<Spec> {
         valid_id(id)?;
         if self.residents.get(owner, id).is_ok() {
-            return Err("resident schedules and subscriptions address a resident target, not an anonymous thread target".into());
+            return Err("identity-bearing conversations use resident operations".into());
         }
         let mut records: Vec<_> = self
             .runs
@@ -805,11 +827,12 @@ impl Jobs {
         }
         let last = records
             .last()
-            .ok_or("thread schedule addresses an existing identity-less thread")?;
+            .ok_or("operation addresses an existing anonymous thread")?;
         if last.record.resident.is_some() {
-            return Err("resident schedules use the resident activation handler".into());
+            return Err("identity-bearing conversations use resident operations".into());
         }
         let mut spec = last.record.spec.clone();
+        spec.reasoning_effort = None;
         if last.record.automatic_cwd {
             spec.cwd.clear();
         }
@@ -875,7 +898,7 @@ impl Jobs {
                             self.residents.get(owner, id)?;
                         }
                         crate::scheduler::Handler::Thread { id } => {
-                            self.scheduled_thread(owner, id)?;
+                            self.anonymous_thread_spec(owner, id)?;
                         }
                         crate::scheduler::Handler::Source { .. }
                         | crate::scheduler::Handler::Delivery { .. } => return Err(
@@ -1050,13 +1073,13 @@ impl Jobs {
                         }),
                     crate::scheduler::Handler::Source { .. }
                     | crate::scheduler::Handler::Delivery { .. } => unreachable!(),
-                    crate::scheduler::Handler::Thread { id } => {
-                        self.scheduled_thread(&job.owner, id).and_then(|mut spec| {
+                    crate::scheduler::Handler::Thread { id } => self
+                        .anonymous_thread_spec(&job.owner, id)
+                        .and_then(|mut spec| {
                             spec.id = run_id.clone();
                             spec.prompt = job.definition.directions.clone();
                             self.start_locked(&job.owner, spec, None, Some(origin.clone()), None)
-                        })
-                    }
+                        }),
                 };
                 match dispatched {
                     Ok(snapshot) => {
@@ -1104,7 +1127,7 @@ impl Jobs {
             },
             "subscribe"=>{
                 let spec:crate::events::SubscriptionSpec=serde_json::from_value(args["spec"].clone())?;
-                match &spec.target {crate::scheduler::Handler::Resident{id}=>{self.residents.get(owner,id)?;},crate::scheduler::Handler::Thread{id}=>{self.scheduled_thread(owner,id)?;},_=>return Err("subscriptions target residents or threads".into())}
+                match &spec.target {crate::scheduler::Handler::Resident{id}=>{self.residents.get(owner,id)?;},crate::scheduler::Handler::Thread{id}=>{self.anonymous_thread_spec(owner,id)?;},_=>return Err("subscriptions target residents or threads".into())}
                 let sub=self.observations.subscribe(owner,spec)?;
                 self.schedules.create(owner,crate::scheduler::Definition{id:crate::events::timer_id("delivery",&sub.spec.id),name:format!("Batch {}",sub.spec.id),target:crate::scheduler::Handler::Delivery{id:sub.spec.id.clone()},directions:String::new(),at_ms:args["at_ms"].as_u64().unwrap_or(sub.created_at_ms+sub.spec.interval_ms),interval_ms:Some(sub.spec.interval_ms)})?;
                 Ok(json!(sub))
@@ -1178,7 +1201,7 @@ impl Jobs {
                         )?
                         .ok_or("observation activation was not accepted")?,
                     crate::scheduler::Handler::Thread { id: ref target } => {
-                        let mut spec = self.scheduled_thread(&owner, target)?;
+                        let mut spec = self.anonymous_thread_spec(&owner, target)?;
                         spec.id = id;
                         spec.prompt = directions.into();
                         self.start_locked(&owner, spec, None, None, None)?
@@ -1206,6 +1229,67 @@ impl Jobs {
                 );
             }
         }
+    }
+    pub fn thread_reasoning(
+        &self,
+        owner: &str,
+        id: &str,
+        patch: Option<crate::reasoning::Patch>,
+    ) -> Result<Value> {
+        let _transition = self.transitions.lock().unwrap();
+        let result: Result<Value> = (|| {
+            valid_id(id)?;
+            if self
+                .placement(id)?
+                .is_some_and(|m| m.target != self.machine_id())
+            {
+                return Err("conversation execution moved to another machine".into());
+            }
+            let spec = self.anonymous_thread_spec(owner, id)?;
+            let head = self.get(owner, &spec.id)?;
+            let (mut effort, mut seq) = head.reasoning_setting();
+            let mut version = format!("{}:{seq}", spec.id);
+            if let Some(patch) = &patch {
+                if patch.expected_version != version {
+                    return Err("thread reasoning version conflict; a read returns the current setting and version".into());
+                }
+                crate::reasoning::validate(&spec.backend, &patch.reasoning_effort)?;
+                effort = Some(patch.reasoning_effort.clone());
+                seq = head
+                    .append(
+                        "thread_reasoning_changed",
+                        json!({"reasoning_effort":effort}),
+                    )?
+                    .seq;
+                version = format!("{}:{seq}", spec.id);
+                self.notify();
+            }
+            Ok(
+                json!({"thread_id":id,"backend":spec.backend,"model":spec.model,
+                      "reasoning_effort":effort.as_deref().unwrap_or("default"),"version":version}),
+            )
+        })();
+        logging::record(
+            if result.is_ok() {
+                Level::Info
+            } else {
+                Level::Warn
+            },
+            Target::State,
+            "thread_reasoning.operation",
+            Context {
+                thread_id: Some(id),
+                peer_id: Some(owner),
+                ..Context::default()
+            },
+            || {
+                json!({"update":patch.is_some(),"accepted":result.is_ok(),
+                     "reasoning_effort":result.as_ref().ok().map(|v| &v["reasoning_effort"]),
+                     "error":result.as_ref().err().map(|e|e.to_string())})
+            },
+            || Value::Null,
+        );
+        result
     }
     pub fn context_operation(&self, owner: &str, thread: &str, args: Value) -> Result<Value> {
         let _transition = self.transitions.lock().unwrap();
@@ -1780,6 +1864,7 @@ impl Jobs {
         }
         activation.message_ids = batch.iter().map(|m| m.id.clone()).collect();
         let spec = Spec {
+            reasoning_effort: None,
             attachments: batch
                 .iter()
                 .flat_map(|m| m.attachments.iter().cloned())
@@ -2239,6 +2324,17 @@ impl Jobs {
         );
         outcome
     }
+    pub fn update_resident(
+        &self,
+        owner: &str,
+        id: &str,
+        patch: crate::residents::Patch,
+    ) -> Result<Resident> {
+        let _transition = self.transitions.lock().unwrap();
+        let resident = self.residents.update(owner, id, patch)?;
+        self.notify();
+        Ok(resident)
+    }
     pub fn create_resident(&self, owner: &str, spec: Create) -> Result<Resident> {
         let _transition = self.transitions.lock().unwrap();
         if self
@@ -2315,7 +2411,7 @@ impl Jobs {
             Target::Workload,
             "submission.received",
             Context::run(&spec.id, &spec.thread_id, owner),
-            || json!({"backend":spec.backend,"cwd":spec.cwd,"model":spec.model,"prompt_bytes":spec.prompt.len()}),
+            || json!({"backend":spec.backend,"cwd":spec.cwd,"model":spec.model,"reasoning_effort":spec.reasoning_effort,"prompt_bytes":spec.prompt.len()}),
             || json!({"prompt":spec.prompt}),
         );
         valid_id(&spec.id)?;
@@ -2438,6 +2534,22 @@ impl Jobs {
                 }
             }
         }
+        let reasoning_effort = if let Some(resident) = &resident {
+            resident.reasoning_effort.clone()
+        } else if let Some(head) = head {
+            if spec.reasoning_effort.is_some() {
+                return Err(
+                    "existing anonymous threads change reasoning effort through thread_reasoning"
+                        .into(),
+                );
+            }
+            runs[&head.record.spec.id].reasoning_setting().0
+        } else {
+            if let Some(effort) = &spec.reasoning_effort {
+                crate::reasoning::validate(&spec.backend, effort)?;
+            }
+            spec.reasoning_effort.clone()
+        };
         let previous_machine = head
             .map(|head| self.run_machine(&head.record.spec.id))
             .transpose()?;
@@ -2498,6 +2610,7 @@ impl Jobs {
         let path = self.directory.join(&spec.id);
         state::private_dir(&path)?;
         let record = Record {
+            reasoning_effort,
             execution: Some(execution),
             automatic_cwd,
             after: after.map(str::to_owned),
@@ -2562,7 +2675,7 @@ impl Jobs {
             Target::Workload,
             "submission.accepted",
             Context::run(&spec.id, &spec.thread_id, owner),
-            || json!({"backend":spec.backend,"cwd":spec.cwd,"automatic_cwd":automatic_cwd,"runtime_policy":snapshot.record.runtime_policy}),
+            || json!({"backend":spec.backend,"cwd":spec.cwd,"automatic_cwd":automatic_cwd,"reasoning_effort":snapshot.record.reasoning_effort,"runtime_policy":snapshot.record.runtime_policy}),
             || Value::Null,
         );
         let binary = self.codex_path.clone();

@@ -21,6 +21,8 @@ fn default_quota() -> usize {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Create {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(default = "crate::context::Settings::resident")]
     pub context: crate::context::Settings,
     pub id: String,
@@ -41,6 +43,8 @@ pub struct Create {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Resident {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promotion: Option<Promotion>,
     #[serde(default = "crate::context::Settings::resident")]
@@ -66,6 +70,7 @@ pub struct Resident {
 impl Resident {
     pub(crate) fn prototype(owner: &str, machine: &str, initial: &Create) -> Self {
         Resident {
+            reasoning_effort: initial.reasoning_effort.clone(),
             context: initial.context.clone(),
             id: initial.id.clone(),
             owner: owner.into(),
@@ -99,6 +104,9 @@ impl Resident {
         }
         if !matches!(self.backend.as_str(), "codex" | "openrouter") {
             return Err("unsupported resident backend".into());
+        }
+        if let Some(effort) = &self.reasoning_effort {
+            crate::reasoning::validate(&self.backend, effort)?;
         }
         state::key(&self.owner)?;
         state::key(&self.machine_id)?;
@@ -168,6 +176,7 @@ pub struct Promotion {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Patch {
+    pub reasoning_effort: Option<String>,
     pub model: Option<String>,
     pub context: Option<crate::context::Settings>,
     pub expected_revision: u64,
@@ -365,7 +374,7 @@ impl Residents {
                 peer_id: Some(owner),
                 ..Context::default()
             },
-            || json!({"revision":1,"used_bytes":resident.used_bytes(),"quota_bytes":resident.quota_bytes}),
+            || json!({"revision":1,"reasoning_effort":resident.reasoning_effort,"used_bytes":resident.used_bytes(),"quota_bytes":resident.quota_bytes}),
             || Value::Null,
         );
         Ok(resident)
@@ -540,6 +549,9 @@ impl Residents {
             }
             r.model = value;
         }
+        if let Some(value) = patch.reasoning_effort {
+            r.reasoning_effort = Some(value);
+        }
         if let Some(value) = patch.context {
             r.context = value;
         }
@@ -589,7 +601,7 @@ impl Residents {
                 peer_id: Some(owner),
                 ..Context::default()
             },
-            || json!({"revision":resident.revision,"used_bytes":resident.used_bytes(),"quota_bytes":resident.quota_bytes,"model":resident.model}),
+            || json!({"revision":resident.revision,"used_bytes":resident.used_bytes(),"quota_bytes":resident.quota_bytes,"model":resident.model,"reasoning_effort":resident.reasoning_effort}),
             || Value::Null,
         );
         Ok(resident)
@@ -648,6 +660,7 @@ impl Residents {
                 owner,
                 id,
                 Patch {
+                    reasoning_effort: None,
                     model: None,
                     context: None,
                     expected_revision: input

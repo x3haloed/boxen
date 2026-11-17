@@ -401,6 +401,16 @@ impl Jobs {
                 {
                     return Err("conversation changed before the move could begin".into());
                 }
+                // A terminal head can still accept an operator settings event. The
+                // manifest must include it, or the source would fence out its own update.
+                let journal = candidate
+                    .files
+                    .iter()
+                    .find(|f| f.run == head && f.name == "events.jsonl")
+                    .ok_or("move manifest is missing the head journal")?;
+                if fs::metadata(journal.path(&self.directory))?.len() != journal.size {
+                    return Err("conversation journal changed before the move could begin".into());
+                }
                 self.publish_move(&candidate)?;
                 self.move_diagnostic("thread_move.source_fenced", &candidate);
             }

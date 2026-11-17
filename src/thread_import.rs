@@ -157,6 +157,7 @@ impl Jobs {
                 .saturating_add(1),
         );
         let record = Record {
+            reasoning_effort: None,
             execution: None,
             automatic_cwd: false,
             after: None,
@@ -176,6 +177,7 @@ impl Jobs {
             recovery: None,
             mailbox: None,
             spec: Spec {
+                reasoning_effort: None,
                 attachments: vec![],
                 context: None,
                 resident_id: None,

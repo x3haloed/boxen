@@ -119,6 +119,7 @@ impl Jobs {
                 imported_at: at,
             };
             let record = Record {
+                reasoning_effort: None,
                 execution: None,
                 automatic_cwd: false,
                 after: None,
@@ -132,6 +133,7 @@ impl Jobs {
                 recovery: None,
                 mailbox: None,
                 spec: Spec {
+                    reasoning_effort: None,
                     attachments: vec![],
                     context: Some(resident.context.clone()),
                     resident_id: Some(resident.id.clone()),

@@ -157,6 +157,50 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
                     assert batch["snapshot"]["status"] == "completed"
                     break
         print("PASS same operation/event contract for local execution")
+
+        def reasoning(thread, **patch):
+            return request({"op": "thread_reasoning", "id": thread, **({"patch": patch} if patch else {})})
+
+        initial = {**spec("EXPECT_EFFORT:low"), "reasoning_effort": "low"}
+        first = request({"op": "start", "spec": initial})
+        assert collect(initial["id"])[1]["status"] == "completed"
+        thread = initial["thread_id"]
+        initial_setting = reasoning(thread)
+        assert initial_setting["reasoning_effort"] == "low"
+        saved = reasoning(thread, expected_version=initial_setting["version"], reasoning_effort="high")
+        try:
+            reasoning(thread, expected_version=initial_setting["version"], reasoning_effort="medium")
+            raise AssertionError("stale settings write accepted")
+        except urllib.error.HTTPError as error:
+            assert b"version conflict" in error.read()
+        assert reasoning(thread) == saved
+        assert request({"op": "start", "spec": initial})["record"] == first["record"]
+        follow = spec("EXPECT_EFFORT:high", thread)
+        assert request({"op": "start", "spec": follow})["record"]["reasoning_effort"] == "high"
+        _, completed = collect(follow["id"])
+        assert completed["status"] == "completed"
+        assert completed["backend_thread"] == collect(initial["id"])[1]["backend_thread"]
+        reasoning(thread, expected_version=reasoning(thread)["version"], reasoning_effort="default")
+        following = spec("EXPECT_EFFORT:default", thread)
+        request({"op": "start", "spec": following})
+        assert collect(following["id"])[1]["status"] == "completed"
+
+        r = request({"op": "resident_create", "spec": {"id": secrets.token_hex(32), "name": "Test resident",
+                     "cwd": temporary, "model": "fixture", "reasoning_effort": "medium"}})
+        def activate(effort):
+            run_id = secrets.token_hex(32)
+            request({"op": "resident_activate", "id": r["id"], "activation_id": run_id,
+                     "directions": f"EXPECT_EFFORT:{effort}"})
+            state = collect(run_id)[1]
+            assert state["status"] == "completed", state
+            assert state["record"]["reasoning_effort"] == effort
+            return state
+        resident_first = activate("medium")
+        r = request({"op": "resident_update", "id": r["id"], "patch": {
+                     "expected_revision": r["revision"], "reasoning_effort": "high"}})
+        assert activate("high")["backend_thread"] == resident_first["backend_thread"]
+        print("PASS Codex reasoning effort for new, updated and reset threads and revisioned residents")
+
     finally:
         for process in processes:
             if process.poll() is None:

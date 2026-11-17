@@ -49,7 +49,7 @@ fn namespace(jobs: &Jobs, actor: &str, request: &Value) -> Result<String> {
     let thread = match op {
         "context" => request["thread_id"].as_str(),
         "start" => request["spec"]["thread_id"].as_str(),
-        "thread_activity" => request["id"].as_str(),
+        "thread_activity" | "thread_reasoning" => request["id"].as_str(),
         "resident_promote" => request["spec"]["thread_id"].as_str(),
         _ => None,
     };

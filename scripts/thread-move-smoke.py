@@ -107,6 +107,10 @@ with tempfile.TemporaryDirectory(prefix="boxen-thread-move-") as temp:
         op(0, op="attachment", action="write", file=file, offset=0, data=base64.b64encode(contents).decode())
         spec = {"id":thread,"thread_id":thread,"backend":"codex","prompt":"First thought", "attachments":[file]}
         op(0, op="start", spec=spec)
+        completed(0, thread)
+        setting = op(0, op="thread_reasoning", id=thread)
+        saved = op(0, op="thread_reasoning", id=thread,
+                   patch={"expected_version": setting["version"], "reasoning_effort": "high"})
         first = completed(0, thread)
         source_cwd = Path(first["record"]["spec"]["cwd"])
         assert source_cwd == homes[0]/"threads"/thread
@@ -123,6 +127,9 @@ with tempfile.TemporaryDirectory(prefix="boxen-thread-move-") as temp:
         retry = op(0, **move)
         assert retry["complete"] and retry["machine"] == keys[1] and retry["generation"] == 1
         assert op(1, op="get", id=thread) == first
+        assert op(1, op="thread_reasoning", id=thread) == saved
+        rejected(0, "execution moved", op="thread_reasoning", id=thread,
+                 patch={"expected_version": saved["version"], "reasoning_effort": "low"})
         assert (homes[1]/"threads"/thread).is_dir()
         assert not (homes[1]/"threads"/thread/"earlier.bin").exists()
         assert base64.b64decode(op(1, op="attachment", action="read", file=file, offset=0)["data"]) == contents
@@ -147,6 +154,7 @@ with tempfile.TemporaryDirectory(prefix="boxen-thread-move-") as temp:
         second = secrets.token_hex(32)
         op(1, op="start", after=thread, spec=dict(spec, id=second, prompt="WORKSPACE_MOVE_FIXTURE", attachments=[]))
         result = completed(1, second)
+        assert result["record"]["reasoning_effort"] == "high"
         change = result["record"]["execution_change"]
         assert change["previous"]["machine"] == keys[0] and change["current"]["machine"] == keys[1]
         assert change["current"]["cwd"] == str(homes[1]/"threads"/thread)

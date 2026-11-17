@@ -146,6 +146,8 @@ Discord permission is operator policy; resident attention independently selects 
 
 An operator can change a built-in inference resident’s model with a revision-checked resident update. Future activations use the saved model while accepted runs, source attribution, identity, memory, mailbox and canonical history remain intact. Backend and working-directory changes, managed-session model switching, and anonymous-thread model switching remain outside this operation. Definition application retains its existing post-execution pins.
 
+[Reasoning effort](reasoning.md) is a separate setting for anonymous threads and residents on both runtimes. A saved change applies to the next accepted run without changing the model or session. Codex model capabilities and OpenRouter model/provider routing determine how the requested setting is handled.
+
 ## Shared machine network
 
 Pairing admits a machine to one user's network, with propagated membership and full mutual operator access to existing agents and threads. Stored ownership remains provenance rather than an access barrier between members. Durable cross-host mail follows stable agent addresses through cached host directories and the existing correspondence journal. Hosts retain execution/history authority; membership and directories converge without replicating all journals. Removal is eventually propagated, with retained revocation records. Guest access, internet traversal, relocation and history replication remain separate work. See [network implementation](network.md).

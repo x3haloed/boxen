@@ -31,6 +31,7 @@ mod network;
 mod operator;
 mod platform;
 mod protocol;
+mod reasoning;
 mod resident_bridge;
 mod resident_definitions;
 mod residents;
@@ -75,7 +76,7 @@ boxen [--data-dir PATH] untrust PUBLIC_KEY\n\
 boxen [--data-dir PATH] peers\n\
 boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
-boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|openrouter] [--context JSON]\n\
+boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|openrouter] [--context JSON] [--reasoning-effort LEVEL]\n\
 boxen [--data-dir PATH] request HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] messages HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] discord-connector --instance ID [--url http://127.0.0.1:PORT]\n\
@@ -84,6 +85,7 @@ boxen [--data-dir PATH] guest-pubsub --instance ID [--config PATH] [--url http:/
 boxen [--data-dir PATH] guest-pubsub --check [--config PATH]\n\
 boxen [--data-dir PATH] events HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] schedule HOST:PORT PUBLIC_KEY JSON\n\
+boxen thread-reasoning HOST:PORT PUBLIC_KEY THREAD_ID [VERSION LEVEL]\n\
 boxen [--data-dir PATH] context HOST:PORT PUBLIC_KEY THREAD_ID JSON\n\
 boxen [--data-dir PATH] runs HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] import-transcript HOST:PORT PUBLIC_KEY REQUEST_JSON_FILE\n\
@@ -98,10 +100,10 @@ boxen [--data-dir PATH] log-status HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] log-off HOST:PORT PUBLIC_KEY\n\n\
 boxen residents HOST:PORT PUBLIC_KEY\n\
 boxen resident-promote HOST:PORT PUBLIC_KEY JSON_SPEC\n\
-boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|openrouter] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
+boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|openrouter] [--reasoning-effort LEVEL] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-class HOST:PORT PUBLIC_KEY JSON\n\
 boxen resident-get HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
-boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--model MODEL] [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
+boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--model MODEL] [--reasoning-effort LEVEL] [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-message HOST:PORT PUBLIC_KEY RESIDENT_ID BODY [--id MESSAGE_ID] [--subject SUBJECT] [--client-id ID]\n\
 boxen mailbox HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
 boxen inbox HOST:PORT PUBLIC_KEY [--client-id ID] [--after SEQUENCE]\n\
@@ -306,6 +308,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
             );
         }
         "resident-create" => {
+            let reasoning_effort = take_option(&mut args, "--reasoning-effort")?;
             let context: crate::context::Settings = take_option(&mut args, "--context")?
                 .map(|s| serde_json::from_str(&s))
                 .transpose()?
@@ -336,11 +339,12 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"resident_create","spec":{"backend":backend,"context":context,"id":id,"name":args[2],"cwd":args[3],"model":if args[4]=="-" {""}else{&args[4]},"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
+                    serde_json::json!({"op":"resident_create","spec":{"backend":backend,"reasoning_effort":reasoning_effort,"context":context,"id":id,"name":args[2],"cwd":args[3],"model":if args[4]=="-" {""}else{&args[4]},"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
                 )?
             );
         }
         "resident-update" => {
+            let reasoning_effort = take_option(&mut args, "--reasoning-effort")?;
             let model = take_option(&mut args, "--model")?;
             let context: Option<crate::context::Settings> = take_option(&mut args, "--context")?
                 .map(|s| serde_json::from_str(&s))
@@ -368,7 +372,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"resident_update","id":args[2],"patch":{"expected_revision":revision,"model":model,"context":context,"name":name,"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
+                    serde_json::json!({"op":"resident_update","id":args[2],"patch":{"expected_revision":revision,"reasoning_effort":reasoning_effort,"model":model,"context":context,"name":name,"identity":identity,"memory":memory,"quota_bytes":quota,"auto_activate":auto}})
                 )?
             );
         }
@@ -512,7 +516,19 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 )?
             );
         }
+        "thread-reasoning" if matches!(args.len(), 3 | 5) => {
+            let mut request = serde_json::json!({"op":"thread_reasoning","id":args[2]});
+            if args.len() == 5 {
+                request["patch"] =
+                    serde_json::json!({"expected_version":args[3],"reasoning_effort":args[4]});
+            }
+            println!(
+                "{}",
+                protocol::request(&state, &args[0], &args[1], request)?
+            );
+        }
         "start" => {
+            let reasoning_effort = take_option(&mut args, "--reasoning-effort")?;
             let context = take_option(&mut args, "--context")?
                 .map(|v| serde_json::from_str(&v))
                 .transpose()?;
@@ -523,6 +539,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 return Err("start requires HOST:PORT PUBLIC_KEY CWD MODEL PROMPT".into());
             }
             let spec = jobs::Spec {
+                reasoning_effort,
                 attachments: vec![],
                 resident_id: None,
                 context,

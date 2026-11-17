@@ -63,6 +63,7 @@ impl Jobs {
             }
             let native=history.iter().rev().find_map(|s|s.backend_thread.clone()).ok_or("thread has no accepted native session; promotion does not create a replacement")?;
             let initial = Create {
+                reasoning_effort: self.get(owner, &last.record.spec.id)?.reasoning_setting().0,
                 id: request.thread_id.clone(),
                 name: request.name.clone(),
                 identity: request.identity.clone(),
