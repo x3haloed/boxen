@@ -46,6 +46,89 @@ struct KeyFile {
     private_key: String,
 }
 
+impl KeyFile {
+    fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.is_empty() {
+            return Err("The credential file is empty (0 bytes).".into());
+        }
+        if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            return Err("The credential file starts with a UTF-8 byte-order mark (BOM).".into());
+        }
+        let text = std::str::from_utf8(bytes).map_err(|error| {
+            format!(
+                "The credential file is not UTF-8. Invalid encoding starts at byte {}.",
+                error.valid_up_to() + 1
+            )
+        })?;
+        match serde_json::from_str(text) {
+            Ok(key) => Ok(key),
+            Err(error) if error.is_data() => Err(Self::shape_error(text).into()),
+            Err(error) => Err(format!(
+                "Credential JSON {} at line {}, column {} ({} bytes read).",
+                if error.is_eof() {
+                    "ended early"
+                } else {
+                    "is invalid"
+                },
+                error.line(),
+                error.column(),
+                bytes.len()
+            )
+            .into()),
+        }
+    }
+
+    // Serde's data errors can contain values from the credential file. Only
+    // report known field names and types, never the unfiltered parser error.
+    fn shape_error(text: &str) -> String {
+        let Ok(value) = serde_json::from_str::<Value>(text) else {
+            return "The credential file contains malformed JSON.".into();
+        };
+        let Some(fields) = value.as_object() else {
+            return "Credential JSON must be an object.".into();
+        };
+        for name in ["type", "client_email", "private_key_id", "private_key"] {
+            match fields.get(name) {
+                None => return format!("Credential JSON is missing the `{name}` field."),
+                Some(Value::String(_)) => {}
+                Some(_) => return format!("Credential field `{name}` must be a string."),
+            }
+        }
+        "Credential JSON contains a duplicate service-account field.".into()
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::KeyFile;
+
+    #[test]
+    fn reports_credential_parse_failures_without_including_values() {
+        let cases: &[(&[u8], &str)] = &[
+            (b"", "empty (0 bytes)"),
+            (b"\xef\xbb\xbf{}", "byte-order mark"),
+            (b"\xff{}", "Invalid encoding starts at byte 1"),
+            (b"{\n \"type\":", "ended early at line 2"),
+            (b"{invalid}", "is invalid at line 1"),
+            (b"{}", "missing the `type` field"),
+            (
+                br#"{"type":"service_account","client_email":"sample","private_key_id":"id","private_key":["never-print-this"]}"#,
+                "field `private_key` must be a string",
+            ),
+            (
+                br#"{"type":"service_account","client_email":"sample","private_key_id":"id","private_key":"never-print-this","private_key":"never-print-this"}"#,
+                "duplicate service-account field",
+            ),
+        ];
+        for (input, expected) in cases {
+            let error = KeyFile::parse(input).err().expect("credential should fail");
+            let message = error.to_string();
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains("never-print-this"));
+        }
+    }
+}
+
 pub struct Connection {
     agent: ureq::Agent,
     account: String,
@@ -238,16 +321,15 @@ impl Connection {
         let path = host_path(path);
         let config: Config =
             read_json(&path).map_err(|_| "could not read guest connection settings")?;
-        let key: KeyFile = read_json(&resolve_key_path(&path, &config.credentials_file))
+        let bytes = fs::read(resolve_key_path(&path, &config.credentials_file))
             .map_err(|_| "could not read guest service account credentials")?;
-        Self::from_key(&config, key)
+        Self::from_key(&config, KeyFile::parse(&bytes)?)
     }
 
     /// Builds a connection from the exact bytes that first-run setup will save.
     /// The account identity comes from the selected service-account file.
     pub fn for_setup(config: &mut Config, credential: &[u8]) -> Result<Self> {
-        let key: KeyFile = serde_json::from_slice(credential)
-            .map_err(|_| "Choose a Google Cloud service-account JSON key.")?;
+        let key = KeyFile::parse(credential)?;
         config.service_account_email = key.client_email.clone();
         Self::from_key(config, key)
     }
@@ -263,10 +345,19 @@ impl Connection {
         {
             return Err("Check the project, outgoing topic, and incoming subscription IDs.".into());
         }
-        if key.kind != "service_account"
-            || key.client_email.is_empty()
-            || key.client_email != config.service_account_email
-        {
+        if key.kind != "service_account" {
+            return Err("Credential field `type` must be `service_account`.".into());
+        }
+        for (name, value) in [
+            ("client_email", &key.client_email),
+            ("private_key_id", &key.private_key_id),
+            ("private_key", &key.private_key),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("Credential field `{name}` is empty.").into());
+            }
+        }
+        if key.client_email != config.service_account_email {
             return Err("credential does not match the configured guest service account".into());
         }
         let pem = key

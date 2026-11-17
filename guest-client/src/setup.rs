@@ -153,20 +153,24 @@ fn install(
 }
 
 fn read_credential(path: &Path) -> Result<Vec<u8>> {
-    let invalid = "Choose a readable Google Cloud service-account JSON key.";
+    const TOO_LARGE: &str = "The credential file exceeds the 64 KiB limit.";
     let path = host_path(path);
-    let metadata = fs::metadata(&path).map_err(|_| invalid)?;
-    if !metadata.is_file() || metadata.len() > KEY_LIMIT {
-        return Err(invalid.into());
+    let metadata = fs::metadata(&path)
+        .map_err(|error| format!("Cannot access the selected credential file. {error}"))?;
+    if !metadata.is_file() {
+        return Err("The selected credential path is not a regular file.".into());
+    }
+    if metadata.len() > KEY_LIMIT {
+        return Err(TOO_LARGE.into());
     }
     let mut bytes = Vec::new();
     File::open(&path)
-        .map_err(|_| invalid)?
+        .map_err(|error| format!("Cannot open the selected credential file. {error}"))?
         .take(KEY_LIMIT + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| invalid)?;
+        .map_err(|error| format!("Cannot read the selected credential file. {error}"))?;
     if bytes.len() as u64 > KEY_LIMIT {
-        return Err(invalid.into());
+        return Err(TOO_LARGE.into());
     }
     Ok(bytes)
 }
