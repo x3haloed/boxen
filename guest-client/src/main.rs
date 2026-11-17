@@ -1,4 +1,5 @@
 //! Portable native client for a Boxen guest conversation.
+mod markdown;
 mod paint;
 mod session;
 mod setup;

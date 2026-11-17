@@ -32,26 +32,45 @@ impl Rect {
 
 pub struct Type {
     font: Font,
-    glyphs: HashMap<(char, u16), (Metrics, Vec<u8>)>,
+    mono: Font,
+    glyphs: HashMap<(char, u16, bool), (Metrics, Vec<u8>)>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub mono: bool,
 }
 
 impl Type {
     pub fn load() -> Result<Self, &'static str> {
-        Font::from_bytes(
-            include_bytes!("../assets/DM-Sans.ttf").as_slice(),
-            FontSettings::default(),
-        )
-        .map(|font| Self {
-            font,
+        let load = |data| Font::from_bytes(data, FontSettings::default());
+        Ok(Self {
+            font: load(include_bytes!("../assets/DM-Sans.ttf").as_slice())?,
+            mono: load(include_bytes!("../assets/Courier-Prime.ttf").as_slice())?,
             glyphs: HashMap::new(),
         })
     }
 
     pub fn width(&self, text: &str, size: i32) -> i32 {
+        self.styled_width(text, size, TextStyle::default())
+    }
+
+    pub fn styled_width(&self, text: &str, size: i32, style: TextStyle) -> i32 {
         text.chars()
-            .map(|ch| self.advance(ch, size))
+            .map(|ch| self.styled_advance(ch, size as f32, style))
             .sum::<f32>()
             .ceil() as i32
+    }
+
+    fn styled_advance(&self, ch: char, size: f32, style: TextStyle) -> f32 {
+        let font = if style.mono && self.mono.has_glyph(ch) {
+            &self.mono
+        } else {
+            &self.font
+        };
+        font.metrics(ch, size).advance_width
     }
 
     fn advance(&self, ch: char, size: i32) -> f32 {
@@ -177,6 +196,18 @@ impl<'a> Canvas<'a> {
     }
 
     pub fn text(&mut self, kind: &mut Type, x: i32, top: i32, size: i32, text: &str, color: u32) {
+        self.styled_text(kind, (x, top), size, text, color, TextStyle::default());
+    }
+
+    pub fn styled_text(
+        &mut self,
+        kind: &mut Type,
+        (x, top): (i32, i32),
+        size: i32,
+        text: &str,
+        color: u32,
+        style: TextStyle,
+    ) {
         let font_size = self.px(size).max(1) as u16;
         let mut pen = self.px(x) as f32;
         let baseline = self.px(top) + (font_size as f32 * 0.83).round() as i32;
@@ -187,15 +218,31 @@ impl<'a> Canvas<'a> {
         for ch in text.chars() {
             let (metrics, pixels) = kind
                 .glyphs
-                .entry((ch, font_size))
-                .or_insert_with(|| kind.font.rasterize(ch, f32::from(font_size)));
+                .entry((ch, font_size, style.mono))
+                .or_insert_with(|| {
+                    let face = if style.mono && kind.mono.has_glyph(ch) {
+                        &kind.mono
+                    } else {
+                        &kind.font
+                    };
+                    face.rasterize(ch, f32::from(font_size))
+                });
             let x = pen.round() as i32 + metrics.xmin;
             let y = baseline - metrics.ymin - metrics.height as i32;
             for (row, values) in pixels.chunks_exact(metrics.width.max(1)).enumerate() {
+                let shear = if style.italic {
+                    (baseline - y - row as i32) / 5
+                } else {
+                    0
+                };
                 for (col, &alpha) in values.iter().enumerate() {
-                    let p = (x + col as i32, y + row as i32);
+                    let p = (x + col as i32 + shear, y + row as i32);
                     if alpha > 0 && clip.contains(p) {
                         self.pixel(p, color, alpha);
+                        let bold = (p.0 + self.px(1).max(1), p.1);
+                        if style.bold && clip.contains(bold) {
+                            self.pixel(bold, color, alpha - alpha / 4);
+                        }
                     }
                 }
             }

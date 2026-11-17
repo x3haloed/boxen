@@ -1,4 +1,5 @@
 use crate::{
+    markdown::Layout as Markdown,
     paint::{Canvas, Rect, Type},
     session::{Entry, Session},
     setup::Installer,
@@ -335,6 +336,7 @@ enum Click {
     Remove(usize),
     DraftImage(usize),
     Open(Attachment),
+    Link(Arc<str>),
     ClosePreview,
     SavePreview,
     Latest,
@@ -454,6 +456,8 @@ struct Chat {
     notice: Option<String>,
     scroll: i32,
     history_bounds: (usize, i32, i32),
+    history_layout: HashMap<usize, Arc<Markdown>>,
+    bubble_heights: Vec<i32>,
     draft: Draft,
     draft_files: Vec<DraftFile>,
     thumbnails: HashMap<String, Option<RgbaImage>>,
@@ -501,6 +505,8 @@ impl Chat {
             notice: None,
             scroll: 0,
             history_bounds: (0, 0, 0),
+            history_layout: HashMap::new(),
+            bubble_heights: Vec::new(),
             draft: Draft::default(),
             draft_files: Vec::new(),
             thumbnails: HashMap::new(),
@@ -729,25 +735,36 @@ impl Chat {
         if self.hits.is_empty() {
             return;
         }
-        let active = self
+        let mut links = std::collections::HashSet::new();
+        let stops: Vec<_> = self
             .hits
+            .iter()
+            .filter(|(_, click)| {
+                if let Click::Link(url) = click {
+                    links.insert(url.as_ref())
+                } else {
+                    true
+                }
+            })
+            .collect();
+        let active = stops
             .iter()
             .position(|(_, click)| Some(click) == self.focus.as_ref())
             .or_else(|| {
-                self.hits
+                stops
                     .iter()
                     .position(|(_, click)| *click == Click::Composer)
             });
         let index = match active {
-            Some(index) if reverse => (index + self.hits.len() - 1) % self.hits.len(),
-            Some(index) => (index + 1) % self.hits.len(),
-            None if reverse => self.hits.len() - 1,
+            Some(index) if reverse => (index + stops.len() - 1) % stops.len(),
+            Some(index) => (index + 1) % stops.len(),
+            None if reverse => stops.len() - 1,
             None => 0,
         };
-        self.focus = if self.hits[index].1 == Click::Composer {
+        self.focus = if stops[index].1 == Click::Composer {
             None
         } else {
-            Some(self.hits[index].1.clone())
+            Some(stops[index].1.clone())
         };
     }
 
@@ -778,6 +795,13 @@ impl Chat {
                 Ok(bytes) => self.view_file(file.name, bytes, gui, true),
                 Err(_) => self.notice = Some("Attachment unavailable.".into()),
             },
+            Click::Link(url) => {
+                self.notice = Some(if gui.clipboard().set(&url) {
+                    "Link copied.".into()
+                } else {
+                    "Could not copy the link.".into()
+                });
+            }
             Click::ClosePreview => self.preview = None,
             Click::SavePreview => {
                 if let Some(preview) = &self.preview {
@@ -1067,19 +1091,19 @@ impl Chat {
         canvas.clip = rect;
         let max_width = (rect.w * 4 / 5).clamp(155, 575);
         let (previous_count, previous_width, previous_height) = self.history_bounds;
+        if previous_width != max_width || previous_count > history.len() {
+            self.bubble_heights.clear();
+            self.history_layout.clear();
+        }
         if previous_count != history.len() || previous_width != max_width {
-            let height = history
-                .iter()
-                .map(|entry| {
-                    let message = &entry.message;
-                    let lines = if message.body.is_empty() {
-                        0
-                    } else {
-                        font.wrap(&message.body, max_width - 28, TEXT_SIZE).len()
-                    };
-                    bubble_height(lines, message.files.len() + message.attachment_names.len()) + 10
-                })
-                .sum::<i32>();
+            for (index, entry) in history.iter().enumerate().skip(self.bubble_heights.len()) {
+                let message = &entry.message;
+                let layout = self.message_layout(index, &message.body, max_width, font);
+                let file_rows = message.files.len() + message.attachment_names.len();
+                self.bubble_heights
+                    .push(41 + layout.height + 42 * file_rows as i32);
+            }
+            let height = self.bubble_heights.iter().map(|height| height + 10).sum();
             if self.scroll > 0 && previous_width == max_width {
                 self.scroll = self.scroll.saturating_add(height - previous_height);
             }
@@ -1089,27 +1113,18 @@ impl Chat {
             .scroll
             .min((self.history_bounds.2 - 10 - rect.h).max(0));
         let mut bottom = rect.y + rect.h + self.scroll;
-        for entry in history.iter().rev() {
+        for (index, entry) in history.iter().enumerate().rev() {
             let message = &entry.message;
-            let lines = if message.body.is_empty() {
-                Vec::new()
-            } else {
-                font.wrap(&message.body, max_width - 28, TEXT_SIZE)
-            };
             let file_rows = message.files.len() + message.attachment_names.len();
-            let height = bubble_height(lines.len(), file_rows);
+            let height = self.bubble_heights[index];
             let top = bottom - height;
             if bottom <= rect.y {
                 break;
             }
             if top < rect.y + rect.h {
-                let widest = lines
-                    .iter()
-                    .map(|line| font.width(line, TEXT_SIZE))
-                    .max()
-                    .unwrap_or(0);
+                let layout = self.message_layout(index, &message.body, max_width, font);
                 let file_width = if file_rows == 0 { 0 } else { 280 };
-                let bubble_width = (widest.max(file_width) + 28).clamp(104, max_width);
+                let bubble_width = (layout.width.max(file_width) + 28).clamp(104, max_width);
                 let x = if entry.sent {
                     rect.x + rect.w - bubble_width
                 } else {
@@ -1123,13 +1138,13 @@ impl Chat {
                 let author = if entry.sent { "You" } else { &self.resident };
                 let author = font.ellipsis(author, bubble_width - 28, 12);
                 canvas.text(font, x + 14, top + 12, 12, &author, GREEN);
-                let mut y = top + 31;
-                for line in &lines {
-                    if y + LEADING > rect.y && y < rect.y + rect.h {
-                        canvas.text(font, x + 14, y, TEXT_SIZE, line, INK);
+                layout.draw(canvas, font, (x + 14, top + 31), |hit, url| {
+                    let visible = clip(hit, rect);
+                    if visible.w > 0 && visible.h > 0 {
+                        self.hits.push((visible, Click::Link(url)));
                     }
-                    y += LEADING;
-                }
+                });
+                let mut y = top + 31 + layout.height;
                 for file in &message.files {
                     let card = Rect::new(x + 12, y, bubble_width - 24, 37);
                     if y < rect.y + rect.h && y + 37 > rect.y {
@@ -1163,6 +1178,24 @@ impl Chat {
             button(canvas, font, latest, "Jump to latest", false);
             self.hits.push((latest, Click::Latest));
         }
+    }
+
+    fn message_layout(
+        &mut self,
+        index: usize,
+        body: &str,
+        width: i32,
+        font: &Type,
+    ) -> Arc<Markdown> {
+        if let Some(layout) = self.history_layout.get(&index) {
+            return layout.clone();
+        }
+        let layout = Arc::new(Markdown::message(body, width - 28, font));
+        if self.history_layout.len() >= 96 {
+            self.history_layout.clear();
+        }
+        self.history_layout.insert(index, layout.clone());
+        layout
     }
 
     fn ensure_thumbnail(&mut self, file: &Attachment) {
@@ -1491,10 +1524,6 @@ fn picture(data: &[u8], size: u32) -> Option<RgbaImage> {
     limits.max_alloc = Some(96 * 1024 * 1024);
     reader.limits(limits);
     Some(reader.decode().ok()?.thumbnail(size, size).to_rgba8())
-}
-
-fn bubble_height(lines: usize, files: usize) -> i32 {
-    41 + LEADING * lines as i32 + 42 * files as i32
 }
 
 fn fit(rect: Rect, image: &RgbaImage) -> Rect {

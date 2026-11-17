@@ -6,6 +6,10 @@ Working, or Offline state and reports connection and queue status separately.
 Enter sends and Shift+Enter inserts a newline. The conversation scrolls without
 moving the composer.
 
+Chat history renders CommonMark with tables, task lists, and strikethrough.
+Click a web link to copy its address. Markdown images show their description,
+and images shared as attachments open in the native preview.
+
 On Windows and macOS, drop files anywhere in the window or use **Attach files**.
 A draft can carry up to eight files of 32 MiB each. Each file can be removed
 before sending. Click an image thumbnail to preview it in the window. Other
@@ -114,6 +118,7 @@ Use updated builds of the host runner and native client together for file
 transfer. A text-only client can consume a Pub/Sub delivery it cannot display.
 
 The client embeds [DM Sans](https://github.com/google/fonts/tree/main/ofl/dmsans)
+and [Courier Prime](https://github.com/quoteunquoteapps/CourierPrime)
 under the SIL Open Font License. The local window backend is based on
 [softer_gui 5.0.1](https://github.com/ShieldedLabs/softer_gui/commit/de63f083ea670b4e453710863c83e3d9a03d9906)
 with Windows and AppKit file dialogs and drop handling.

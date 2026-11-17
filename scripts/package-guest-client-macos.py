@@ -74,6 +74,7 @@ def main():
             (root / 'LICENSE-APACHE', 'Boxen-Apache.txt'),
             (package / 'vendor/softer_gui/LICENSE', 'softer_gui-MIT.txt'),
             (package / 'assets/DM-Sans-OFL.txt', 'DM-Sans-OFL.txt'),
+            (package / 'assets/Courier-Prime-OFL.txt', 'Courier-Prime-OFL.txt'),
         ]:
             shutil.copyfile(source, licenses / name_in_bundle)
         notices = []
