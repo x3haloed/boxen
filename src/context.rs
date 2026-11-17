@@ -7,7 +7,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashSet, sync::Arc};
+use std::{borrow::Cow, collections::HashSet, sync::Arc};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -582,7 +582,7 @@ impl View {
             .iter()
             .flat_map(|u| units[*u].iter().copied())
             .collect();
-        let mut projected: Vec<Value> = entries
+        let mut projected: Vec<Cow<'_, Value>> = entries
             .iter()
             .enumerate()
             .map(|(i, e)| {
@@ -593,9 +593,9 @@ impl View {
                     && !recall_outputs.contains(&i)
                     && !units.last().is_some_and(|u| u.contains(&i))
                 {
-                    masked(e)
+                    Cow::Owned(masked(e))
                 } else {
-                    e.message.clone()
+                    Cow::Borrowed(&e.message)
                 }
             })
             .collect();
@@ -631,7 +631,7 @@ impl View {
                                 })
                         })
                     {
-                        projected[*j] = masked(&entries[*j]);
+                        projected[*j] = Cow::Owned(masked(&entries[*j]));
                     }
                 }
                 n = units[i]
@@ -715,7 +715,7 @@ impl View {
             if included.contains(&u) {
                 for i in unit {
                     selected.push(entries[*i].id.clone());
-                    if projected[*i] != entries[*i].message {
+                    if projected[*i].as_ref() != &entries[*i].message {
                         masks.push(entries[*i].id.clone());
                     }
                     if *i > 0
@@ -728,16 +728,18 @@ impl View {
                     {
                         messages.push(json!({"role":"system","content":format!("Boxen history selection omitted intervening source entries before {}. The following original entry keeps its original role and chronology; omitted neighbors are available through boxen_history.",entries[*i].id)}));
                     }
-                    messages.push(projected[*i].clone());
+                    messages.push(projected[*i].as_ref().clone());
                 }
-            } else if through.is_none_or(|t| unit.last().is_some_and(|i| *i > t)) {
+            } else if self.settings.mode == Mode::Summary
+                && through.is_none_or(|t| unit.last().is_some_and(|i| *i > t))
+            {
                 let results: HashSet<_> = unit
                     .iter()
                     .filter_map(|i| entries[*i].message["tool_call_id"].as_str())
                     .collect();
                 let group:Vec<Value>=unit.iter().map(|i|{
                     let unknown:Vec<_>=entries[*i].message["tool_calls"].as_array().into_iter().flatten().filter_map(|c|c["id"].as_str()).filter(|id|!results.contains(id)).collect();
-                    json!({"source_id":entries[*i].id,"at":entries[*i].at,"message":projected[*i],"observation_masked":projected[*i]!=entries[*i].message,"missing_tool_results":unknown})
+                    json!({"source_id":entries[*i].id,"at":entries[*i].at,"message":projected[*i],"observation_masked":projected[*i].as_ref()!=&entries[*i].message,"missing_tool_results":unknown})
                 }).collect();
                 let n = serde_json::to_vec(&group)?.len();
                 if summary_bytes + n < self.settings.budget_bytes / 2 {

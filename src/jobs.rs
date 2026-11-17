@@ -189,10 +189,24 @@ mod tests {
         let reopened = Jobs::open(path.clone(), "missing-codex".into(), owner.clone()).unwrap();
         let run = reopened.get(&owner, &id).unwrap();
         assert_eq!(run.snapshot().last_seq, 2);
+        assert!(
+            run.append_stream_events(vec![
+                ("inference_frame", json!({"type":"provider_frame"})),
+                (
+                    "assistant_delta",
+                    json!({"text":"x".repeat(4 * 1024 * 1024)})
+                ),
+            ])
+            .is_err()
+        );
+        assert_eq!(run.snapshot().last_seq, 2);
+        assert!(run.batch(2, false).unwrap().0.is_empty());
         let large = "🌱".repeat(655_360);
-        run.append("inference_message", json!({"text":large}))
-            .unwrap();
-        run.append("backend", json!({"text":large})).unwrap();
+        run.append_stream_events(vec![
+            ("inference_message", json!({"text":large})),
+            ("backend", json!({"text":large})),
+        ])
+        .unwrap();
         run.append("context_note", json!({"text":"retained"}))
             .unwrap();
         drop(run);
@@ -441,6 +455,9 @@ impl EventProjection {
 struct Journal {
     path: PathBuf,
     ends: Vec<u64>,
+    // Older rows may use a different JSON encoding. Rows written here have
+    // exact compact wire lengths in their offsets.
+    loaded_events: usize,
     by_kind: HashMap<String, Vec<usize>>,
     native_sessions: Vec<usize>,
     completed_items: Vec<usize>,
@@ -452,6 +469,7 @@ impl Journal {
         Self {
             path,
             ends: Vec::new(),
+            loaded_events: 0,
             by_kind: HashMap::new(),
             native_sessions: Vec::new(),
             completed_items: Vec::new(),
@@ -534,7 +552,7 @@ impl Journal {
             .transpose()
     }
 
-    fn append(&mut self, event: &Event, bytes: &[u8]) -> Result<()> {
+    fn write(&self, bytes: &[u8]) -> Result<()> {
         let mut file = OpenOptions::new().write(true).open(&self.path)?;
         let previous_len = self.len();
         if file.seek(SeekFrom::End(0))? != previous_len {
@@ -544,7 +562,6 @@ impl Journal {
             file.set_len(previous_len).and_then(|()| file.sync_data())?;
             return Err(error.into());
         }
-        self.index_event(event, bytes.len());
         Ok(())
     }
 }
@@ -642,6 +659,16 @@ impl Run {
         let mut inner = self.inner.lock().unwrap();
         self.append_locked(&mut inner, kind, data)
     }
+    fn encode_event(event: &Event, bytes: &mut Vec<u8>) -> Result<usize> {
+        let start = bytes.len();
+        serde_json::to_writer(&mut *bytes, event)?;
+        if bytes.len() - start > 4 * 1024 * 1024 {
+            return Err("backend event exceeds 4 MiB".into());
+        }
+        bytes.push(b'\n');
+        Ok(bytes.len() - start)
+    }
+
     fn append_locked(&self, inner: &mut Inner, kind: &str, data: Value) -> Result<Event> {
         let event = Event {
             seq: inner.snapshot.last_seq + 1,
@@ -649,28 +676,63 @@ impl Run {
             kind: kind.into(),
             data,
         };
-        let mut bytes = serde_json::to_vec(&event)?;
-        if bytes.len() > 4 * 1024 * 1024 {
-            return Err("backend event exceeds 4 MiB".into());
+        let mut bytes = Vec::new();
+        Self::encode_event(&event, &mut bytes)?;
+        Self::persist(inner, &bytes, &event)?;
+        Self::publish(inner, &event, bytes.len());
+        self.changed.notify_all();
+        Ok(event)
+    }
+
+    /// Streaming records that are ready together share a durability barrier.
+    pub(crate) fn append_stream_events(&self, events: Vec<(&str, Value)>) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut sequence = inner.snapshot.last_seq;
+        let mut bytes = Vec::new();
+        let mut encoded = Vec::with_capacity(events.len());
+        for (kind, data) in events {
+            sequence += 1;
+            let event = Event {
+                seq: sequence,
+                at: now(),
+                kind: kind.into(),
+                data,
+            };
+            let length = Self::encode_event(&event, &mut bytes)?;
+            encoded.push((event, length));
         }
-        bytes.push(b'\n');
-        // Retain before publication. Readers never observe an unretained event.
-        inner.journal.append(&event, &bytes).inspect_err(|error| {
+        let Some((first, _)) = encoded.first() else {
+            return Ok(());
+        };
+        Self::persist(&inner, &bytes, first)?;
+        for (event, length) in encoded {
+            Self::publish(&mut inner, &event, length);
+        }
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    fn persist(inner: &Inner, bytes: &[u8], first: &Event) -> Result<()> {
+        // Readers only see records after a successful sync.
+        inner.journal.write(bytes).inspect_err(|error| {
             let record = &inner.snapshot.record;
             logging::record(
                 Level::Warn,
                 Target::State,
                 "events.journal_append_failed",
                 Context::run(&record.spec.id, &record.spec.thread_id, &record.owner),
-                || json!({"sequence":event.seq,"kind":kind,"error":error.to_string()}),
+                || json!({"sequence":first.seq,"kind":first.kind,"error":error.to_string()}),
                 || Value::Null,
             );
-        })?;
-        project(&mut inner.snapshot, &event);
-        self.changed.notify_all();
+        })
+    }
+
+    fn publish(inner: &mut Inner, event: &Event, bytes: usize) {
+        inner.journal.index_event(event, bytes);
+        project(&mut inner.snapshot, event);
         let record = &inner.snapshot.record;
         logging::record(
-            if kind == "status" {
+            if event.kind == "status" {
                 Level::Info
             } else {
                 Level::Trace
@@ -678,10 +740,9 @@ impl Run {
             Target::Workload,
             "event.retained",
             Context::run(&record.spec.id, &record.spec.thread_id, &record.owner),
-            || json!({"sequence":event.seq,"kind":kind,"bytes":bytes.len(),"status":inner.snapshot.status,"method":event.data.get("method")}),
-            || serde_json::to_value(&event).unwrap_or(Value::Null),
+            || json!({"sequence":event.seq,"kind":event.kind,"bytes":bytes,"status":inner.snapshot.status,"method":event.data.get("method")}),
+            || serde_json::to_value(event).unwrap_or(Value::Null),
         );
-        Ok(event)
     }
     pub fn reserve_message(&self, call_id: &str, fingerprint: &str) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
@@ -747,9 +808,16 @@ impl Run {
         let mut size = 0;
         let mut events = Vec::new();
         let positions = (after as usize..inner.journal.ends.len()).take(128);
-        for event in inner.journal.read(positions) {
+        for (index, event) in positions.clone().zip(inner.journal.read(positions)) {
             let event = event?;
-            size += serde_json::to_vec(&event)?.len();
+            size += if index < inner.journal.loaded_events {
+                serde_json::to_vec(&event)?.len()
+            } else {
+                let start = index
+                    .checked_sub(1)
+                    .map_or(0, |prior| inner.journal.ends[prior]);
+                usize::try_from(inner.journal.ends[index] - start - 1)?
+            };
             if size > 5 * 1024 * 1024 {
                 break;
             }
@@ -862,6 +930,7 @@ fn load_run(path: &std::path::Path, id: &str) -> Result<Arc<Run>> {
         snapshot.last_seq = row.seq;
         journal.index(&row.kind, line.len(), projection);
     }
+    journal.loaded_events = journal.ends.len();
     logging::record(
         if discarded_tail == 0 {
             Level::Debug

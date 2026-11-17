@@ -208,6 +208,45 @@ fn apply_steering(
     }
     Ok(())
 }
+fn frame_records(
+    purpose: &str,
+    step: usize,
+    event: &Value,
+    events: &mut Vec<(&'static str, Value)>,
+) {
+    events.push((
+        "inference_frame",
+        json!({"step":step,"purpose":purpose,"event":event}),
+    ));
+    if event["type"] == "provider_frame" {
+        let frame = &event["frame"];
+        if let Some(choices) = frame["choices"].as_array() {
+            for choice in choices {
+                let delta = &choice["delta"];
+                for (field, kind) in [
+                    ("content", "assistant_delta"),
+                    ("reasoning", "reasoning_delta"),
+                    ("reasoning_content", "reasoning_delta"),
+                ] {
+                    if let Some(text) = delta[field].as_str() {
+                        events.push((
+                            if purpose=="compaction" {"context_delta"} else {kind},
+                            json!({"id":if kind=="reasoning_delta"{format!("reasoning-step-{step}")}else{format!("step-{step}")},"text":text,"purpose":purpose}),
+                        ));
+                    }
+                }
+                if purpose == "workload"
+                    && let Some(calls) = delta["tool_calls"].as_array()
+                {
+                    for call in calls {
+                        events.push(("tool_arguments_delta", json!({"step":step,"delta":call})));
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn exchange(
     run: &Arc<Run>,
     config: &Config,
@@ -273,16 +312,22 @@ fn exchange(
     let (tx, events) = mpsc::sync_channel(32);
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
+        let mut line = Vec::new();
         loop {
-            let mut line = Vec::new();
+            line.clear();
             let value = match reader
                 .by_ref()
                 .take(4 * 1024 * 1024 + 1)
                 .read_until(b'\n', &mut line)
             {
                 Ok(0) => break,
-                Ok(_) if line.len() <= 4 * 1024 * 1024 => serde_json::from_slice::<Value>(&line)
-                    .map_err(|_| "invalid inference worker frame".to_owned()),
+                Ok(_) if line.len() <= 4 * 1024 * 1024 => {
+                    // The worker emits compact JSON, followed by one delimiter.
+                    let size = line.len() - usize::from(line.ends_with(b"\n"));
+                    serde_json::from_slice::<Value>(&line)
+                        .map(|event| (event, size))
+                        .map_err(|_| "invalid inference worker frame".to_owned())
+                }
                 _ => Err("inference worker output failed or exceeded 4 MiB".to_owned()),
             };
             if tx.send(value).is_err() {
@@ -305,7 +350,7 @@ fn exchange(
             return Ok(None);
         }
         match events.recv_timeout(Duration::from_millis(50)) {
-            Ok(Ok(event)) => {
+            Ok(Ok((event, frame_bytes))) => {
                 if waiting_reported
                     && matches!(
                         event["type"].as_str(),
@@ -321,54 +366,57 @@ fn exchange(
                     );
                     waiting_reported = false;
                 }
-                bytes += serde_json::to_vec(&event)?.len();
-                if bytes > 16 * 1024 * 1024 {
-                    return Err("inference exchange exceeds 16 MiB".into());
-                }
-                run.append(
-                    "inference_frame",
-                    json!({"step":step,"purpose":purpose,"event":event}),
-                )?;
-                run.diagnostic(
-                    Level::Trace,
-                    "inference.frame.retained",
-                    || json!({"step":step,"type":event["type"],"bytes":bytes}),
-                    || event.clone(),
-                );
-                if event["type"] == "provider_frame" {
-                    let frame = &event["frame"];
-                    if let Some(choices) = frame["choices"].as_array() {
-                        for choice in choices {
-                            let delta = &choice["delta"];
-                            for (field, kind) in [
-                                ("content", "assistant_delta"),
-                                ("reasoning", "reasoning_delta"),
-                                ("reasoning_content", "reasoning_delta"),
-                            ] {
-                                if let Some(text) = delta[field].as_str() {
-                                    run.append(
-                                        if purpose=="compaction" {"context_delta"} else {kind},
-                                        json!({"id":if kind=="reasoning_delta"{format!("reasoning-step-{step}")}else{format!("step-{step}")},"text":text,"purpose":purpose}),
-                                    )?;
-                                }
-                            }
-                            if purpose == "workload"
-                                && let Some(calls) = delta["tool_calls"].as_array()
-                            {
-                                for call in calls {
-                                    run.append(
-                                        "tool_arguments_delta",
-                                        json!({"step":step,"delta":call}),
-                                    )?;
-                                }
-                            }
+                // Drain only frames already queued. Sparse streams never wait for
+                // a batch, and a burst shares a durability barrier before replay.
+                let mut frame = (event, frame_bytes);
+                let mut stream_events = Vec::new();
+                let mut frames = Vec::new();
+                let mut error = None;
+                let batch_start = bytes;
+                loop {
+                    let (event, frame_bytes) = frame;
+                    if bytes + frame_bytes > 16 * 1024 * 1024 {
+                        error = Some("inference exchange exceeds 16 MiB".into());
+                        break;
+                    }
+                    bytes += frame_bytes;
+                    frame_records(purpose, step, &event, &mut stream_events);
+                    let terminal = matches!(
+                        event["type"].as_str(),
+                        Some("exchange_completed" | "exchange_failed")
+                    );
+                    frames.push((event, bytes));
+                    if terminal || frames.len() == 16 || bytes - batch_start >= 256 * 1024 {
+                        break;
+                    }
+                    match events.try_recv() {
+                        Ok(Ok(next)) => frame = next,
+                        Ok(Err(read_error)) => {
+                            error = Some(read_error);
+                            break;
                         }
+                        Err(_) => break,
                     }
                 }
-                let complete = event["type"] == "exchange_completed";
-                let failed = event["type"] == "exchange_failed";
-                let failure_reason=event["reason"].as_str().unwrap_or("inference provider exchange failed; partial output remains retained and has not been accepted as conversation state").to_owned();
-                retained.push(event);
+                run.append_stream_events(stream_events)?;
+                for (event, bytes) in frames {
+                    run.diagnostic(
+                        Level::Trace,
+                        "inference.frame.retained",
+                        || json!({"step":step,"type":event["type"],"bytes":bytes}),
+                        || event.clone(),
+                    );
+                    retained.push(event);
+                }
+                if let Some(error) = error {
+                    return Err(error.into());
+                }
+                let last = retained
+                    .last()
+                    .ok_or("inference stream batch has no frames")?;
+                let complete = last["type"] == "exchange_completed";
+                let failed = last["type"] == "exchange_failed";
+                let failure_reason=last["reason"].as_str().unwrap_or("inference provider exchange failed; partial output remains retained and has not been accepted as conversation state");
                 last_frame = Instant::now();
                 if failed {
                     run.diagnostic(
