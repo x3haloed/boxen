@@ -141,7 +141,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
         let selected = codex_executable::resolve(&configured, platform::host_os())?;
         println!(
             "{}",
-            serde_json::json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic})
+            serde_json::json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"probe_fallback":selected.probe_fallback})
         );
         return Ok(());
     }

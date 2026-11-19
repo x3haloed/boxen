@@ -225,3 +225,9 @@ off. The GUI continues to show metadata rather than inline media previews.
 Operator provider restrictions, output limits and shared resident message budgets
 are described in [resident preparation](resident-preparation.md). Accepted runs
 retain their policy independently of later daemon configuration changes.
+
+## Codex discovery under upgrades and transient load
+
+Automatic discovery still enumerates current installations on every launch and prefers valid newer desktop versions. A process-local cache retains at most 64 successful candidate probes. A timed-out version probe can reuse its last verified version only when the canonical target, file size, modification timestamp and (on Unix) device/inode/mode still match. The cache does not pin a moving installation, survive daemon restart, or excuse malformed output/nonzero probe failures. Replaced, retargeted and deleted candidates lose that evidence.
+
+Discovery normally has a five-second budget with one second per candidate. When no candidate succeeds, up to two timed-out candidates share one additional five-second recovery budget, with at most three seconds per retry. Cold starts therefore tolerate a briefly slow valid CLI without an indefinite wait. These are version probes before a workload child starts, not retries of accepted inference or tool effects. A cached-timeout or slower-probe recovery is recorded as `probe_fallback` in the existing executable-selection diagnostics. If discovery still fails, the error retains candidate-specific probe reasons rather than only claiming the installation is absent. Explicit pins retain their existing behavior.

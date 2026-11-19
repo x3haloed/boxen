@@ -2,12 +2,16 @@
 //! Explicit paths are pins; `auto` and `codex` discover on every launch.
 use std::{
     cmp::Ordering,
+    collections::HashMap,
     ffi::OsStr,
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
     time::{Duration, Instant, SystemTime},
 };
 
@@ -16,6 +20,7 @@ pub struct Selection {
     pub path: PathBuf,
     pub version: Option<String>,
     pub automatic: bool,
+    pub probe_fallback: Option<String>,
 }
 
 pub fn automatic(configured: &str) -> bool {
@@ -59,6 +64,7 @@ pub fn resolve(configured: &str, os: &str) -> io::Result<Selection> {
             path: configured.into(),
             version: None,
             automatic: false,
+            probe_fallback: None,
         });
     }
     let home = std::env::var_os(if os == "windows" {
@@ -75,23 +81,176 @@ pub fn resolve(configured: &str, os: &str) -> io::Result<Selection> {
     } else {
         None
     };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    discover(
-        desktop.as_deref(),
-        &fallback_candidates(
-            os,
-            std::env::consts::ARCH,
-            home.as_deref(),
-            std::env::var_os("PATH").as_deref(),
-        ),
-        |p| {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return None;
-            }
-            probe(p, remaining.min(Duration::from_secs(1))).ok()
+    let candidates = fallback_candidates(
+        os,
+        std::env::consts::ARCH,
+        home.as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    );
+    resolve_candidates(desktop.as_deref(), &candidates, probe)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Fingerprint {
+    target: PathBuf,
+    bytes: u64,
+    modified: SystemTime,
+    #[cfg(unix)]
+    identity: (u64, u64, u32),
+}
+fn fingerprint(path: &Path) -> io::Result<Fingerprint> {
+    let target = fs::canonicalize(path)?;
+    let metadata = fs::metadata(&target)?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "candidate is not a file",
+        ));
+    }
+    Ok(Fingerprint {
+        target,
+        bytes: metadata.len(),
+        modified: metadata.modified()?,
+        #[cfg(unix)]
+        identity: {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.dev(), metadata.ino(), metadata.mode())
         },
-    )
+    })
+}
+#[derive(Clone)]
+struct Verified {
+    fingerprint: Fingerprint,
+    version: String,
+}
+fn verified_cache() -> &'static Mutex<HashMap<PathBuf, Verified>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Verified>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+// Every launch still discovers and probes current candidates. Only a timeout on
+// the identical previously verified file can use its cached version. Changed,
+// deleted, nonzero-exit and malformed candidates never inherit that evidence.
+fn checked_probe(
+    path: &Path,
+    timeout: Duration,
+    probe: &mut impl FnMut(&Path, Duration) -> io::Result<String>,
+) -> io::Result<(String, bool)> {
+    let before = fingerprint(path)?;
+    let result = probe(path, timeout).and_then(|version| {
+        if Version::parse(&version).is_none() {
+            return Err(io::Error::other("Codex version response invalid"));
+        }
+        if fingerprint(path)? != before {
+            return Err(io::Error::other(
+                "Codex executable changed during version probe",
+            ));
+        }
+        Ok(version)
+    });
+    match result {
+        Ok(version) => {
+            let mut cache = verified_cache().lock().unwrap();
+            if cache.len() >= 64 {
+                cache.retain(|p, _| p == path);
+            }
+            cache.insert(
+                path.to_owned(),
+                Verified {
+                    fingerprint: before,
+                    version: version.clone(),
+                },
+            );
+            Ok((version, false))
+        }
+        Err(error) => {
+            let cached = verified_cache().lock().unwrap().get(path).cloned();
+            if error.kind() == io::ErrorKind::TimedOut
+                && fingerprint(path).ok().as_ref() == Some(&before)
+                && let Some(saved) = cached.filter(|v| v.fingerprint == before)
+            {
+                return Ok((saved.version, true));
+            }
+            verified_cache().lock().unwrap().remove(path);
+            Err(error)
+        }
+    }
+}
+fn resolve_candidates(
+    desktop: Option<&Path>,
+    fallback: &[PathBuf],
+    mut probe: impl FnMut(&Path, Duration) -> io::Result<String>,
+) -> io::Result<Selection> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut failures = Vec::new();
+    let mut timed_out = Vec::new();
+    let mut cached = HashMap::new();
+    let result = discover(desktop, fallback, |path| {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            failures.push(format!("{}: discovery deadline reached", path.display()));
+            return None;
+        }
+        match checked_probe(path, remaining.min(Duration::from_secs(1)), &mut probe) {
+            Ok((version, used_cache)) => {
+                if used_cache {
+                    cached.insert(
+                        path.to_owned(),
+                        "unchanged previously verified executable; version probe timed out"
+                            .to_owned(),
+                    );
+                }
+                Some(version)
+            }
+            Err(e) => {
+                if e.kind() == io::ErrorKind::TimedOut {
+                    timed_out.push(path.to_owned());
+                }
+                failures.push(format!("{}: {}", path.display(), e));
+                None
+            }
+        }
+    });
+    match result {
+        Ok(mut selection) => {
+            selection.probe_fallback = cached.remove(&selection.path);
+            Ok(selection)
+        }
+        Err(_) => {
+            // Cold starts have no cache: allow a bounded slower retry before any
+            // workload child is spawned. No inference or tool operation is replayed.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for path in timed_out.into_iter().take(2) {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match checked_probe(&path, remaining.min(Duration::from_secs(3)), &mut probe) {
+                    Ok((version, _)) => {
+                        return Ok(Selection {
+                            path,
+                            version: Some(version),
+                            automatic: true,
+                            probe_fallback: Some(
+                                "version probe recovered on bounded slow retry".into(),
+                            ),
+                        });
+                    }
+                    Err(e) => failures.push(format!("{}: slow retry: {}", path.display(), e)),
+                }
+            }
+            let reasons = if failures.is_empty() {
+                "no candidate files found in current desktop or CLI locations".to_owned()
+            } else {
+                failures.join("; ")
+            };
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "Codex auto-discovery found no usable executable; candidate probes: {reasons}"
+                ),
+            ))
+        }
+    }
 }
 
 fn discover(
@@ -128,6 +287,7 @@ fn discover(
             path,
             version: Some(text),
             automatic: true,
+            probe_fallback: None,
         });
     }
     for path in fallback.iter().filter(|p| p.is_file()).take(16) {
@@ -138,6 +298,7 @@ fn discover(
                 path: path.clone(),
                 version: Some(text),
                 automatic: true,
+                probe_fallback: None,
             });
         }
     }
@@ -256,7 +417,9 @@ fn probe(path: &Path, timeout: Duration) -> io::Result<String> {
         }
         if let Some(status) = child.0.try_wait()? {
             if !status.success() {
-                return Err(io::Error::other("Codex version probe failed"));
+                return Err(io::Error::other(format!(
+                    "Codex version probe failed: {status}"
+                )));
             }
             break;
         }
@@ -376,6 +539,132 @@ mod tests {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
+    fn timeout() -> io::Error {
+        io::Error::new(io::ErrorKind::TimedOut, "fixture probe timed out")
+    }
+    #[test]
+    fn unchanged_verified_candidate_survives_timeout_but_not_invalid_output() {
+        let f = Fixture::new();
+        let path = f.file("candidate");
+        let first = resolve_candidates(None, std::slice::from_ref(&path), |_, _| {
+            Ok("codex-cli 1.0.0".into())
+        })
+        .unwrap();
+        assert!(first.probe_fallback.is_none());
+        let next =
+            resolve_candidates(None, std::slice::from_ref(&path), |_, _| Err(timeout())).unwrap();
+        assert_eq!(next.version.as_deref(), Some("codex-cli 1.0.0"));
+        assert!(next.probe_fallback.is_some());
+        let error = resolve_candidates(None, std::slice::from_ref(&path), |_, _| {
+            Ok("other-cli 1.0.0".into())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("response invalid"));
+        assert!(
+            resolve_candidates(None, std::slice::from_ref(&path), |_, _| Err(timeout())).is_err()
+        );
+    }
+    #[test]
+    fn replaced_and_deleted_files_never_reuse_cached_versions() {
+        let f = Fixture::new();
+        let path = f.file("candidate");
+        resolve_candidates(None, std::slice::from_ref(&path), |_, _| {
+            Ok("codex-cli 1.0.0".into())
+        })
+        .unwrap();
+        fs::write(&path, "replacement executable bytes").unwrap();
+        assert!(
+            resolve_candidates(None, std::slice::from_ref(&path), |_, _| Err(timeout())).is_err()
+        );
+        resolve_candidates(None, std::slice::from_ref(&path), |_, _| {
+            Ok("codex-cli 2.0.0".into())
+        })
+        .unwrap();
+        fs::remove_file(&path).unwrap();
+        let new = f.file("new-location");
+        let selected = resolve_candidates(None, &[path, new.clone()], |_, _| {
+            Ok("codex-cli 3.0.0".into())
+        })
+        .unwrap();
+        assert_eq!(selected.path, new);
+        assert_eq!(selected.version.as_deref(), Some("codex-cli 3.0.0"));
+    }
+    #[test]
+    fn cold_timeout_gets_one_bounded_slower_probe_and_keeps_failure_causes() {
+        let f = Fixture::new();
+        let path = f.file("candidate");
+        let mut calls = Vec::new();
+        let selected = resolve_candidates(None, std::slice::from_ref(&path), |_, duration| {
+            calls.push(duration);
+            if calls.len() == 1 {
+                Err(timeout())
+            } else {
+                Ok("codex-cli 1.0.0".into())
+            }
+        })
+        .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0] <= Duration::from_secs(1));
+        assert!(calls[1] > Duration::from_secs(1) && calls[1] <= Duration::from_secs(3));
+        assert!(selected.probe_fallback.unwrap().contains("slow retry"));
+        let other = f.file("permanent-timeout");
+        let mut attempts = 0;
+        let error = resolve_candidates(None, std::slice::from_ref(&other), |_, _| {
+            attempts += 1;
+            Err(timeout())
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 2);
+        assert!(error.to_string().contains("fixture probe timed out"));
+        assert!(error.to_string().contains("slow retry"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn real_slow_cli_recovers_before_any_workload_is_started() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let path = f.file("slow-cli");
+        fs::write(&path, "#!/bin/sh\nsleep 1.2\necho codex-cli 1.0.0\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let selected = resolve_candidates(None, std::slice::from_ref(&path), probe).unwrap();
+        assert_eq!(selected.version.as_deref(), Some("codex-cli 1.0.0"));
+        assert!(selected.probe_fallback.unwrap().contains("slow retry"));
+    }
+    #[test]
+    fn newer_installation_beats_unchanged_cached_candidate() {
+        let f = Fixture::new();
+        let old = f.file("old/codex.exe");
+        resolve_candidates(Some(&f.0), &[], |_, _| Ok("codex-cli 1.0.0".into())).unwrap();
+        let new = f.file("new/codex.exe");
+        let selected = resolve_candidates(Some(&f.0), &[], |p, _| {
+            if p == old {
+                Err(timeout())
+            } else {
+                Ok("codex-cli 2.0.0".into())
+            }
+        })
+        .unwrap();
+        assert_eq!(selected.path, new);
+        assert!(selected.probe_fallback.is_none());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn retargeted_symlink_invalidates_cached_identity() {
+        let f = Fixture::new();
+        let a = f.file("a");
+        let b = f.file("b");
+        let link = f.0.join("codex");
+        std::os::unix::fs::symlink(a, &link).unwrap();
+        resolve_candidates(None, std::slice::from_ref(&link), |_, _| {
+            Ok("codex-cli 1.0.0".into())
+        })
+        .unwrap();
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(b, &link).unwrap();
+        assert!(
+            resolve_candidates(None, std::slice::from_ref(&link), |_, _| Err(timeout())).is_err()
+        );
+    }
     #[test]
     fn versions_compare_release_and_numeric_prerelease() {
         let parse = |s| Version::parse(&format!("codex-cli {s}")).unwrap();
@@ -471,6 +760,7 @@ mod tests {
                         path: format!("candidate-{resolutions}").into(),
                         version: None,
                         automatic: true,
+                        probe_fallback: None,
                     })
                 },
                 &mut |_| {
@@ -495,6 +785,7 @@ mod tests {
                     path: "candidate".into(),
                     version: None,
                     automatic: true,
+                    probe_fallback: None,
                 })
             },
             &mut |_| {
@@ -517,6 +808,7 @@ mod tests {
                     path: executable.clone(),
                     version: None,
                     automatic: true,
+                    probe_fallback: None,
                 })
             },
             &mut |_| {

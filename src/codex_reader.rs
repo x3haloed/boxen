@@ -41,7 +41,7 @@ impl NativeReader {
             },
             |selected, retry| logging::record(Level::Debug, Target::Runtime,
                 if purpose == "thread_import" { "thread_import.reader_starting" } else { "codex_models.process_starting" }, Context::peer(owner),
-                ||json!({"purpose":purpose,"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"rediscovered":retry}), ||Value::Null),
+                ||json!({"purpose":purpose,"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"probe_fallback":selected.probe_fallback,"rediscovered":retry}), ||Value::Null),
         ).inspect_err(|error| logging::record(Level::Error, Target::Runtime,
             if purpose == "thread_import" { "thread_import.reader_start_failed" } else { "codex_models.process_start_failed" }, Context::peer(owner),
             ||json!({"purpose":purpose,"detail":error.to_string()}), ||Value::Null))?;

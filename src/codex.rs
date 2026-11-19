@@ -564,7 +564,7 @@ pub fn execute(
         |selected, retry| {
             launch.runtime(selected.version.as_deref(), &record.runtime_policy);
             run.diagnostic(Level::Info, "process.starting",
-                || json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"rediscovered":retry,"cwd":spec.cwd}), || Value::Null);
+                || json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"probe_fallback":selected.probe_fallback,"rediscovered":retry,"cwd":spec.cwd}), || Value::Null);
         },
     ).map_err(|error| {
         launch.record("launch", "failed", Some(crate::infrastructure::reason(&error)));
