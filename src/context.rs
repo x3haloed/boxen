@@ -373,7 +373,7 @@ impl Source {
             let bundles = self.objects("context_bundle");
             let notes = self.objects("context_note");
             return Ok(
-                json!({"boundary":self.boundary().map(preview),"entries":self.entries.len(),"bundles":bundles.iter().skip(offset).take(8).map(preview).collect::<Vec<_>>(),"bundle_count":bundles.len(),"notes":notes.iter().skip(offset).take(4).map(preview).collect::<Vec<_>>(),"note_count":notes.len(),"next_bundle_offset":if offset+8<bundles.len(){Some(offset+8)}else{None},"next_note_offset":if offset+4<notes.len(){Some(offset+4)}else{None}}),
+                json!({"budget_usage":self.events.iter().rev().find(|e| e["kind"]=="context_budget").map(|e| &e["data"]),"boundary":self.boundary().map(preview),"entries":self.entries.len(),"bundles":bundles.iter().skip(offset).take(8).map(preview).collect::<Vec<_>>(),"bundle_count":bundles.len(),"notes":notes.iter().skip(offset).take(4).map(preview).collect::<Vec<_>>(),"note_count":notes.len(),"next_bundle_offset":if offset+8<bundles.len(){Some(offset+8)}else{None},"next_note_offset":if offset+4<notes.len(){Some(offset+4)}else{None}}),
             );
         }
         if action == "coverage" {
@@ -553,9 +553,135 @@ pub struct Plan {
     pub pin_used_bytes: usize,
     pub source_count: usize,
     pub summary_input: Vec<Value>,
+    pub budget_usage: Value,
 }
 fn masked(e: &Entry) -> Value {
     json!({"role":"tool","tool_call_id":e.message["tool_call_id"],"content":format!("Historical observation {} is omitted by the older-tool-body policy. boxen_history read returns the original without repeating its effects.",e.id)})
+}
+// Plain text duplication is removable; opaque, signed and encrypted state remains exact.
+fn deduplicate_reasoning(message: &mut Value) {
+    let Some(text) = message["reasoning"].as_str() else {
+        return;
+    };
+    let Some(details) = message["reasoning_details"].as_array() else {
+        return;
+    };
+    if details.is_empty()
+        || details.iter().any(|d| {
+            d["type"] != "reasoning.text"
+                || d.get("signature").is_some()
+                || d.get("data").is_some()
+                || d.as_object().is_none_or(|o| {
+                    o.keys()
+                        .any(|k| !matches!(k.as_str(), "type" | "text" | "format" | "index"))
+                })
+        })
+    {
+        return;
+    }
+    let joined: String = details.iter().filter_map(|d| d["text"].as_str()).collect();
+    if joined == text {
+        message.as_object_mut().unwrap().remove("reasoning");
+    }
+}
+
+// Only complete call/result units can become references. This never dispatches a call.
+fn reference_completed(
+    entries: &[Entry],
+    unit: &[usize],
+    projected: &mut [Cow<'_, Value>],
+) -> bool {
+    let Some(&first) = unit.first() else {
+        return false;
+    };
+    let Some(calls) = entries[first].message["tool_calls"].as_array() else {
+        return false;
+    };
+    if calls.is_empty()
+        || calls.iter().any(|c| {
+            c["id"].as_str().is_none_or(|id| {
+                unit.iter()
+                    .filter(|i| entries[**i].message["tool_call_id"] == id)
+                    .count()
+                    != 1
+            })
+        })
+    {
+        return false;
+    }
+    // Provider-native reasoning state cannot be reconstructed from text references.
+    if entries[first].message["reasoning_details"]
+        .as_array()
+        .is_some_and(|ds| {
+            ds.iter().any(|d| {
+                d["type"] != "reasoning.text"
+                    || d.get("signature").is_some()
+                    || d.get("data").is_some()
+                    || d.as_object().is_none_or(|o| {
+                        o.keys()
+                            .any(|k| !matches!(k.as_str(), "type" | "text" | "format" | "index"))
+                    })
+            })
+        })
+    {
+        return false;
+    }
+    let mut assistant = projected[first].as_ref().clone();
+    assistant.as_object_mut().unwrap().remove("reasoning");
+    assistant
+        .as_object_mut()
+        .unwrap()
+        .remove("reasoning_details");
+    let recall_ids: HashSet<_> = calls
+        .iter()
+        .filter(|c| c["function"]["name"] == "boxen_history")
+        .filter_map(|c| c["id"].as_str())
+        .collect();
+    for call in assistant["tool_calls"].as_array_mut().unwrap() {
+        if call["function"]["name"] == "boxen_history" {
+            continue;
+        }
+        call["function"]["arguments"] = json!(json!({"historical_arguments":entries[first].id,
+            "detail":"Completed historical call arguments are retained in boxen_history; this reference is not executable input."}).to_string());
+    }
+    projected[first] = Cow::Owned(assistant);
+    for i in unit.iter().skip(1) {
+        let original = &entries[*i];
+        if original.message["tool_call_id"]
+            .as_str()
+            .is_some_and(|id| recall_ids.contains(id))
+        {
+            continue;
+        }
+        let result = original.message["content"]
+            .as_str()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok());
+        let mut receipt = serde_json::Map::new();
+        if let Some(Value::Object(o)) = result {
+            for key in [
+                "ok",
+                "success",
+                "written",
+                "status",
+                "revision",
+                "exit_code",
+                "error",
+                "memory_sha256",
+                "memory_bytes",
+                "quota_bytes",
+            ] {
+                if let Some(v) = o.get(key).filter(|v| v.to_string().len() <= 512) {
+                    receipt.insert(key.into(), v.clone());
+                }
+            }
+        }
+        projected[*i] = Cow::Owned(
+            json!({"role":"tool","tool_call_id":original.message["tool_call_id"],
+            "content":json!({"historical_result":original.id,"recorded_fields":receipt,
+                "detail":"Original completed result and full arguments remain available through boxen_history. This projection does not repeat the operation or infer success from missing fields."}).to_string()}),
+        );
+    }
+    true
 }
 impl View {
     pub fn new(settings: Settings, source: &Source) -> Result<Self> {
@@ -662,6 +788,14 @@ impl View {
                 }
             })
             .collect();
+        for (i, message) in projected.iter_mut().enumerate() {
+            if !exact_pins.contains(&i)
+                && message["reasoning"].is_string()
+                && message["reasoning_details"].is_array()
+            {
+                deduplicate_reasoning(message.to_mut());
+            }
+        }
         let mut included = HashSet::new();
         let mut used = 0;
         let mut pins = 0;
@@ -702,8 +836,17 @@ impl View {
                     .map(|j| projected[*j].to_string().len() + 512)
                     .sum();
             }
+            if used + n > budget
+                && !units[i].iter().any(|j| exact_pins.contains(j))
+                && reference_completed(entries, &units[i], &mut projected)
+            {
+                n = units[i]
+                    .iter()
+                    .map(|j| projected[*j].to_string().len() + 512)
+                    .sum();
+            }
             if used + n > budget {
-                return Err("the newest request and exchange exceed this context budget; original input/effects remain retained, and a larger context setting can admit them without replay".into());
+                return Err(format!("the newest request and exchange exceed this context budget (protected_bytes={}, available_bytes={}, configured_bytes={}); original input/effects remain retained, and a larger context setting can admit them without replay", used + n, budget, self.settings.budget_bytes).into());
             }
             used += n;
         }
@@ -791,6 +934,11 @@ impl View {
                     {
                         messages.push(json!({"role":"system","content":format!("Boxen history selection omitted intervening source entries before {}. The following original entry keeps its original role and chronology; omitted neighbors are available through boxen_history.",entries[*i].id)}));
                     }
+                    if projected[*i].as_ref() != &entries[*i].message
+                        && entries[*i].message["role"] == "assistant"
+                    {
+                        messages.push(json!({"role":"system","content":format!("Historical source {} has a mechanical context projection: duplicate plain reasoning or completed exchange bodies may be represented by references. Full original messages remain in boxen_history; no operation is repeated.",entries[*i].id)}));
+                    }
                     messages.push(projected[*i].as_ref().clone());
                 }
             } else if self.settings.mode == Mode::Summary
@@ -828,6 +976,10 @@ impl View {
             notes,
             pin_used_bytes: pins,
             source_count: entries.len(),
+            budget_usage: json!({"configured_bytes":self.settings.budget_bytes,"selection_available_bytes":budget,
+                "selected_bytes":used,"reserved_bytes":self.settings.budget_bytes-budget,
+                "latest_exchange_original_bytes":units.last().map(|u|u.iter().map(|i|entries[*i].size()+512).sum::<usize>()).unwrap_or(0),
+                "latest_exchange_bytes":units.last().map(|u|u.iter().map(|i|projected[*i].to_string().len()+512).sum::<usize>()).unwrap_or(0)}),
             summary_input,
         })
     }
@@ -866,7 +1018,7 @@ impl View {
         failure: Option<String>,
     ) -> Result<()> {
         let id = state::random_hex()?;
-        let b = json!({"schema":"boxen.context_boundary.v1","id":id,"parent":self.boundary.as_ref().map(|b|b["id"].clone()),"thread_id":run.snapshot().record.spec.thread_id,"at":jobs::now(),"source_count":p.source_count,"watermark":source.entries.last().map(|e|json!({"id":e.id,"at":e.at})),"settings":self.settings,"selected":p.selected,"masked":p.masked,"excluded_bundles":p.excluded,"pin_used_bytes":p.pin_used_bytes,"pin_warnings":p.pin_warnings,"excluded_notes":p.excluded_notes,"notes":p.notes,"summary":summary,"summary_attempted_through":if self.settings.mode==Mode::Summary {p.summary_input.last().map(|e|e["source_id"].clone()).or_else(||self.boundary.as_ref().filter(|b|b["settings"]["mode"]=="summary").map(|b|b["summary_attempted_through"].clone()))} else {None},"fallback_reason":failure,"detail":"Source journals are unchanged. Coverage and exact history are available through boxen_history; semantic completeness is not certified."});
+        let b = json!({"schema":"boxen.context_boundary.v1","id":id,"parent":self.boundary.as_ref().map(|b|b["id"].clone()),"thread_id":run.snapshot().record.spec.thread_id,"at":jobs::now(),"source_count":p.source_count,"budget_usage":p.budget_usage,"watermark":source.entries.last().map(|e|json!({"id":e.id,"at":e.at})),"settings":self.settings,"selected":p.selected,"masked":p.masked,"excluded_bundles":p.excluded,"pin_used_bytes":p.pin_used_bytes,"pin_warnings":p.pin_warnings,"excluded_notes":p.excluded_notes,"notes":p.notes,"summary":summary,"summary_attempted_through":if self.settings.mode==Mode::Summary {p.summary_input.last().map(|e|e["source_id"].clone()).or_else(||self.boundary.as_ref().filter(|b|b["settings"]["mode"]=="summary").map(|b|b["summary_attempted_through"].clone()))} else {None},"fallback_reason":failure,"detail":"Source journals are unchanged. Coverage and exact history are available through boxen_history; semantic completeness is not certified."});
         run.append("context_boundary", b.clone())?;
         run.diagnostic(Level::Info,"context.boundary.installed",||json!({"boundary_id":id,"mode":self.settings.mode,"source_count":p.source_count,"included":p.selected.len(),"masked":p.masked.len(),"excluded_bundles":p.excluded.len(),"fallback":b["fallback_reason"]}),||Value::Null);
         self.boundary = Some(b);
@@ -964,6 +1116,99 @@ mod tests {
             budget_bytes: 32768,
             pin_quota_bytes: 8192,
             mask_after: 1,
+        }
+    }
+    #[test]
+    fn plain_reasoning_deduplicates_but_opaque_state_is_exact() {
+        let mut m = json!({"role":"assistant","reasoning":"abc","reasoning_details":[{"type":"reasoning.text","text":"abc","format":"unknown","index":0}]});
+        deduplicate_reasoning(&mut m);
+        assert!(m.get("reasoning").is_none());
+        for detail in [
+            json!({"type":"reasoning.text","text":"abc","signature":"signed"}),
+            json!({"type":"reasoning.encrypted","data":"opaque"}),
+            json!({"type":"reasoning.text","text":"different"}),
+        ] {
+            let mut m = json!({"role":"assistant","reasoning":"abc","reasoning_details":[detail]});
+            let original = m.clone();
+            deduplicate_reasoning(&mut m);
+            assert_eq!(m, original);
+        }
+    }
+    #[test]
+    fn large_completed_write_is_referenced_without_mutating_or_replaying_source() {
+        let s = source(vec![
+            json!({"role":"user","content":"apply verified file"}),
+            json!({"role":"assistant","reasoning":"thought ".repeat(20000),"tool_calls":[{"id":"write","type":"function","function":{"name":"boxen_continuity","arguments":json!({"memory":"memory ".repeat(10000)}).to_string()}}]}),
+            json!({"role":"tool","tool_call_id":"write","content":json!({"revision":7,"memory":"memory ".repeat(10000)}).to_string()}),
+        ]);
+        let original = s.entries[1].message.clone();
+        let p = View::new(settings(), &s).unwrap().plan(&s).unwrap();
+        assert_eq!(s.entries[1].message, original);
+        assert!(serde_json::to_string(&p.messages).unwrap().len() < 16000);
+        assert!(
+            serde_json::to_string(&p.messages)
+                .unwrap()
+                .contains("historical_arguments")
+        );
+        assert!(
+            serde_json::to_string(&p.messages)
+                .unwrap()
+                .contains("recorded_fields")
+        );
+        assert!(
+            serde_json::to_string(&p.messages)
+                .unwrap()
+                .contains("revision")
+        );
+        assert_eq!(p.selected.len(), 3);
+        assert_eq!(p.budget_usage["configured_bytes"], 32768);
+        // Replanning after restart is deterministic and does not execute anything.
+        assert_eq!(
+            p.messages,
+            View::new(settings(), &s)
+                .unwrap()
+                .plan(&s)
+                .unwrap()
+                .messages
+        );
+    }
+    #[test]
+    fn oversized_plain_reasoning_keeps_latest_recall_exact() {
+        let reply =
+            json!({"role":"tool","tool_call_id":"recall","content":"exact recalled qualification"});
+        let s = source(vec![
+            json!({"role":"user","content":"recall"}),
+            json!({"role":"assistant","reasoning":"thought ".repeat(20000),"tool_calls":[{"id":"recall","type":"function","function":{"name":"boxen_history","arguments":"{\"action\":\"status\"}"}}]}),
+            reply.clone(),
+        ]);
+        let p = View::new(settings(), &s).unwrap().plan(&s).unwrap();
+        assert!(p.messages.contains(&reply));
+        assert!(
+            p.messages
+                .iter()
+                .any(|m| m["tool_calls"][0]["function"]["arguments"] == "{\"action\":\"status\"}")
+        );
+    }
+    #[test]
+    fn incomplete_or_signed_exchange_remains_a_legible_shortage() {
+        for signed in [false, true] {
+            let mut assistant = json!({"role":"assistant","reasoning":"thought ".repeat(20000),"tool_calls":[{"id":"write","function":{"name":"write","arguments":"{}"}}]});
+            if signed {
+                assistant["reasoning_details"] =
+                    json!([{"type":"reasoning.encrypted","data":"opaque"}]);
+            }
+            let mut messages = vec![json!({"role":"user","content":"work"}), assistant];
+            if signed {
+                messages.push(json!({"role":"tool","tool_call_id":"write","content":"done"}));
+            }
+            let s = source(messages);
+            let error = View::new(settings(), &s)
+                .unwrap()
+                .plan(&s)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains("protected_bytes="));
         }
     }
     #[test]

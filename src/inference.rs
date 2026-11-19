@@ -817,6 +817,13 @@ pub fn execute(
             || json!({"step":step,"elapsed_ms":context_started.elapsed().as_millis()}),
             || Value::Null,
         );
+        run.append("context_budget", plan.budget_usage.clone())?;
+        run.diagnostic(
+            Level::Info,
+            "context.budget",
+            || plan.budget_usage.clone(),
+            || Value::Null,
+        );
         let first = view.needs_boundary(&plan);
         if first {
             let mut summary = if view.settings.mode == context::Mode::Summary {
@@ -917,7 +924,7 @@ pub fn execute(
         // history allows the provider to reuse the unchanged token prefix.
         wire_messages.push(json!({
             "role":"system",
-            "content":format!("{}{}",run_context,view.framing(&source,first)),
+            "content":format!("{}{}\nContext selection budget (serialized bytes, not provider tokens; schemas/host framing also consume provider input): {}\n",run_context,view.framing(&source,first),plan.budget_usage),
         }));
         run.diagnostic(
             Level::Debug,

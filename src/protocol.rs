@@ -547,7 +547,24 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
             "thread_activity" => {
                 jobs.thread_activity(owner, request["id"].as_str().ok_or("thread id required")?)
             }
-            "list" => Ok(serde_json::to_value(jobs.list(owner))?),
+            "list" => {
+                let resident = request
+                    .get("resident_id")
+                    .map(|v| v.as_str().ok_or("resident_id is a string"))
+                    .transpose()?;
+                if let Some(id) = resident {
+                    jobs.residents.get(owner, id)?;
+                }
+                Ok(serde_json::to_value(
+                    jobs.list(owner)
+                        .into_iter()
+                        .filter(|s| {
+                            resident
+                                .is_none_or(|id| s.record.spec.resident_id.as_deref() == Some(id))
+                        })
+                        .collect::<Vec<_>>(),
+                )?)
+            }
             "transcript_import" => Ok(serde_json::to_value(
                 jobs.import_transcript(owner, serde_json::from_value(request["spec"].clone())?)?,
             )?),

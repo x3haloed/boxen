@@ -609,6 +609,7 @@ impl Run {
             "context_note",
             "context_compact_requested",
             "context_exposure",
+            "context_budget",
         ];
         let positions = Journal::ordered(kinds.iter().flat_map(|kind| {
             let positions = inner.journal.positions(kind);

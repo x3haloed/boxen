@@ -3,6 +3,7 @@
 
 The provider is deterministic test evidence, not a claim about model recall.
 """
+import hashlib
 import http.server
 from smoke_helpers import python_shell
 import json
@@ -57,6 +58,19 @@ class Provider(http.server.BaseHTTPRequestHandler):
                 else:
                     emit({'content': 'HELPER_INTERPRETATION: report to Jen, Friday relaxed; unfinished question remains open.'}, 'stop')
             else:
+                if body['model'] == 'file-continuity':
+                    results = [m for m in body['messages'] if m['role'] == 'tool']
+                    if not results:
+                        reasoning = 'plain-reasoning ' * 6000
+                        emit({'reasoning':reasoning, 'reasoning_details':[{'type':'reasoning.text','text':reasoning,'format':'unknown','index':0}],
+                            'tool_calls':[{'index':0,'id':'file-write','type':'function','function':{'name':'boxen_continuity','arguments':json.dumps({
+                                'action':'write','expected_revision':1,'memory_file':'verified-memory.txt',
+                                'memory_sha256':hashlib.sha256(('file-memory λ\n'*2000).encode()).hexdigest()})}}]}, 'tool_calls')
+                    else:
+                        assert any('historical_result' in m['content'] and 'written' in m['content'] for m in results), results
+                        assert all(not m.get('reasoning') and not m.get('reasoning_details') for m in body['messages'] if m['role']=='assistant')
+                        emit({'content':'FILE_CONTINUITY_VERIFIED'}, 'stop')
+                    self.wfile.write(b'data: [DONE]\n\n'); self.wfile.flush(); return
                 prompt = next(m['content'] for m in reversed(body['messages']) if m['role'] == 'user')
                 if isinstance(prompt, str) and prompt.startswith(('Mailbox activation.','Message activation.')):
                     text = 'PRIVATE_ACTIVITY'
@@ -169,6 +183,19 @@ with tempfile.TemporaryDirectory(prefix='boxen-compaction-') as temporary:
         return events
 
     try:
+        (directory/'verified-memory.txt').write_text('file-memory λ\n'*2000)
+        resident_id=secrets.token_hex(32)
+        api({'op':'resident_create','spec':{'id':resident_id,'name':'Fixture resident','cwd':temporary,'model':'file-continuity','backend':'openrouter',
+            'auto_activate':False,'context':{'mode':'verbatim','budget_bytes':32768,'pin_quota_bytes':8192},'quota_bytes':65536}})
+        file_run=api({'op':'resident_activate','id':resident_id,'activation_id':secrets.token_hex(32),'directions':'Apply the verified staged memory.'})
+        file_events=finish(file_run)
+        saved=api({'op':'resident_get','id':resident_id})
+        assert saved['memory']=='file-memory λ\n'*2000 and saved['revision']==2
+        assert any(e['kind']=='context_budget' for e in file_events)
+        filtered=api({'op':'list','resident_id':resident_id})
+        assert len(filtered)==1 and filtered[0]['record']['spec']['resident_id']==resident_id
+        assert api({'op':'resident_get','id':resident_id})['revision']==2
+        print('PASS file-backed continuity, oversized completed reasoning, durable receipt, budget telemetry and resident-filtered run list',flush=True)
         cli_run=json.loads(cli(0,'start',f'127.0.0.1:{peers[1]}',keys[1],temporary,'fixture','CLI policy proof','--backend','openrouter','--context','{"mode":"verbatim"}'))
         finish(cli_run)
         cli_status=json.loads(cli(0,'context',f'127.0.0.1:{peers[1]}',keys[1],cli_run['record']['spec']['thread_id'],'{"action":"status"}'))
@@ -251,6 +278,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-compaction-') as temporary:
         processes[1].kill()
         processes[1].wait(timeout=5)
         tokens[1] = daemon(1)
+        assert api({'op':'resident_get','id':resident_id})['revision']==2
+        assert ctx(resident_id,'status')['budget_usage']['configured_bytes']==32768
         assert ctx(thread, 'read', id=original['id'], limit=1)['entries'][0] == original
         finish(start('after restart', effect_thread))
         assert (directory / 'effect.txt').read_text() == 'once'

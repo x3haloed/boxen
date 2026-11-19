@@ -6,7 +6,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::io::Write;
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
 
 pub fn default_backend() -> String {
@@ -648,6 +649,32 @@ impl Residents {
         )
     }
     pub fn tool(&self, owner: &str, id: &str, arguments: Value) -> Result<Value> {
+        let file_source = arguments.get("memory_file").is_some();
+        let result = self.continuity_tool(owner, id, arguments);
+        if file_source {
+            logging::record(
+                if result.is_ok() {
+                    Level::Info
+                } else {
+                    Level::Warn
+                },
+                Target::State,
+                "resident.continuity.file",
+                Context {
+                    thread_id: Some(id),
+                    peer_id: Some(owner),
+                    ..Context::default()
+                },
+                || {
+                    json!({"accepted":result.is_ok(),"revision":result.as_ref().ok().map(|v|v["revision"].clone()),
+                    "error":result.as_ref().err().map(|e|e.to_string())})
+                },
+                || Value::Null,
+            );
+        }
+        result
+    }
+    fn continuity_tool(&self, owner: &str, id: &str, arguments: Value) -> Result<Value> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Input {
@@ -655,8 +682,30 @@ impl Residents {
             expected_revision: Option<u64>,
             identity: Option<String>,
             memory: Option<String>,
+            memory_file: Option<String>,
+            memory_sha256: Option<String>,
         }
-        let input: Input = serde_json::from_value(arguments)?;
+        let mut input: Input = serde_json::from_value(arguments)?;
+        let file_write = input.memory_file.is_some();
+        if file_write {
+            if input.action != "write" || input.memory.is_some() {
+                return Err("memory_file is a write source exclusive with memory".into());
+            }
+            let current = self.get(owner, id)?;
+            let path = std::path::Path::new(input.memory_file.as_ref().unwrap());
+            let path = if path.is_absolute() {
+                path.to_owned()
+            } else {
+                std::path::Path::new(&current.cwd).join(path)
+            };
+            let expected = input
+                .memory_sha256
+                .as_deref()
+                .ok_or("memory_file requires memory_sha256")?;
+            input.memory = Some(read_continuity_file(&path, expected, current.quota_bytes)?);
+        } else if input.memory_sha256.is_some() {
+            return Err("memory_sha256 requires memory_file".into());
+        }
         let resident = match input.action.as_str() {
             "read" => self.get(owner, id)?,
             "write" => self.update(
@@ -678,9 +727,67 @@ impl Residents {
             )?,
             _ => return Err("supported continuity actions are read and write".into()),
         };
-        Ok(resident.value())
+        if file_write {
+            Ok(
+                json!({"written":true,"revision":resident.revision,"memory_bytes":resident.memory.len(),
+                "memory_sha256":state::hex(&Sha256::digest(resident.memory.as_bytes())),"quota_bytes":resident.quota_bytes}),
+            )
+        } else {
+            Ok(resident.value())
+        }
     }
 }
+fn read_continuity_file(path: &std::path::Path, expected: &str, quota: usize) -> Result<String> {
+    let file = fs::File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err("continuity source is a regular UTF-8 file".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(quota as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > quota {
+        return Err("continuity source exceeds resident quota".into());
+    }
+    if state::hex(&Sha256::digest(&bytes)) != expected {
+        return Err("continuity source hash differs; no write occurred".into());
+    }
+    Ok(String::from_utf8(bytes)?)
+}
 pub fn tool_spec() -> Value {
-    json!({"type":"function","name":"boxen_continuity","description":"This tool reads and updates the attached resident’s durable Boxen identity and memory. The read action returns current contents, revision, usage, and quota. The write action replaces supplied identity or memory fields when expected_revision matches and the result fits the quota; omitted fields remain unchanged. Revision conflicts and quota failures leave stored continuity unchanged. The tool cannot address another resident or change quota or placement.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["read","write"]},"expected_revision":{"type":"integer","minimum":1},"identity":{"type":"string"},"memory":{"type":"string"}},"required":["action"],"additionalProperties":false}})
+    json!({"type":"function","name":"boxen_continuity","description":"This tool reads and updates the attached resident’s durable Boxen identity and memory. The read action returns current contents, revision, usage, and quota. The write action replaces supplied identity or memory fields when expected_revision matches and the result fits the quota; omitted fields remain unchanged. memory_file supplies exact UTF-8 memory bytes from a host-local file (relative paths resolve against the resident workspace) with required memory_sha256; it is exclusive with memory and returns a small revision/hash receipt. File sources still pass the same revision and quota checks. Revision conflicts and quota failures leave stored continuity unchanged. The tool cannot address another resident or change quota or placement.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["read","write"]},"expected_revision":{"type":"integer","minimum":1},"identity":{"type":"string"},"memory":{"type":"string"},"memory_file":{"type":"string"},"memory_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}},"required":["action"],"additionalProperties":false}})
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+    #[test]
+    fn file_write_checks_hash_revision_quota_and_survives_reopen() {
+        let root =
+            std::env::temp_dir().join(format!("boxen-file-{}", state::random_hex().unwrap()));
+        fs::create_dir_all(&root).unwrap();
+        let owner = "a".repeat(64);
+        let id = "b".repeat(64);
+        let store = Residents::open(root.join("residents"), "c".repeat(64)).unwrap();
+        let create:Create=serde_json::from_value(json!({"id":id,"name":"Example","cwd":root.to_str().unwrap(),"identity":"original","memory":"before","quota_bytes":1024})).unwrap();
+        store.create(&owner, create).unwrap();
+        let file = root.join("memory.txt");
+        fs::write(&file, "exact UTF-8 λ\n").unwrap();
+        let hash = state::hex(&Sha256::digest(fs::read(&file).unwrap()));
+        let input = json!({"action":"write","expected_revision":1,"memory_file":"memory.txt","memory_sha256":hash});
+        let mut bad = input.clone();
+        bad["memory_sha256"] = json!("0".repeat(64));
+        assert!(store.tool(&owner, &id, bad).is_err());
+        assert_eq!(store.get(&owner, &id).unwrap().revision, 1);
+        let receipt = store.tool(&owner, &id, input.clone()).unwrap();
+        assert_eq!(receipt["revision"], 2);
+        assert!(receipt.get("memory").is_none());
+        assert!(store.tool(&owner, &id, input).is_err());
+        fs::write(&file, "x".repeat(1025)).unwrap();
+        assert!(store.tool(&owner,&id,json!({"action":"write","expected_revision":2,"memory_file":"memory.txt","memory_sha256":"0".repeat(64)})).is_err());
+        drop(store);
+        let store = Residents::open(root.join("residents"), "c".repeat(64)).unwrap();
+        let current = store.get(&owner, &id).unwrap();
+        assert_eq!(current.memory, "exact UTF-8 λ\n");
+        assert_eq!(current.identity, "original");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
