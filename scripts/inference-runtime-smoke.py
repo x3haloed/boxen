@@ -213,14 +213,37 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         settings={'op':'thread_reasoning','id':run_id}
         prior=api(settings)
         updated=api({**settings,'patch':{'expected_version':prior['version'],'reasoning_effort':'high'}})
-        assert collect(run)[1]['status']=='completed'
+        prefix_events,ended=collect(run)
+        assert ended['status']=='completed'
         assert [b['reasoning'] for b in observed[before:]]==[{'effort':'low'}]*2
         assert all(b['provider']['require_parameters'] for b in observed[before:])
+        initial,tool_followup=observed[before:]
+        session_id=f'boxen:{run_id}:workload'
+        assert initial['session_id']==tool_followup['session_id']==session_id
+        shared=initial['messages'][:-1]
+        assert [m['role'] for m in shared]==['system','user']
+        assert tool_followup['messages'][:len(shared)]==shared
+        assert tool_followup['messages'][-2]['role']=='tool'
+        assert initial['tools']==tool_followup['tools']
+        for request in (initial,tool_followup):
+            tail=request['messages'][-1]
+            assert tail['role']=='system'
+            assert f'This is Boxen run {run_id}' in tail['content']
+            assert 'This input was assembled at' in tail['content']
+            assert 'This input was assembled at' not in request['messages'][0]['content']
+        assert initial['messages'][-1]!=tool_followup['messages'][-1]
+        accepted=[e['data'] for e in prefix_events if e['kind']=='inference_message']
+        assert [m['role'] for m in accepted]==['user','assistant','tool','assistant']
         processes[-1].kill();processes[-1].wait(timeout=5);tokens[1]=daemon(1)
         assert api(settings)==updated
         before=len(observed)
         follow=start('FOLLOWUP',thread=run_id)
         assert collect(follow)[1]['status']=='completed'
+        resumed=observed[before]['messages']
+        assert observed[before]['session_id']==session_id
+        assert resumed[:len(tool_followup['messages'])-1]==tool_followup['messages'][:-1]
+        assert f"This is Boxen run {follow['record']['spec']['id']}" in resumed[-1]['content']
+        print('PASS stable provider-input prefix across tool exchanges and restart with fresh, wire-only run context')
         assert observed[before]['reasoning']=={'effort':'high'}
         assert api({'op':'get','id':run_id})['record']['reasoning_effort']=='low'
         prior=api(settings)
@@ -238,6 +261,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
             activation=activate(r)
             assert collect(activation)[1]['status']=='completed'
             assert activation['record']['reasoning_effort']==effort
+            assert observed[before]['session_id']==f"boxen:{r['id']}:workload"
+            assert observed[before]['session_id']!=session_id
             assert observed[before].get('reasoning')==(None if effort=='default' else {'effort':effort})
         (directory/'effect.txt').unlink()
         print('PASS OpenRouter reasoning wire values, strict routing, active run isolation, restart and default reset')

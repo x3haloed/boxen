@@ -45,7 +45,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        assert "workload subprocess execution context" in request["messages"][0]["content"]
+        assert "workload subprocess execution context" in request["messages"][-1]["content"]
         delta = {"content": "execution checked"}
         finish = "stop"
         if not any(message["role"] == "tool" for message in request["messages"]):

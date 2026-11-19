@@ -241,6 +241,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-compaction-') as temporary:
         assert (directory / 'effect.txt').read_text() == 'once'
         print('PASS masked historical observation, restart replay and no completed-effect reexecution', flush=True)
 
+        summary_start = len(observed)
         summary = start('summary seed ' + 'source ' * 800, mode='summary')
         finish(summary)
         summary_thread = summary['record']['spec']['thread_id']
@@ -251,6 +252,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-compaction-') as temporary:
         assert b['summary']['author']['kind'] == 'summary_helper'
         assert 'HELPER_INTERPRETATION' in b['summary']['text']
         assert any(e['kind'] == 'context_delta' for e in summary_events)
+        sessions = {request['session_id'] for request in observed[summary_start:]}
+        assert sessions == {f'boxen:{summary_thread}:workload', f'boxen:{summary_thread}:summary'}
         assert not any(e['kind'] == 'assistant_message' and 'HELPER_INTERPRETATION' in e['data']['text'] for e in summary_events)
         switched = finish(start('policy changes rebuild originals', summary_thread, mode='verbatim'))
         assert not ctx(summary_thread, 'status')['boundary']['summary']

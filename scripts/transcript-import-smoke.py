@@ -91,7 +91,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-transcript-import-') as temp:
    assert time.monotonic()<end;time.sleep(.05)
   assert len(observed)==1 and observed[0]['model']=='current-model'
   wire=observed[0]['messages'];assert wire[1:5]==expected,wire
-  assert 'example-chat' in wire[0]['content'] and 'imported assistant messages originate' in wire[0]['content']
+  assert 'example-chat' in wire[-1]['content'] and 'imported assistant messages originate' in wire[-1]['content']
   assert not (base/'forbidden-effect.txt').exists()
   assert api({'op':'resident_inbox','id':rid})['messages']==[]
   assert import_(spec)==snapshot and len(api({'op':'list'}))==2

@@ -551,7 +551,11 @@ impl View {
                     6144
                 },
         );
-        let threshold = entries.len().saturating_sub(self.settings.mask_after);
+        let eligible = entries.len().saturating_sub(self.settings.mask_after);
+        // Aging one result at a time repeatedly changes the provider prefix.
+        // Journal entry counts make these batches deterministic across restarts.
+        let mask_batch = self.settings.mask_after.clamp(1, 12);
+        let threshold = eligible - eligible % mask_batch;
         let pinned_ids: HashSet<String> = source
             .objects("context_bundle")
             .iter()
@@ -936,6 +940,35 @@ mod tests {
                     .unwrap()
                     .contains("intervening source")
         }));
+    }
+    #[test]
+    fn older_tool_bodies_are_masked_in_batches() {
+        let mut messages = vec![
+            json!({"role":"user","content":"do the work"}),
+            json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":"first","type":"function","function":{"name":"boxen_shell","arguments":"{}"}},
+                {"id":"second","type":"function","function":{"name":"boxen_shell","arguments":"{}"}}
+            ]}),
+            json!({"role":"tool","tool_call_id":"first","content":"a".repeat(2000)}),
+            json!({"role":"tool","tool_call_id":"second","content":"b".repeat(2000)}),
+            json!({"role":"assistant","content":"done"}),
+            json!({"role":"user","content":"first follow-up"}),
+        ];
+        let mut config = settings();
+        config.mask_after = 4;
+        let original = source(messages.clone());
+        let view = View::new(config, &original).unwrap();
+        let before = view.plan(&original).unwrap();
+
+        messages.push(json!({"role":"assistant","content":"response"}));
+        let between = view.plan(&source(messages.clone())).unwrap();
+        assert!(between.masked.is_empty());
+        assert_eq!(between.messages[..before.messages.len()], before.messages);
+
+        messages.push(json!({"role":"user","content":"second follow-up"}));
+        let after = view.plan(&source(messages)).unwrap();
+        assert_eq!(after.masked, ["source:2", "source:3"]);
+        assert_eq!(after.selected.len(), 8);
     }
     #[test]
     fn latest_effect_result_is_masked_instead_of_lost_even_before_age_threshold() {

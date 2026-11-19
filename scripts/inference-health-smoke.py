@@ -82,9 +82,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-health-') as temp:
   fourth=wait(api(success_request));assert fourth['status']=='completed'
   assert api(success_request)==fourth and (base/'effect.txt').read_text()=='x'
   h=health();assert h[0]['count']==3 and not h[0]['active'] and h[0]['resolved_run_id']==newid
-  wire=observed[-1]['messages'];system=wire[0]['content'];assert 'Inference health is a coalesced projection' in system and 'payment' in system and '"count":3' in system
+  wire=observed[-1]['messages'];system=wire[-1]['content'];assert 'Inference health is a coalesced projection' in system and 'payment' in system and '"count":3' in system
   assert len([m for m in wire if m['role']=='tool'])==1
-  assert wire[-1]['role']=='user' and 'Continuation after interrupted inference' in wire[-1]['content']
+  assert wire[-2]['role']=='user' and 'Continuation after interrupted inference' in wire[-2]['content']
   assert api({'op':'resident_inbox','id':rid})['messages']==[]
   reject(lambda:api({'op':'inference_resume','failed_run_id':newid,'id':secrets.token_hex(32)}))
   assert json.loads(cli(0,'inference-health',f'127.0.0.1:{peers[1]}',keys[1]))['incidents']==h

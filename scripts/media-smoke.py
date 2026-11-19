@@ -113,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-media-') as temp:
                 result=next(e['data']['result'] for e in events if e['kind']=='tool_result')
                 assert result['sha256']==hashlib.sha256(content).hexdigest()
                 if part:
-                    wire=observed[-1];parts=wire['messages'][-1]['content'];native=next(p for p in parts if p['type']==part)
+                    wire=observed[-1];parts=wire['messages'][-2]['content'];native=next(p for p in parts if p['type']==part)
                     if part=='input_audio':encoded=native[part]['data']
                     else:encoded=(native[part]['file_data'] if part=='file' else native[part]['url']).split(',',1)[1]
                     assert base64.b64decode(encoded)==content
@@ -138,7 +138,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-media-') as temp:
             results=[e['data']['result'] for e in events if e['kind']=='tool_result']
             assert len(results)==9 and sum(r['ok'] for r in results)==8,results
             assert 'quota' in results[-1]['error']
-            assert len([p for p in observed[-1]['messages'][-1]['content'] if p['type']=='input_audio'])==8
+            assert len([p for p in observed[-1]['messages'][-2]['content'] if p['type']=='input_audio'])==8
             assert all('boxen_artifact' not in m for m in observed[-1]['messages'])
             for name,content in [('unknown.bin' ,b'\x00\xff'),('large.bin',b'x'*(2*1024*1024+1))]:
                 (root/name).write_bytes(content);_,events,_=execute(name)

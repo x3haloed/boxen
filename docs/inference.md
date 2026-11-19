@@ -41,6 +41,8 @@ Resident assistant text is private execution narration, including final text. On
 
 ## History, limits, and recovery
 
+The workload input starts with stable system instructions and projected conversation history. A trailing system message carries the current run and context view so changes there leave the preceding messages eligible for prefix caching. This message exists only in provider input. OpenRouter workload calls use a stable session ID derived from the canonical thread. Summary helper calls have a separate session ID so they do not influence workload routing. Host provider policy still takes precedence. Actual cache reuse depends on the provider and model. [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching)
+
 Accepted native messages and tool results live in the existing run journals. Follow-ups rebuild provider input from these retained records, including the tested native metadata. Daemon restart preserves them; no in-memory SDK session is required. Inference history does not depend on opt-in diagnostics.
 
 A crash or cancellation between an assistant call and its durable result leaves the effect uncertain. A later activation can proceed: the current projection supplies a synthetic unknown result describing that uncertainty. It does not dispatch the historical call or relabel it successful. A completed effect followed by failed inference retains its original result. Explicit mail sends also retain the existing daemon idempotency guarantees.
