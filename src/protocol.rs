@@ -461,7 +461,7 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 let spec: crate::mailbox::Send =
                     serde_json::from_value(request["message"].clone())?;
                 let source = format!("client:{owner}:{client}:{}", spec.id);
-                Ok(serde_json::to_value(jobs.send_mail(
+                let message = jobs.send_mail(
                     owner,
                     crate::mailbox::Address::Client {
                         machine: owner.into(),
@@ -469,7 +469,8 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                     },
                     spec,
                     source,
-                )?)?)
+                )?;
+                crate::messaging::legacy_send_result(jobs, &message)
             }
             "resident_inbox" => jobs.inbox(
                 owner,

@@ -313,6 +313,25 @@ centered, `before_id` or `after_id`), at most 50 per directional page and bounde
 to 60 KiB total, with continuation IDs and original authors. Reading never changes
 attention. `react` takes `message_id` and Unicode/custom `emoji`.
 
+A Discord receipt distinguishes invalid channel syntax, Boxen policy denial,
+provider-reported unknown channel or access denial, and unresolved lookup.
+Preflight rejection reports the exact addressed conversation and establishes
+that no outbound effect was attempted. Provider error codes describe the
+requested ID for the configured account. A transport failure after dispatch
+can leave an effect uncertain.
+
+History pages echo the selected window and report provider, policy-filtered,
+returned, and byte-omitted counts separately. Observed range endpoints include
+IDs and timestamps where the read policy authorizes them. Opaque cursors resume
+past filtered endpoints without revealing those IDs. An empty provider window
+does not establish history access or exhaustion.
+
+Both resident send interfaces include a delivery receipt, and `boxen_messages`
+`status` reads the current receipt using the send ID. A queued receipt identifies
+a local save awaiting destination acceptance. Service receipts preserve native
+IDs, multipart counts and uncertain effects where applicable.
+
+
 `send_files` accepts `paths` (1–10 local paths or HTTP(S) URLs) and optional `body`.
 Bytes are snapshotted on the executing host before acceptance: 2 MiB/file,
 16 MiB/run and batch. URL fetching has a 15-second deadline, forwards no connector

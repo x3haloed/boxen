@@ -555,8 +555,26 @@ fn project_address(a: &Address) -> Value {
         } => json!({"instance":instance,"conversation":conversation}),
     }
 }
+fn delivery(jobs: &Jobs, m: &Message) -> Value {
+    jobs.mailboxes.receipt(&m.id).unwrap_or_else(|| {
+        if let Some(network) = &m.network {
+            json!({"status":"unknown","transport":"boxen_network","destination_machine":network["destination_machine"]})
+        } else if matches!(m.to, Address::Connector { .. }) {
+            json!({"status":"queued","saved_on":m.accepted_on})
+        } else {
+            json!({"status":"accepted","accepted_on":m.accepted_on,"transport":"boxen_local"})
+        }
+    })
+}
+
+pub(crate) fn legacy_send_result(jobs: &Jobs, message: &Message) -> Result<Value> {
+    let mut result = serde_json::to_value(message)?;
+    result["delivery"] = delivery(jobs, message);
+    Ok(result)
+}
+
 fn project(jobs: &Jobs, m: &Message) -> Value {
-    json!({"id":m.id,"network":m.network,"from":project_address(&m.sender),"to":project_address(&m.to),"subject":if m.subject.is_empty(){Value::Null}else{json!(m.subject)},"body":m.body,"attachments":m.attachments,"service":m.service,"reply_to":project_address(&m.reply_to),"in_reply_to":m.in_reply_to,"origin":m.origin,"accepted_at":m.accepted_at,"seq":m.seq,"delivery":jobs.mailboxes.receipt(&m.id).unwrap_or_else(||json!({"status":if matches!(m.to,Address::Connector{..}){"queued"}else{"accepted"},"accepted_on":m.accepted_on}))})
+    json!({"id":m.id,"network":m.network,"from":project_address(&m.sender),"to":project_address(&m.to),"subject":if m.subject.is_empty(){Value::Null}else{json!(m.subject)},"body":m.body,"attachments":m.attachments,"service":m.service,"reply_to":project_address(&m.reply_to),"in_reply_to":m.in_reply_to,"origin":m.origin,"accepted_at":m.accepted_at,"seq":m.seq,"delivery":delivery(jobs, m)})
 }
 pub fn authorize_action(
     jobs: &Jobs,
@@ -1060,26 +1078,48 @@ pub fn operation(
                         if !instance.definition.enabled {
                             return Err("connector instance is disabled; pending correspondence is retained".into());
                         }
-                        if !instance.policy().permits(
-                            r,
-                            &m.service
-                                .as_ref()
-                                .map(|s| {
-                                    crate::message_service::declared(
-                                        &instance,
-                                        s["operation"].as_str().unwrap_or(""),
-                                    )
-                                })
-                                .transpose()?
-                                .map(|t| t.permission)
-                                .unwrap_or_else(|| "send".into()),
-                            conversation,
-                            &args["native_context"],
-                        ) {
+                        let permission = m
+                            .service
+                            .as_ref()
+                            .map(|s| {
+                                crate::message_service::declared(
+                                    &instance,
+                                    s["operation"].as_str().unwrap_or(""),
+                                )
+                            })
+                            .transpose()?
+                            .map(|tool| tool.permission)
+                            .unwrap_or_else(|| "send".into());
+                        let policy = instance.policy();
+                        let unresolved_discord = instance.definition.provider == "discord"
+                            && args["native_context"]["unavailable"] == true
+                            && policy.potential(r, &permission, conversation);
+                        if unresolved_discord
+                            || !policy.permits(
+                                r,
+                                &permission,
+                                conversation,
+                                &args["native_context"],
+                            )
+                        {
                             let claim_id = args["claim_id"].as_str().ok_or("claim_id required")?;
                             let claim = jobs.mailboxes.claim(owner, id, mid, claim_id)?;
                             if claim["claimed"] != true {
                                 return Ok(claim);
+                            }
+                            let lookup = &args["native_context"]["lookup"];
+                            let reason = if unresolved_discord {
+                                crate::discord_connector::lookup_reason(lookup)
+                            } else {
+                                "policy_denied"
+                            };
+                            let mut evidence = json!({"conversation":conversation,"stage":if unresolved_discord {"channel_lookup"}else{"policy"},"dispatch_attempted":false});
+                            if unresolved_discord {
+                                for key in ["http_status", "provider_code"] {
+                                    if let Some(code) = lookup[key].as_u64() {
+                                        evidence[key] = json!(code);
+                                    }
+                                }
                             }
                             let receipt = jobs.mailboxes.complete(
                                 owner,
@@ -1087,20 +1127,24 @@ pub fn operation(
                                 mid,
                                 claim_id,
                                 crate::mailbox::DeliveryOutcome {
-                                    result: None,
+                                    result: Some(&evidence),
                                     status: "rejected",
                                     external_id: None,
-                                    reason: Some("policy_denied"),
+                                    reason: Some(reason),
                                 },
                             )?;
                             event(
                                 owner,
                                 id,
-                                "messaging.dispatch_policy_denied",
-                                || json!({"message_id":mid,"resident_id":r,"conversation":conversation}),
+                                if unresolved_discord {
+                                    "messaging.dispatch_lookup_failed"
+                                } else {
+                                    "messaging.dispatch_policy_denied"
+                                },
+                                || json!({"message_id":mid,"resident_id":r,"conversation":conversation,"reason":reason}),
                             );
                             return Ok(
-                                json!({"claimed":false,"receipt":receipt,"policy_denied":true}),
+                                json!({"claimed":false,"receipt":receipt,"policy_denied":!unresolved_discord}),
                             );
                         }
                         let native_reply = if let Some(reply) = &m.in_reply_to {
@@ -1644,7 +1688,9 @@ fn gateway_event(
         }
         if args["native_context"]["unavailable"] == true {
             state.gaps += 1;
-            state.last_gap = Some("native_scope_unavailable".into());
+            state.last_gap = Some(
+                crate::discord_connector::lookup_reason(&args["native_context"]["lookup"]).into(),
+            );
         }
         if kind == "MESSAGE_CREATE" && args["native_context"]["unavailable"] != true {
             let conversation = data["channel_id"]

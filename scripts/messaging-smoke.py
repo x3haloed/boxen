@@ -40,6 +40,9 @@ class Discord(http.server.BaseHTTPRequestHandler):
         if not account:self.reply(401,{'error':'bad credential'});return
         if self.path=='/users/@me':self.reply(200,account);return
         if self.path=='/channels/666' and Discord.context_failure:self.reply(503,{'error':'context unavailable'});return
+        if self.path=='/channels/909':self.reply(404,{'code':10003,'message':'Unknown Channel'});return
+        if self.path=='/channels/908':self.reply(403,{'code':50001,'message':'Missing Access'});return
+        if self.path=='/channels/907':self.reply(404,{});return
         if self.path.startswith('/channels/') and self.path.count('/')==2:
             channel=self.path.rsplit('/',1)[1];self.reply(200,{'id':channel,'guild_id':None if channel=='555' else 'space-one','type':1 if channel=='555' else 3 if channel=='666' else 0,'recipients':[{'id':'3333','bot':False}]});return
         if self.path.startswith('/channels/999/messages/'):
@@ -332,6 +335,40 @@ with tempfile.TemporaryDirectory(prefix='boxen-messaging-') as temporary:
         finally:Discord.context_failure=False
         assert all(msg('status',id=m['id'])['delivery']['status']=='rejected' for m in blocked)
         assert msg('status',id=healthy['id'])['delivery']['status']=='accepted','unavailable conversations blocked healthy service work'
+        for address,reason,http in [('909','provider_unknown_channel',404),('908','provider_access_denied',403),('907','native_lookup_unresolved',404),('abc','invalid_channel_id',None)]:
+            attempt=msg('call',resident=r1,id=secrets.token_hex(32),to={'instance':pid,'conversation':address},operation='read_context',arguments={'limit':3})
+            runner(pc)
+            receipt=msg('status',id=attempt['id'])['delivery']
+            assert receipt['status']=='rejected' and receipt['reason']==reason,receipt
+            assert receipt['result']['conversation']==address and receipt['result']['dispatch_attempted'] is False
+            assert receipt['result'].get('http_status')==http,receipt
+
+        # All-filtered provider windows still have a continuation. The cursor
+        # may resume within this scope but reveals no filtered native ID.
+        allowed_row=add('visible page edge',{'id':'allowed-reader','bot':False})
+        hidden=[add('policy-hidden',{'id':'hidden-reader','bot':False}) for _ in range(2)]
+        filtered_grant=grant(r1,'conversation','999',['read'])
+        filtered_grant['except_users']=['hidden-reader']
+        policy([filtered_grant])
+        request=call_service('read_context',{'limit':2});runner(pc)
+        page=msg('status',id=request['id'])['delivery']['result']
+        assert page['messages']==[] and page['filtered_by_read_policy']==2 and page['omitted_count']==0,page
+        assert page['observed']=={'first':None,'last':None} and 'before_id' not in page['next']['older'],page
+        request=call_service('read_context',page['next']['older']);runner(pc)
+        page=msg('status',id=request['id'])['delivery']['result']
+        assert any(m['id']==allowed_row['id'] for m in page['messages']),page
+        bad_cursor=call_service('read_context',{'after_cursor':page['selection']['before_cursor']});runner(pc)
+        assert msg('status',id=bad_cursor['id'])['delivery']['status']=='rejected'
+        for _ in range(4):
+            add('x'*24000,{'id':'allowed-reader','bot':False})
+        request=call_service('read_context',{'limit':4});runner(pc)
+        page=msg('status',id=request['id'])['delivery']['result']
+        assert page['stopped_by']=='bytes' and page['provider_window_count']==4 and page['omitted_count']>0,page
+        first_visible=int(page['messages'][0]['id'])
+        request=call_service('read_context',page['next']['older']);runner(pc)
+        earlier=msg('status',id=request['id'])['delivery']['result']
+        assert int(earlier['messages'][-1]['id'])==first_visible-1,earlier
+        Discord.messages[:]=[m for m in Discord.messages if m['id'] not in {allowed_row['id'],*[v['id'] for v in hidden]} and len(m['content'])!=24000]
         policy([grant(r1,'conversation','999',['read','receive','send'])])
         reject(lambda:call_service('react',{'message_id':native['id'],'emoji':'🦊'}))
         old_receipt=msg('status',id=query['id'])

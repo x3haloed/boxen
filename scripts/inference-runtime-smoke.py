@@ -298,7 +298,17 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         print('PASS cancellation during HTTP/tool execution and steering at the next inference boundary')
         r=resident();m1=send(r,'SILENT one');m2=send(r,'REPLY one');m3=send(r,'SILENT two')
         activation=activate(r);assert len(activation['record']['mailbox']['message_ids'])==3
-        assert collect(activation)[1]['status']=='completed'
+        activation_events, activation_snapshot=collect(activation)
+        assert activation_snapshot['status']=='completed'
+        sent=next(e['data']['result'] for e in activation_events if e['kind']=='tool_result' and e['data']['tool']=='boxen_send_message')
+        assert sent['delivery']['status'] in ('queued','accepted') and sent['delivery']['destination_machine']==keys[0],sent
+        deadline=time.monotonic()+5
+        while True:
+            status=api({'op':'messaging','args':{'action':'status','id':sent['id']}})
+            if status['delivery']['status']=='accepted':break
+            assert status['delivery']['status']=='queued' and time.monotonic()<deadline,status
+            time.sleep(.04)
+        assert status['delivery']['accepted_on']==keys[0] and status['delivery']['destination_sequence']>0,status
         assert len(inbox())==1 and inbox()[0]['body']=='EXPLICIT_DELIVERY' and inbox()[0]['in_reply_to']==m2['id']
         silent=activate(r,'EMPTY');assert collect(silent)[1]['status']=='completed';assert len(inbox())==1
         memory=activate(r,'CONTINUITY');events,done=collect(memory);assert done['status']=='completed'

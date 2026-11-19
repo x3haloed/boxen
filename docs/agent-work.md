@@ -104,6 +104,19 @@ returns a locally readable path, with source provenance. Missing sources and
 integrity failures remain errors. The original current-conversation workspace
 and historical-placement behavior remains available.
 
+Workspace listings echo the selected conversation and responding machine. They
+distinguish out-of-scope resident conversations, unknown threads, and eligible
+selections with no recorded workspaces. Counts refer to run workspace records,
+including repeated paths. `next_offset` and `through_run_id` together continue
+the same newest-first selection. Workspace references describe retained records
+of working directories. Retrieval checks availability independently.
+
+Work catalog pages report the selected machine and optional thread filter,
+how many summaries were scanned, how many matched rows were returned, and
+whether `next_cursor` can continue. A filtered page can be empty while the
+underlying catalog still has more rows.
+
+
 Native Codex dynamic tools stay fixed at session creation. The work MCP server
 is attached at each run's supported start/resume boundary, so an existing native
 conversation can acquire the current interface without reconstruction or changes

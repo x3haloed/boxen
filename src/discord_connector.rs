@@ -43,8 +43,58 @@ struct Discord {
 }
 enum Reply {
     Ok(Value),
-    Rejected(u16),
+    Rejected(HttpFailure),
 }
+#[derive(Debug)]
+struct HttpFailure {
+    status: u16,
+    code: Option<u64>,
+}
+impl std::fmt::Display for HttpFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Discord rejected the request (HTTP {})", self.status)
+    }
+}
+impl std::error::Error for HttpFailure {}
+
+fn lookup_failure(error: &(dyn std::error::Error + 'static)) -> Value {
+    let failure = error.downcast_ref::<HttpFailure>();
+    let reason = match failure
+        .filter(|f| (400..500).contains(&f.status))
+        .and_then(|f| f.code)
+    {
+        Some(10003) => "provider_unknown_channel",
+        Some(10008) => "provider_unknown_message",
+        Some(50001 | 50013) => "provider_access_denied",
+        _ => "native_lookup_unresolved",
+    };
+    let mut evidence = json!({"reason":reason});
+    if let Some(failure) = failure {
+        evidence["http_status"] = json!(failure.status);
+        if let Some(code) = failure.code {
+            evidence["provider_code"] = json!(code);
+        }
+    }
+    evidence
+}
+pub(crate) fn lookup_reason(evidence: &Value) -> &'static str {
+    match evidence["reason"].as_str() {
+        Some("invalid_channel_id") => "invalid_channel_id",
+        Some("provider_unknown_channel") if evidence["provider_code"] == 10003 => {
+            "provider_unknown_channel"
+        }
+        Some("provider_access_denied")
+            if evidence["provider_code"] == 50001 || evidence["provider_code"] == 50013 =>
+        {
+            "provider_access_denied"
+        }
+        _ => "native_lookup_unresolved",
+    }
+}
+fn unavailable_context(error: &(dyn std::error::Error + 'static)) -> Value {
+    json!({"unavailable":true,"lookup":lookup_failure(error)})
+}
+
 impl Discord {
     fn context(&mut self, id: &str) -> Result<Value> {
         snowflake(id)?;
@@ -52,6 +102,9 @@ impl Discord {
             return Ok(value.clone());
         }
         let value = self.get(&format!("/channels/{id}"))?;
+        if value["id"].as_str() != Some(id) || !value["type"].is_u64() {
+            return Err("Discord returned invalid channel metadata".into());
+        }
         let context = json!({"space":value["guild_id"],"parent":value["parent_id"],"direct":matches!(value["type"].as_u64(),Some(1|3)),"author":if value["type"]==1 {value["recipients"].as_array().and_then(|a|a.first()).cloned().unwrap_or(Value::Null)}else{Value::Null}});
         if self.channels.len() >= 512 {
             self.channels.clear();
@@ -114,7 +167,14 @@ impl Discord {
                 return Ok(Reply::Ok(Value::Null));
             }
             if !(200..300).contains(&status) && status != 429 {
-                return Ok(Reply::Rejected(status));
+                let code = response
+                    .body_mut()
+                    .with_config()
+                    .limit(4096)
+                    .read_json::<Value>()
+                    .ok()
+                    .and_then(|body| body["code"].as_u64());
+                return Ok(Reply::Rejected(HttpFailure { status, code }));
             }
             let remaining = response
                 .headers()
@@ -143,16 +203,15 @@ impl Discord {
                 self.next = Instant::now() + duration(wait)?;
                 continue;
             }
-            return if (200..300).contains(&status) {
-                Ok(Reply::Ok(value))
-            } else {
-                Ok(Reply::Rejected(status))
-            };
+            return Ok(Reply::Ok(value));
         }
         Err("Discord remains rate limited; no unconfirmed send is automatically replayed".into())
     }
     fn get(&mut self, path: &str) -> Result<Value> {
-        match self.call("GET",path,None)?{Reply::Ok(v)=>Ok(v),Reply::Rejected(s)=>Err(format!("Discord read rejected (HTTP {s}); channel access and message-content availability are independent requirements").into())}
+        match self.call("GET", path, None)? {
+            Reply::Ok(value) => Ok(value),
+            Reply::Rejected(error) => Err(error.into()),
+        }
     }
 }
 fn duration(seconds: f64) -> Result<Duration> {
@@ -390,7 +449,7 @@ pub fn run(home: &Path, mut args: Vec<String>) -> Result<()> {
                         {
                             context = discord
                                 .context(id)
-                                .unwrap_or_else(|_| json!({"unavailable":true}));
+                                .unwrap_or_else(|error| unavailable_context(error.as_ref()));
                         }
                         if kind == "MESSAGE_REACTION_ADD" && context.is_object() {
                             context["message_author_id"] = if data["message_author_id"].is_string()
@@ -742,12 +801,14 @@ fn deliver(control: &Control, discord: &mut Discord) -> Result<()> {
         // Rejection is recorded before any external effect if the adapter cannot represent the request.
         let claim_id = state::random_hex()?;
         let instance: Instance = serde_json::from_value(control.call(json!({"action":"get"}))?)?;
-        let native_context = if valid_conversation && instance.policy.is_some() {
+        let native_context = if !valid_conversation {
+            json!({"unavailable":true,"lookup":{"reason":"invalid_channel_id"}})
+        } else if instance.policy.is_some() {
             // Refresh authoritative native scope before dispatch; cached parent metadata can change.
             discord.channels.remove(conversation);
             match discord.context(conversation) {
                 Ok(context) => context,
-                Err(_) => json!({"unavailable":true}),
+                Err(error) => unavailable_context(error.as_ref()),
             }
         } else {
             Value::Null
@@ -760,11 +821,16 @@ fn deliver(control: &Control, discord: &mut Discord) -> Result<()> {
         if native_context["unavailable"] == true {
             // No native effect was attempted. A terminal rejection prevents one
             // unavailable conversation from occupying the dispatch window forever.
-            control.call(json!({"action":"complete","id":message["id"],"claim_id":claim_id,"status":"rejected","reason":"native_scope_unavailable"}))?;
+            let reason = lookup_reason(&native_context["lookup"]);
+            let mut result = native_context["lookup"].clone();
+            result["conversation"] = json!(conversation);
+            result["stage"] = json!("channel_lookup");
+            result["dispatch_attempted"] = json!(false);
+            control.call(json!({"action":"complete","id":message["id"],"claim_id":claim_id,"status":"rejected","reason":reason,"result":result}))?;
             notices(
                 "discord.dispatch_context_unavailable",
                 &control.instance,
-                json!({"conversation":conversation,"message":message["id"]}),
+                json!({"conversation":conversation,"message":message["id"],"reason":reason}),
             );
             continue;
         }
@@ -796,17 +862,37 @@ fn deliver(control: &Control, discord: &mut Discord) -> Result<()> {
                     None,
                     Some(value),
                 ),
-                Ok(Reply::Rejected(_)) => ("rejected", None, Some("service_rejected"), None),
-                Err(_) => (
-                    if operation == "read_context" {
-                        "rejected"
-                    } else {
-                        "uncertain"
-                    },
-                    None,
-                    Some("service_unavailable"),
-                    None,
-                ),
+                Ok(Reply::Rejected(error)) => {
+                    let status =
+                        if operation == "read_context" || (400..500).contains(&error.status) {
+                            "rejected"
+                        } else {
+                            "uncertain"
+                        };
+                    let mut evidence = lookup_failure(&error);
+                    evidence["conversation"] = json!(conversation);
+                    evidence["stage"] = json!("service");
+                    let reason = match evidence["reason"].as_str() {
+                        Some("provider_unknown_channel") => "provider_unknown_channel",
+                        Some("provider_unknown_message") => "provider_unknown_message",
+                        Some("provider_access_denied") => "provider_access_denied",
+                        _ => "service_rejected",
+                    };
+                    (status, None, Some(reason), Some(evidence))
+                }
+                Err(error) if operation == "read_context" => {
+                    let mut evidence = lookup_failure(error.as_ref());
+                    evidence["conversation"] = json!(conversation);
+                    evidence["stage"] = json!("history_read");
+                    let reason = match evidence["reason"].as_str() {
+                        Some("provider_unknown_channel") => "provider_unknown_channel",
+                        Some("provider_unknown_message") => "provider_unknown_message",
+                        Some("provider_access_denied") => "provider_access_denied",
+                        _ => "native_lookup_unresolved",
+                    };
+                    ("rejected", None, Some(reason), Some(evidence))
+                }
+                Err(_) => ("uncertain", None, Some("service_unavailable"), None),
             };
             control.call(json!({"action":"complete","id":message["id"],"claim_id":claim_id,"status":status,"external_id":external_id,"reason":reason,"result":result}))?;
             notices(
@@ -893,14 +979,19 @@ fn deliver(control: &Control, discord: &mut Discord) -> Result<()> {
                             )
                         }
                     }
-                    Ok(Reply::Rejected(code)) => (
-                        if (400..500).contains(&code) {
+                    Ok(Reply::Rejected(error)) => (
+                        if (400..500).contains(&error.status) {
                             "rejected"
                         } else {
                             "uncertain"
                         },
                         None,
-                        Some(format!("http_{code}")),
+                        Some(match lookup_failure(&error)["reason"].as_str() {
+                            Some("native_lookup_unresolved") | None => {
+                                format!("http_{}", error.status)
+                            }
+                            Some(reason) => reason.to_owned(),
+                        }),
                     ),
                     Err(_) => (
                         "uncertain",
@@ -941,6 +1032,49 @@ fn deliver(control: &Control, discord: &mut Discord) -> Result<()> {
     Ok(())
 }
 
+// Only a boundary behind a Boxen read filter requires an opaque cursor.
+fn history_cursor_cipher(key: &str, salt: &[u8]) -> Result<Box<dyn snow::types::Cipher>> {
+    use snow::resolvers::CryptoResolver;
+    let mut cipher = snow::resolvers::DefaultResolver
+        .resolve_cipher(&snow::params::CipherChoice::ChaChaPoly)
+        .ok_or("Discord history cursor cipher unavailable")?;
+    let seed: [u8; 32] = Sha256::new()
+        .chain_update(b"boxen discord history cursor v1")
+        .chain_update(salt)
+        .chain_update(key.as_bytes())
+        .finalize()
+        .into();
+    cipher.set(&seed);
+    Ok(cipher)
+}
+
+fn history_cursor(key: &str, scope: &[u8], id: u64) -> Result<String> {
+    use base64::Engine;
+    let salt = state::key(&state::random_hex()?)?;
+    let cipher = history_cursor_cipher(key, &salt)?;
+    let mut bytes = [0; 56];
+    bytes[..32].copy_from_slice(&salt);
+    cipher.encrypt(0, scope, &id.to_be_bytes(), &mut bytes[32..]);
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn history_cursor_id(key: &str, scope: &[u8], token: &str) -> Result<String> {
+    use base64::Engine;
+    if token.len() != 75 {
+        return Err("Discord history cursor has invalid length".into());
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token)?;
+    if bytes.len() != 56 {
+        return Err("Discord history cursor has invalid length".into());
+    }
+    let cipher = history_cursor_cipher(key, &bytes[..32])?;
+    let mut id = [0; 8];
+    cipher
+        .decrypt(0, scope, &bytes[32..], &mut id)
+        .map_err(|_| "Discord history cursor is unavailable in this scope")?;
+    Ok(u64::from_be_bytes(id).to_string())
+}
+
 fn service_call(
     discord: &mut Discord,
     instance: &Instance,
@@ -953,13 +1087,19 @@ fn service_call(
     snowflake(conversation)?;
     if operation == "react" {
         let Some(id) = args["message_id"].as_str().filter(|s| snowflake(s).is_ok()) else {
-            return Ok(Reply::Rejected(400));
+            return Ok(Reply::Rejected(HttpFailure {
+                status: 400,
+                code: None,
+            }));
         };
         let Some(emoji) = args["emoji"]
             .as_str()
             .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
         else {
-            return Ok(Reply::Rejected(400));
+            return Ok(Reply::Rejected(HttpFailure {
+                status: 400,
+                code: None,
+            }));
         };
         let encoded: String = emoji
             .as_bytes()
@@ -973,7 +1113,10 @@ fn service_call(
         );
     }
     if operation != "read_context" {
-        return Ok(Reply::Rejected(400));
+        return Ok(Reply::Rejected(HttpFailure {
+            status: 400,
+            code: None,
+        }));
     }
     #[derive(serde::Deserialize, Default)]
     #[serde(default, deny_unknown_fields)]
@@ -981,16 +1124,37 @@ fn service_call(
         message_id: Option<String>,
         before_id: Option<String>,
         after_id: Option<String>,
+        before_cursor: Option<String>,
+        after_cursor: Option<String>,
         limit: Option<usize>,
         before: Option<usize>,
         after: Option<usize>,
     }
     let input: Input = match serde_json::from_value(args.clone()) {
         Ok(v) => v,
-        Err(_) => return Ok(Reply::Rejected(400)),
+        Err(_) => {
+            return Ok(Reply::Rejected(HttpFailure {
+                status: 400,
+                code: None,
+            }));
+        }
     };
-    if input.before_id.is_some() && input.after_id.is_some() {
-        return Ok(Reply::Rejected(400));
+    if [
+        &input.before_id,
+        &input.after_id,
+        &input.message_id,
+        &input.before_cursor,
+        &input.after_cursor,
+    ]
+    .into_iter()
+    .filter(|v| v.is_some())
+    .count()
+        > 1
+    {
+        return Ok(Reply::Rejected(HttpFailure {
+            status: 400,
+            code: None,
+        }));
     }
     for id in [&input.message_id, &input.before_id, &input.after_id]
         .into_iter()
@@ -1002,8 +1166,46 @@ fn service_call(
     let before = input.before.unwrap_or(20);
     let after = input.after.unwrap_or(5);
     if !(1..=50).contains(&limit) || before > 50 || after > 50 {
-        return Ok(Reply::Rejected(400));
+        return Ok(Reply::Rejected(HttpFailure {
+            status: 400,
+            code: None,
+        }));
     }
+    let cursor_scope = |direction: &str| {
+        serde_json::to_vec(&(&instance.definition.id, resident, conversation, direction))
+    };
+    let before_id = if let Some(token) = &input.before_cursor {
+        Some(history_cursor_id(
+            &discord.key,
+            &cursor_scope("older")?,
+            token,
+        )?)
+    } else {
+        input.before_id.clone()
+    };
+    let after_id = if let Some(token) = &input.after_cursor {
+        Some(history_cursor_id(
+            &discord.key,
+            &cursor_scope("newer")?,
+            token,
+        )?)
+    } else {
+        input.after_id.clone()
+    };
+    let descending = after_id.is_none() && input.message_id.is_none();
+    let selection = if let Some(id) = input.before_id.as_ref() {
+        json!({"before_id":id,"limit":limit})
+    } else if let Some(id) = input.after_id.as_ref() {
+        json!({"after_id":id,"limit":limit})
+    } else if let Some(id) = input.message_id.as_ref() {
+        json!({"message_id":id,"before":before,"after":after})
+    } else if let Some(cursor) = input.before_cursor.as_ref() {
+        json!({"before_cursor":cursor,"limit":limit})
+    } else if let Some(cursor) = input.after_cursor.as_ref() {
+        json!({"after_cursor":cursor,"limit":limit})
+    } else {
+        json!({"latest":limit})
+    };
     let mut originals = Vec::new();
     let base = format!("/channels/{conversation}/messages");
     let mut page = |path: &str| -> Result<()> {
@@ -1016,9 +1218,9 @@ fn service_call(
         );
         Ok(())
     };
-    if let Some(id) = input.before_id {
+    if let Some(id) = before_id {
         page(&format!("{base}?limit={limit}&before={id}"))?;
-    } else if let Some(id) = input.after_id {
+    } else if let Some(id) = after_id {
         page(&format!("{base}?limit={limit}&after={id}"))?;
     } else if let Some(id) = input.message_id {
         if before > 0 {
@@ -1039,37 +1241,91 @@ fn service_call(
     });
     originals.dedup_by(|a, b| a["id"] == b["id"]);
     let total = originals.len();
+    if descending {
+        originals.reverse();
+    }
+    let policy = instance.policy();
     let mut messages = Vec::new();
     let mut bytes = 0;
     let mut filtered = 0;
+    let mut clipped = false;
+    let mut first_observed = None;
+    let mut last_observed = None;
+    let mut first_consumed = None;
+    let mut last_consumed = None;
     for original in originals {
+        let id = original["id"]
+            .as_str()
+            .ok_or("Discord message ID unavailable")?;
         let mut native = context.clone();
         if !native.is_object() {
             native = json!({});
         }
         native["author"] = original["author"].clone();
-        if !instance
-            .policy()
-            .permits(resident, "read", conversation, &native)
-        {
+        let visible = policy.permits(resident, "read", conversation, &native);
+        let edge = (snowflake(id)?, id.to_owned(), visible);
+        let bounds = visible.then(|| json!({"id":id,"at":original["timestamp"]}));
+        if first_observed.is_none() {
+            first_observed = Some(bounds.clone());
+        }
+        last_observed = Some(bounds);
+        if visible && !clipped {
+            let projected = crate::messaging::bounded_native(
+                &json!({"id":original["id"],"author":original["author"],"body":original["content"].as_str().unwrap_or(""),"timestamp":original["timestamp"],"attachments":original["attachments"],"native":original}),
+            );
+            let size = serde_json::to_vec(&projected)?.len() + 1;
+            if bytes + size > 60 * 1024 {
+                clipped = true;
+            } else {
+                bytes += size;
+                messages.push(projected);
+            }
+        }
+        if !visible {
             filtered += 1;
-            continue;
         }
-        let native = crate::messaging::bounded_native(
-            &json!({"id":original["id"],"author":original["author"],"body":original["content"].as_str().unwrap_or(""),"timestamp":original["timestamp"],"attachments":original["attachments"],"native":original}),
-        );
-        let size = serde_json::to_vec(&native)?.len();
-        if bytes + size > 60 * 1024 {
-            break;
+        if !clipped {
+            if first_consumed.is_none() {
+                first_consumed = Some(edge.clone());
+            }
+            last_consumed = Some(edge);
         }
-        bytes += size;
-        messages.push(native);
     }
-    let oldest = messages.first().map(|m| m["id"].clone());
-    let newest = messages.last().map(|m| m["id"].clone());
-    Ok(Reply::Ok(
-        json!({"conversation":conversation,"messages":messages,"ordering":"chronological","provider_window_count":total,"filtered_by_read_policy":filtered,"retained_count":messages.len(),"omitted_count":total-filtered-messages.len(),"next":{"older":{"before_id":oldest,"limit":limit},"newer":{"after_id":newest,"limit":limit}}}),
-    ))
+    if descending {
+        messages.reverse();
+        std::mem::swap(&mut first_observed, &mut last_observed);
+        std::mem::swap(&mut first_consumed, &mut last_consumed);
+    }
+    let continuation = |edge: Option<(u64, String, bool)>,
+                        direction: &str,
+                        id_field: &str,
+                        cursor_field: &str|
+     -> Result<Value> {
+        match edge {
+            Some((_, text, true)) => Ok(json!({id_field:text,"limit":limit})),
+            Some((id, _, false)) => Ok(
+                json!({cursor_field:history_cursor(&discord.key,&cursor_scope(direction)?,id)?,"limit":limit}),
+            ),
+            None => Ok(Value::Null),
+        }
+    };
+    let oldest = continuation(first_consumed, "older", "before_id", "before_cursor")?;
+    let newest = continuation(last_consumed, "newer", "after_id", "after_cursor")?;
+    let mut result = json!({"conversation":conversation,"selection":selection,"messages":messages,
+        "ordering":"chronological","provider_window_count":total,"filtered_by_read_policy":filtered,
+        "retained_count":messages.len(),"omitted_count":total-filtered-messages.len(),
+        "observed":{"first":first_observed.flatten(),"last":last_observed.flatten()},
+        "provider_exhaustion":"unknown",
+        "next":{"older":oldest,"newer":newest}});
+    if clipped {
+        result["stopped_by"] = json!("bytes");
+    }
+    if total == 0 {
+        result["detail"] = json!(
+            "Discord returned no messages for this window; history permission and exhaustion are unconfirmed."
+        );
+    }
+    Ok(Reply::Ok(result))
 }
 
 fn load_uploads(control: &Control, message: &Value) -> Result<Vec<(Value, Vec<u8>)>> {

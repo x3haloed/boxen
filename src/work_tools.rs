@@ -177,7 +177,9 @@ fn inventory(jobs: &Arc<Jobs>, owner: &str, args: &Value) -> Result<Value> {
             .collect::<Vec<_>>()
     });
     let next = offset.saturating_add(rows.len());
-    Ok(json!({"machines":rows,"next_offset":(next<total).then_some(next),"total":total}))
+    Ok(
+        json!({"machines":rows,"returned":rows.len(),"has_more":next<total,"next_offset":(next<total).then_some(next),"total":total}),
+    )
 }
 
 fn identifier(value: Option<&str>, run: &Run, call_id: &str) -> Result<String> {
@@ -274,6 +276,8 @@ fn catalog(jobs: &Arc<Jobs>, run: &Run, machine: &Machine, args: &Value) -> Resu
     let mut rows = Vec::new();
     let mut bytes = 0;
     let mut next = page["next_after"].clone();
+    let mut scanned = 0;
+    let mut clipped = false;
     for (index, row) in source.iter().enumerate() {
         if row["record"]["spec"]["resident_id"].is_null()
             && args["thread_id"]
@@ -285,7 +289,8 @@ fn catalog(jobs: &Arc<Jobs>, run: &Run, machine: &Machine, args: &Value) -> Resu
                 item = json!({"work":reference(machine,row),"title":row["title"],"placement_omitted":true});
             }
             let size = item.to_string().len();
-            if bytes + size > OUTPUT_LIMIT && !rows.is_empty() {
+            if bytes + size > OUTPUT_LIMIT - 512 && !rows.is_empty() {
+                clipped = true;
                 let previous = &source[index - 1]["record"];
                 next = json!({"created_at":previous["created_at"],"id":previous["spec"]["id"]});
                 break;
@@ -293,8 +298,18 @@ fn catalog(jobs: &Arc<Jobs>, run: &Run, machine: &Machine, args: &Value) -> Resu
             bytes += size;
             rows.push(item);
         }
+        scanned += 1;
     }
-    Ok(json!({"requests":rows,"next_cursor":next}))
+    let has_more = !next.is_null();
+    let mut result = json!({"requests":rows,"machine":machine.key,"scanned":scanned,
+        "returned":rows.len(),"has_more":has_more,"next_cursor":next});
+    if let Some(thread) = args["thread_id"].as_str() {
+        result["thread_id"] = json!(thread);
+    }
+    if clipped {
+        result["stopped_by"] = json!("bytes");
+    }
+    Ok(result)
 }
 
 fn active(run: &Run) -> Result<()> {
@@ -737,7 +752,8 @@ fn files(jobs: &Arc<Jobs>, run: &Arc<Run>, args: &Value) -> Result<Value> {
         return jobs.workspace_files(&thread, args);
     }
     if args["action"] == "list" {
-        return machine.request(jobs,&run.owner(),json!({"op":"thread_workspace","thread_id":thread,"action":"list","offset":args["offset"]}));
+        return machine.request(jobs,&run.owner(),json!({"op":"thread_workspace","thread_id":thread,"action":"list","offset":args["offset"],"through_run_id":args["through_run_id"]}))
+            .map_err(|error| format!("Workspace listing for thread {thread} on {} is unavailable: {error}", machine.key).into());
     }
     let offer = if args["action"] == "attachment" {
         let result = machine.request(jobs,&run.owner(),json!({"op":"thread_workspace","thread_id":thread,"action":"attachment","run_id":args["run_id"],"digest":args["digest"]}))?;
@@ -792,7 +808,7 @@ pub fn call(
             _ => Err("Unknown work tool".into()),
         }
     })();
-    run.diagnostic(if result.is_ok(){crate::logging::Level::Info}else{crate::logging::Level::Warn},"work.tool_completed",||json!({"call_id":call_id,"tool":name,"action":args["action"],"machine":args["machine"],"success":result.is_ok(),"acceptance":result.as_ref().ok().map(|v|&v["acceptance"]),"done":result.as_ref().ok().map(|v|&v["done"])}),||result.as_ref().map_or_else(|e|json!({"error":e.to_string()}),|v|v.clone()));
+    run.diagnostic(if result.is_ok(){crate::logging::Level::Info}else{crate::logging::Level::Warn},"work.tool_completed",||json!({"call_id":call_id,"tool":name,"action":args["action"],"machine":args["machine"],"success":result.is_ok(),"acceptance":result.as_ref().ok().map(|v|&v["acceptance"]),"done":result.as_ref().ok().map(|v|&v["done"]),"status":result.as_ref().ok().and_then(|v|v.get("status")),"has_more":result.as_ref().ok().and_then(|v|v.get("has_more"))}),||result.as_ref().map_or_else(|e|json!({"error":e.to_string()}),|v|v.clone()));
     result
 }
 

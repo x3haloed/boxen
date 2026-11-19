@@ -956,6 +956,7 @@ pub fn execute(
         else {
             return Ok(());
         };
+        let search_boundary = source.entries.len();
         let assistant = projection["assistant"].clone();
         run.append("inference_message", assistant.clone())?;
         messages.push(assistant.clone());
@@ -1037,7 +1038,7 @@ pub fn execute(
                 || json!({"arguments":args}),
             );
             let result = (|| -> Result<Option<Value>> {
-                let args: Value = serde_json::from_str(args)?;
+                let mut args: Value = serde_json::from_str(args)?;
                 if name == "boxen_shell" {
                     shell(&run, spec, &id, args, &controls_rx, &mut pending)
                 } else if name == "boxen_read" {
@@ -1045,6 +1046,14 @@ pub fn execute(
                 } else if name == "boxen_history" {
                     if args["action"] == "compact" {
                         view.force = true;
+                    }
+                    // The accepted search invocation contains the query itself.
+                    // The default scope ends before the invocation's exchange.
+                    if args["action"] == "search"
+                        && args["through"].is_null()
+                        && let Some(boundary) = search_boundary.checked_sub(1)
+                    {
+                        args["through"] = json!(source.entries[boundary].id);
                     }
                     source.extend_run(&run, &mut context_cursor)?;
                     source

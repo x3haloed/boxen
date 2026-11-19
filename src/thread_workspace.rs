@@ -16,7 +16,8 @@ pub(crate) fn tool() -> Value {
             "run_id":{"type":"string"},
             "path":{"type":"string"},
             "digest":{"type":"string"},
-            "offset":{"type":"integer","minimum":0}
+            "offset":{"type":"integer","minimum":0},
+            "through_run_id":{"type":"string"}
         },"required":["action"],"additionalProperties":false}
     })
 }
@@ -25,29 +26,7 @@ impl Jobs {
     pub(crate) fn workspace_files(&self, thread: &str, request: &Value) -> Result<Value> {
         valid_id(thread)?;
         let result = match request["action"].as_str() {
-            Some("list") => {
-                let offset = request["offset"].as_u64().unwrap_or(0);
-                let mut snapshots = self.operator_list();
-                snapshots.retain(|s| {
-                    s.record.spec.thread_id == thread
-                        && s.record.spec.resident_id.is_none()
-                        && s.record.resident.is_none()
-                });
-                let count = snapshots.len() as u64;
-                let mut directories = Vec::new();
-                for s in snapshots
-                    .into_iter()
-                    .rev()
-                    .skip(usize::try_from(offset)?)
-                    .take(32)
-                {
-                    let id = &s.record.spec.id;
-                    directories.push(json!({"run_id":id,"machine":self.run_machine(id)?,
-                        "directory":s.record.spec.cwd,"automatic":s.record.automatic_cwd,"attachments":s.record.spec.attachments}));
-                }
-                let next = offset.saturating_add(directories.len() as u64);
-                Ok(json!({"directories":directories,"next_offset":(next<count).then_some(next)}))
-            }
+            Some("list") => self.workspace_page(thread, request),
             Some("pull") => self.pull_workspace_file(thread, request),
             Some("attachment") => self.workspace_attachment(thread, request),
             _ => Err("unknown thread file action".into()),
@@ -64,10 +43,76 @@ impl Jobs {
                 thread_id: Some(thread),
                 ..Context::default()
             },
-            || json!({"action":request["action"],"source_run":request["run_id"],"success":result.is_ok()}),
+            || json!({"action":request["action"],"source_run":request["run_id"],"success":result.is_ok(),"status":result.as_ref().ok().and_then(|v|v.get("status"))}),
             || json!({"path":request["path"],"detail":result.as_ref().err().map(ToString::to_string)}),
         );
         result
+    }
+
+    fn workspace_page(&self, thread: &str, request: &Value) -> Result<Value> {
+        let selection = json!({"thread_id":thread,"machine":self.machine_id()});
+        let mut snapshots = self.operator_list();
+        snapshots.retain(|s| s.record.spec.thread_id == thread);
+        if self.residents.contains(thread)
+            || snapshots
+                .iter()
+                .any(|s| s.record.spec.resident_id.is_some() || s.record.resident.is_some())
+        {
+            return Ok(json!({"status":"out_of_scope","selection":selection,
+                "detail":"Resident conversations are outside workspace listing scope."}));
+        }
+        if snapshots.is_empty() && self.placement(thread)?.is_none() {
+            return Ok(json!({"status":"unknown_thread","selection":selection,
+                "detail":"The selected machine has no record of this conversation."}));
+        }
+        if let Some(through) = request["through_run_id"].as_str() {
+            let index = snapshots
+                .iter()
+                .position(|s| s.record.spec.id == through)
+                .ok_or("workspace page boundary is unavailable for this selection")?;
+            snapshots.truncate(index + 1);
+        }
+        let offset = request["offset"].as_u64().unwrap_or(0);
+        let total = snapshots.len() as u64;
+        let through = snapshots.last().map(|s| s.record.spec.id.clone());
+        let mut directories = Vec::new();
+        let mut bytes = 0;
+        let mut clipped = false;
+        for s in snapshots
+            .into_iter()
+            .rev()
+            .skip(usize::try_from(offset.min(total))?)
+            .take(32)
+        {
+            let id = &s.record.spec.id;
+            let row = json!({"run_id":id,"machine":self.run_machine(id)?,
+                "directory":s.record.spec.cwd,"automatic":s.record.automatic_cwd,"attachments":s.record.spec.attachments});
+            bytes += row.to_string().len() + 1;
+            if bytes > 48 * 1024 && !directories.is_empty() {
+                clipped = true;
+                break;
+            }
+            directories.push(row);
+        }
+        let next = offset.saturating_add(directories.len() as u64);
+        let has_more = next < total;
+        let status = if offset > total {
+            "offset_past_end"
+        } else if total == 0 {
+            "no_workspaces_recorded"
+        } else {
+            "ok"
+        };
+        let mut page = json!({"status":status,"selection":selection,"scope":"recorded_run_workspaces",
+            "recorded_count":total,"returned":directories.len(),"offset":offset,
+            "directories":directories,"through_run_id":through,"has_more":has_more,"next_offset":has_more.then_some(next)});
+        if clipped {
+            page["stopped_by"] = json!("bytes");
+        }
+        if status == "no_workspaces_recorded" {
+            page["detail"] = json!("No workspaces recorded for this selection.");
+        }
+        Ok(page)
     }
 
     fn workspace_run(&self, thread: &str, run: &str) -> Result<Snapshot> {

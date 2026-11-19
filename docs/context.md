@@ -64,6 +64,18 @@ boxen context HOST:PORT PUBLIC_KEY THREAD_ID '{"action":"coverage","offset":0}'
 
 `read` returns accepted `inference_message` records with stable `RUN_ID:EVENT_SEQUENCE` addresses, original timestamps/roles/content, and run/thread/runtime/model/resident provenance. `before` provides up to ten neighboring preceding entries. External API pages contain up to fifty records and approximately 48 KiB. Model-facing history replies use a 2–4 KiB allowance derived from the active selection budget, with smaller exact excerpts and pagination rather than a large result subsequently masked out of the input. A large entry returns an exact UTF-8-bounded excerpt of its serialized message JSON, with `next_byte_offset`; `id`, `limit:1`, and `byte_offset` continue that entry. Literal `search` searches original serialized messages, not a helper's interpretation, and starts large excerpts near a match. Retained native attachment references remain references; reading them does not reobserve today's source file or execute a historical command. Pinning an available media-bearing original makes it eligible for the ordinary native snapshot projection again.
 
+Search results name the selected conversation and accepted-history corpus, its
+entry count, and the half-open source offsets in `scanned`. `matches` counts
+matching entries examined, while `returned` counts projected rows. An entry
+that exceeds the remaining reply budget is counted as examined and is visited
+again at `next_offset`. `has_more` and `stopped_by` distinguish exhaustion from
+the result, scan, and byte limits. A continuation can reuse the returned
+`through` entry ID with `next_offset` to keep the same source boundary as the
+conversation grows. Model calls default to the source boundary before their
+exchange, so the search invocation cannot match its own query. A search
+requires a nonempty literal query. The search
+scope excludes workspace files and retained attachment bytes.
+
 `coverage` partitions the installed boundary's source prefix into `verbatim`, `observation_reference`, and `omitted` entries. It supports `boundary_id` and offset pagination; large associated note/exclusion records use bounded previews and exact `record` lookup. Later live-tail entries are outside that boundary's prefix. Entry counts are not importance or semantic-completeness scores. The source-ID lists plus source watermark in the installed boundary are the coverage authority; paged maps derive from them without another mutable history index.
 
 `pin` takes a stable 64-character hex bundle `id` and `entries` containing 1–64 source IDs. The bundle includes necessary tool-call/result units and appears in original chronological order; a notice distinguishes nonadjacent excerpts. A promise, later qualification, correction, and release can be explicitly linked. There is no automatic semantic-dependency detector. `unpin` releases the bundle preference, without erasing source. This version supports 128 bundle IDs; existing IDs can be updated.

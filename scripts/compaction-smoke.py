@@ -66,17 +66,29 @@ class Provider(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(b'data: [DONE]\n\n')
                     self.wfile.flush()
                     return
-                elif prompt == 'RECALL':
+                elif prompt in ('RECALL', 'RECALL_MISS'):
                     after = body['messages'][body['messages'].index(next(m for m in reversed(body['messages']) if m['role'] == 'user')) + 1:]
                     if not any(m['role'] == 'tool' for m in after):
                         emit({'tool_calls': [{'index': 0, 'id': 'recall-call', 'type': 'function', 'function': {
-                            'name': 'boxen_history', 'arguments': json.dumps({'action': 'search', 'query': "report to Jen"})}}]}, 'tool_calls')
+                            'name': 'boxen_history', 'arguments': json.dumps({'action': 'search', 'query': ("report to Jen" if prompt == 'RECALL' else "absent-fixture-token-" + "8791")})}}]}, 'tool_calls')
                         self.wfile.write(b'data: [DONE]\n\n')
                         self.wfile.flush()
                         return
-                    recall=json.loads(next(m['content'] for m in after if m['role']=='tool'))
-                    assert any('report to Jen' in json.dumps(e) for e in recall.get('entries',[])), recall
-                    text = 'EXACT_RECALL_OBSERVED'
+                    wire=next(m['content'] for m in after if m['role']=='tool')
+                    recall=json.loads(wire)
+                    assert len(wire.encode()) <= 2048 and recall['scope']=='accepted_history',recall
+                    assert recall['thread_id'] and 'attachment bytes were outside' in recall['detail'],recall
+                    legacy={key:recall[key] for key in ('entries','total','next_offset')}
+                    legacy['detail']='Original accepted journal entries, not reexecuted observations. Excerpts paginate serialized message JSON at UTF-8 byte boundaries.'
+                    overhead=len(wire.encode())-len(json.dumps(legacy,ensure_ascii=False,separators=(',',':')).encode())
+                    assert overhead <= 300,overhead
+                    print(f'PASS {prompt} provider tool result: {len(wire.encode())} serialized bytes, {overhead} added scope bytes',flush=True)
+                    if prompt == 'RECALL':
+                        assert any('report to Jen' in json.dumps(e) for e in recall['entries']),recall
+                        text = 'EXACT_RECALL_OBSERVED'
+                    else:
+                        assert recall['matches']==0 and recall['returned']==0 and recall['scanned']==[0,recall['total']],recall
+                        text = 'SCOPED_MISS_OBSERVED'
                 else:
                     text = 'WORKLOAD_ANSWER:' + ('ordinary-filler ' * 350)
                 emit({'content': text[:20]})
@@ -167,6 +179,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-compaction-') as temporary:
         initial = start("I'll have the report to Jen by Friday. Jen later said no rush on Friday. which makes me wonder whether—", mode='verbatim')
         thread = initial['record']['spec']['thread_id']
         finish(initial)
+        miss_run=start('RECALL_MISS',thread)
+        miss_events=finish(miss_run)
+        assert any('SCOPED_MISS_OBSERVED' in json.dumps(e) for e in miss_events)
         original = ctx(thread, 'read', limit=1)['entries'][0]
         unauthorized=urllib.request.Request(f'http://127.0.0.1:{uis[1]}/api/operation',headers={'Authorization':'Bearer '+tokens[1],'Content-Type':'application/json'},data=json.dumps({'peer':keys[1],'address':f'127.0.0.1:{peers[1]}','request':{'op':'context','thread_id':thread,'args':{'action':'read'}}}).encode())
         with urllib.request.urlopen(unauthorized,timeout=10) as response:

@@ -301,6 +301,9 @@ impl Residents {
         );
         Ok(resident)
     }
+    pub(crate) fn contains(&self, id: &str) -> bool {
+        self.entries.lock().unwrap().contains_key(id)
+    }
     pub fn all(&self) -> Vec<Resident> {
         self.entries
             .lock()

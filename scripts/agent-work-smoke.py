@@ -108,6 +108,17 @@ with tempfile.TemporaryDirectory(prefix='boxen-agent-work-') as temporary:
         digest = child['record']['spec']['attachments'][0]['digest']
         assert digest == hashlib.sha256(attachment.read_bytes()).hexdigest()
         assert results['catalog']['requests'][0]['work']['request_id'] == child_id
+        assert results['catalog']['machine']==keys[1] and results['catalog']['scanned']>=results['catalog']['returned']
+        assert results['files']['selection']=={'thread_id':child_id,'machine':keys[1]}
+        assert results['files']['recorded_count']==1 and results['files']['has_more'] is False
+        unknown=api(1,{'op':'thread_workspace','thread_id':secrets.token_hex(32),'action':'list'})
+        assert unknown['status']=='unknown_thread' and unknown['selection']['machine']==keys[1],unknown
+        past=api(1,{'op':'thread_workspace','thread_id':child_id,'action':'list','offset':2,'through_run_id':results['files']['through_run_id']})
+        assert past['status']=='offset_past_end' and past['recorded_count']==1,past
+        resident=secrets.token_hex(32)
+        api(1,{'op':'resident_create','spec':{'id':resident,'name':'Workspace scope fixture','cwd':str(workspace)}})
+        out=api(1,{'op':'thread_workspace','thread_id':resident,'action':'list'})
+        assert out['status']=='out_of_scope' and out['selection']['thread_id']==resident,out
         assert json.loads(results['raw']['text'])['seq']==1
         assert results['target']['machines'][0]['runtime']['platform']['os']
         assert not any(m['reachable'] for m in results['offline']['machines'])

@@ -297,16 +297,7 @@ pub fn operation(jobs: &Arc<Jobs>, actor: &str, request: &Value) -> Result<Value
                 issues.dedup();
                 return Ok(json!({"instances":instances,"issues":issues}));
             }
-            "mailbox_send" => {
-                let mut message = crate::protocol::operation(jobs, actor, request)?;
-                if let Some(id) = message["id"].as_str().map(str::to_owned) {
-                    message["delivery"] = jobs
-                        .mailboxes
-                        .receipt(&id)
-                        .unwrap_or(json!({"status":"accepted","accepted_on":jobs.machine_id()}));
-                }
-                return Ok(message);
-            }
+            "mailbox_send" => return crate::protocol::operation(jobs, actor, request),
             _ => {}
         }
         let owner = namespace(jobs, actor, request)?;

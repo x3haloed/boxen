@@ -182,7 +182,7 @@ impl Source {
         result.reverse();
         result
     }
-    fn page(&self, args: &Value, reply_limit: usize) -> Result<Value> {
+    fn page(&self, thread: &str, args: &Value, reply_limit: usize) -> Result<Value> {
         let mut offset = args["offset"].as_u64().unwrap_or(0) as usize;
         if let Some(id) = args["id"].as_str() {
             offset = self
@@ -193,16 +193,54 @@ impl Source {
                 .saturating_sub(args["before"].as_u64().unwrap_or(0).min(10) as usize);
         }
         let limit = args["limit"].as_u64().unwrap_or(10).clamp(1, 50) as usize;
-        let query = args["query"].as_str();
+        let search = args["action"] == "search";
+        let query = if search {
+            Some(
+                args["query"]
+                    .as_str()
+                    .filter(|q| !q.is_empty())
+                    .ok_or("history search requires a nonempty query")?,
+            )
+        } else {
+            args["query"].as_str()
+        };
+        let total = if let Some(through) = args["through"].as_str() {
+            self.entries
+                .iter()
+                .position(|e| e.id == through)
+                .map(|i| i + 1)
+                .ok_or("history page boundary is unavailable in this thread")?
+        } else {
+            self.entries.len()
+        };
+        if offset > total {
+            return Err("history offset is past the selected history boundary".into());
+        }
+        let end_of_scan = if search {
+            total.min(offset.saturating_add(512))
+        } else {
+            total
+        };
+        let mut scanned_end = offset;
+        let mut matches = 0;
+        let mut stopped = None;
         let mut entries = Vec::new();
         let mut bytes = 0;
         let mut next = offset;
-        for (index, e) in self.entries.iter().enumerate().skip(offset) {
+        for (index, e) in self
+            .entries
+            .iter()
+            .enumerate()
+            .take(end_of_scan)
+            .skip(offset)
+        {
             next = index + 1;
-            if query.is_some_and(|q| !e.message.to_string().contains(q)) {
+            scanned_end = next;
+            let text = e.message.to_string();
+            if query.is_some_and(|q| !text.contains(q)) {
                 continue;
             }
-            let text = e.message.to_string();
+            matches += 1;
             let byte_offset = args["byte_offset"]
                 .as_u64()
                 .map(|n| n as usize)
@@ -238,18 +276,39 @@ impl Source {
             };
             let size = item.to_string().len();
             if bytes + size > reply_limit.saturating_sub(512) {
+                if entries.is_empty() {
+                    return Err("history entry metadata exceeds this reply budget".into());
+                }
                 next = index;
+                stopped = Some("bytes");
                 break;
             }
             bytes += size;
             entries.push(item);
             if entries.len() >= limit {
+                if next < total {
+                    stopped = Some("limit");
+                }
                 break;
             }
         }
-        Ok(
-            json!({"entries":entries,"total":self.entries.len(),"next_offset":if next<self.entries.len(){Some(next)}else{None},"detail":"Original accepted journal entries, not reexecuted observations. Excerpts paginate serialized message JSON at UTF-8 byte boundaries."}),
-        )
+        let has_more = next < total;
+        let mut page = json!({"entries":entries,"total":total,"returned":entries.len(),
+            "has_more":has_more,"next_offset":has_more.then_some(next),
+            "detail":"Original accepted journal entries; excerpts use UTF-8 byte offsets."});
+        if let Some(reason) = stopped.or_else(|| (search && has_more).then_some("scan_limit")) {
+            page["stopped_by"] = json!(reason);
+        }
+        if search {
+            page["thread_id"] = json!(thread);
+            page["scope"] = json!("accepted_history");
+            page["through"] = json!(total.checked_sub(1).map(|i| &self.entries[i].id));
+            page["scanned"] = json!([offset, scanned_end]);
+            page["matches"] = json!(matches);
+            page["detail"] =
+                json!("Workspace files and attachment bytes were outside the search scope.");
+        }
+        Ok(page)
     }
     pub fn operation(
         &self,
@@ -277,7 +336,7 @@ impl Source {
     ) -> Result<Value> {
         let action = args["action"].as_str().unwrap_or("status");
         if action == "read" || action == "search" {
-            return self.page(&args, reply_limit);
+            return self.page(&run.snapshot().record.spec.thread_id, &args, reply_limit);
         }
         if action == "record" {
             let id = args["id"].as_str().ok_or("record requires an id")?;
@@ -343,7 +402,7 @@ impl Source {
             let count = b["source_count"].as_u64().unwrap_or(0) as usize;
             let page:Vec<_>=self.entries.iter().take(count).skip(offset).take((reply_limit/512).clamp(1,50)).map(|e|json!({"id":e.id,"at":e.at,"role":e.message["role"],"state":if masked.contains(e.id.as_str()){"observation_reference"}else if selected.contains(e.id.as_str()){"verbatim"}else{"omitted"},"reason":if masked.contains(e.id.as_str()){"older_tool_body"}else if !selected.contains(e.id.as_str()){"prompt_budget"}else{"selected"}})).collect();
             return Ok(
-                json!({"boundary_id":b["id"],"source_count":count,"next_offset":if offset+page.len()<count{Some(offset+page.len())}else{None},"entries":page,"boundary_record_id":b["id"],"excluded_bundles":preview(b)["excluded_bundles"],"excluded_bundle_count":b["excluded_bundles"].as_array().map_or(0,Vec::len),"notes":preview(b)["notes"]}),
+                json!({"boundary_id":b["id"],"source_count":count,"returned":page.len(),"has_more":offset+page.len()<count,"next_offset":if offset+page.len()<count{Some(offset+page.len())}else{None},"entries":page,"boundary_record_id":b["id"],"excluded_bundles":preview(b)["excluded_bundles"],"excluded_bundle_count":b["excluded_bundles"].as_array().map_or(0,Vec::len),"notes":preview(b)["notes"]}),
             );
         }
         if !mutating {
@@ -878,7 +937,7 @@ impl View {
     }
 }
 pub fn tool() -> Value {
-    json!({"type":"function","function":{"name":"boxen_history","description":"This tool reads exact accepted history and neighbors or searches literal serialized text in this thread. Coverage pages distinguish original inclusion, historical observation references, and omissions. Read/search never execute historical calls. pin declares an ordered source bundle by original entry IDs; unpin releases it. note records an authored continuity note or semantic_signpost; draft records helper text pending explicit revision-specific approve. Source exposure does not establish comprehension. compact evaluates the configured policy after the tool batch; it does not change policy. status returns bounded previews and counts; record reads exact context records by id and optional revision, with byte_offset pagination for large records. All mutations create new journal records; source history is unchanged.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["status","record","read","search","coverage","pin","unpin","note","draft","approve","compact"]},"id":{"type":"string"},"boundary_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"before":{"type":"integer","minimum":0,"maximum":10},"limit":{"type":"integer","minimum":1,"maximum":50},"byte_offset":{"type":"integer","minimum":0},"query":{"type":"string"},"entries":{"type":"array","items":{"type":"string"},"maxItems":64},"text":{"type":"string"},"kind":{"type":"string","enum":["continuity_note","semantic_signpost"]},"expected_revision":{"type":"integer","minimum":1},"revision":{"type":"integer","minimum":1},"parent_note":{"type":"string"},"author_label":{"type":"string"}},"required":["action"],"additionalProperties":false}}})
+    json!({"type":"function","function":{"name":"boxen_history","description":"This tool reads exact accepted history and neighbors or searches literal serialized text in this thread. Coverage pages distinguish original inclusion, historical observation references, and omissions. Read/search never execute historical calls. pin declares an ordered source bundle by original entry IDs; unpin releases it. note records an authored continuity note or semantic_signpost; draft records helper text pending explicit revision-specific approve. Source exposure does not establish comprehension. compact evaluates the configured policy after the tool batch; it does not change policy. status returns bounded previews and counts; record reads exact context records by id and optional revision, with byte_offset pagination for large records. All mutations create new journal records; source history is unchanged.","parameters":{"type":"object","properties":{"action":{"type":"string","enum":["status","record","read","search","coverage","pin","unpin","note","draft","approve","compact"]},"id":{"type":"string"},"boundary_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"before":{"type":"integer","minimum":0,"maximum":10},"limit":{"type":"integer","minimum":1,"maximum":50},"byte_offset":{"type":"integer","minimum":0},"query":{"type":"string"},"through":{"type":"string"},"entries":{"type":"array","items":{"type":"string"},"maxItems":64},"text":{"type":"string"},"kind":{"type":"string","enum":["continuity_note","semantic_signpost"]},"expected_revision":{"type":"integer","minimum":1},"revision":{"type":"integer","minimum":1},"parent_note":{"type":"string"},"author_label":{"type":"string"}},"required":["action"],"additionalProperties":false}}})
 }
 
 #[cfg(test)]
@@ -998,7 +1057,9 @@ mod tests {
             json!({"role":"user","content":original}),
             json!({"role":"assistant","content":"unrelated bulk ".repeat(4000)}),
         ]);
-        let result = archive.page(&json!({"query":"No rush"}), 2048).unwrap();
+        let result = archive
+            .page("thread", &json!({"query":"No rush"}), 2048)
+            .unwrap();
         assert_eq!(result["entries"][0]["message"]["content"], original);
         assert!(result.to_string().len() < 2048);
         let s = source(vec![
@@ -1028,6 +1089,33 @@ mod tests {
         );
     }
     #[test]
+    fn search_miss_names_the_scanned_range_and_stable_boundary() {
+        let mut history = source((0..514).map(|i| json!({"content":i})).collect());
+        let page = history
+            .page("thread", &json!({"action":"search","query":"absent"}), 2048)
+            .unwrap();
+        assert_eq!(page["scanned"], json!([0, 512]));
+        assert_eq!(page["next_offset"], 512);
+        assert_eq!(page["stopped_by"], "scan_limit");
+        assert_eq!(page["matches"], 0);
+        assert!(page.to_string().len() < 400);
+        let entry = history.entries[0].clone();
+        history.entries.push(Entry {
+            id: "later".into(),
+            ..entry
+        });
+        let tail = history.page("thread", &json!({"action":"search","query":"absent","offset":page["next_offset"],"through":page["through"]}), 2048).unwrap();
+        assert_eq!(tail["scanned"], json!([512, 514]));
+        assert_eq!(tail["has_more"], false);
+        assert_eq!(tail["matches"], 0);
+        assert!(
+            history
+                .page("thread", &json!({"action":"search"}), 2048)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn exact_paged_unicode_history_survives_projection_and_search() {
         let s = source(vec![
             json!({"role":"assistant","content":"a🌱é".repeat(9000)}),
@@ -1038,6 +1126,7 @@ mod tests {
         loop {
             let p = s
                 .page(
+                    "thread",
                     &json!({"id":"source:0","limit":1,"byte_offset":offset}),
                     49152,
                 )
@@ -1052,7 +1141,8 @@ mod tests {
         }
         assert_eq!(found, expected);
         assert_eq!(
-            s.page(&json!({"query":"missing"}), 49152).unwrap()["entries"],
+            s.page("thread", &json!({"query":"missing"}), 49152)
+                .unwrap()["entries"],
             json!([])
         );
     }
