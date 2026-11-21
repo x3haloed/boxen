@@ -4,6 +4,7 @@ use crate::{
     jobs::{Control, History, Jobs, Run, RunOutcome, Spec},
     logging::Level,
     resident_bridge::Bridge,
+    runtime::OutstandingWork,
 };
 use serde_json::{Value, json};
 use std::{
@@ -286,7 +287,7 @@ struct Turn<'a> {
     session: &'a str,
     run: &'a Run,
     secret: &'a str,
-    tools: HashSet<String>,
+    tools: OutstandingWork,
     questions: HashMap<String, Question>,
     steering: HashMap<u64, Value>,
     prompt: Option<u64>,
@@ -329,12 +330,9 @@ impl Turn<'_> {
                 let status = update["status"].as_str();
                 let terminal = matches!(status, Some("completed" | "failed" | "cancelled"));
                 if terminal {
-                    self.tools.remove(id);
+                    self.tools.finish(id);
                 } else if kind == "tool_call" || status.is_some() {
-                    if self.tools.len() >= 4096 && !self.tools.contains(id) {
-                        return Err("Antigravity exceeded the outstanding tool limit".into());
-                    }
-                    self.tools.insert(id.into());
+                    self.tools.start(id)?;
                 }
                 let output = update["rawOutput"]["combinedOutput"]
                     .as_str()
@@ -719,7 +717,7 @@ pub fn execute(
         session: &session,
         run: &run,
         secret: &bridge.token,
-        tools: HashSet::new(),
+        tools: OutstandingWork::default(),
         questions: HashMap::new(),
         steering: HashMap::new(),
         prompt: Some(prompt),

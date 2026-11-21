@@ -148,7 +148,12 @@ Closing a viewer or losing the client connection leaves the executing daemon and
 Codex and built-in inference return their execution outcomes to the daemon.
 The daemon publishes the terminal status in the existing run journal after
 runtime cleanup and closes the control channel in the same transition. Restart
-recovery records uncertainty through that journal transition too.
+recovery records uncertainty through that journal transition too. Codex can report a native turn outcome before tracked tool work and controls settle. The
+`backend_prompt_ended` record reports the outstanding counts. That run remains
+active until its outstanding work settles or its outcome becomes uncertain.
+A notification for a different native turn remains attributable to that turn.
+A successful anonymous request includes a conventional backend response.
+A resident activation can settle without assistant narration or a message send.
 
 A confirmed backend `interrupted` turn after a cancellation request becomes `cancelled`. If cancellation is not confirmed within 15 seconds, the run becomes uncertain and the app-server process is stopped. Stopping an app-server is not a general rollback or guarantee that every external side effect can be stopped. Runtime transport failure during execution also produces an uncertain outcome.
 

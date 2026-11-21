@@ -66,7 +66,7 @@ exact retry identity. Its order is immaterial.
 | `queued_steering` | OpenRouter can queue input at its next inference boundary. |
 | `input_responses` | Codex and Antigravity accept responses to native input requests. The request specifies the response shape. |
 | `native_session_resume` | Codex and Antigravity attempt to resume a retained native session when one exists. |
-| `late_activity` | Antigravity retains tracked work and replies that continue after the native prompt ends. |
+| `late_activity` | Codex and Antigravity retain tracked activity that continues after a native prompt ends. Antigravity can also expose a later reply from a tracked wake. |
 | `scheduled_handoff` | Resident activations can transfer timing responsibility to Boxen's scheduler and retain the originating run. |
 
 Resident activation directions and mailbox intake have separate operations.

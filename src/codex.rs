@@ -5,6 +5,7 @@ use crate::{
     agent_tools::{resident_tool, resident_tools},
     jobs::{Control, History, Jobs, Run, RunOutcome, Spec},
     residents::Resident,
+    runtime::OutstandingWork,
 };
 use serde_json::{Value, json};
 use std::{
@@ -57,6 +58,10 @@ struct Rpc {
     pending: HashSet<String>,
     thread: Option<String>,
     turn: Option<String>,
+    prompt_submitted: bool,
+    response_seen: bool,
+    native_outcome: Option<RunOutcome>,
+    tools: OutstandingWork,
     outcome: Option<RunOutcome>,
     cancel_requested: bool,
     cancel_sent_at: Option<Instant>,
@@ -173,7 +178,7 @@ impl Rpc {
             self.tick()?;
             // A terminal turn notification may precede the start acknowledgement.
             // Once the outcome is observed, an absent acknowledgement cannot change it.
-            if method == "turn/start" && self.outcome.is_some() {
+            if method == "turn/start" && (self.native_outcome.is_some() || self.outcome.is_some()) {
                 self.awaiting.remove(&id);
                 return Ok(Value::Null);
             }
@@ -223,7 +228,9 @@ impl Rpc {
                     file_context,
                     update_id,
                 } => {
-                    if let (Some(thread), Some(turn)) = (&self.thread, &self.turn) {
+                    if self.native_outcome.is_none()
+                        && let (Some(thread), Some(turn)) = (&self.thread, &self.turn)
+                    {
                         let mut input = Vec::new();
                         if !text.is_empty() {
                             input.push(json!({"type":"text","text":text}));
@@ -242,7 +249,7 @@ impl Rpc {
                     } else {
                         self.run.append(
                             "control_error",
-                            json!({"message":"Steering becomes available after the turn starts","update":{"update_id":update_id}}),
+                            json!({"message":"Steering requires an active Codex turn","update":{"update_id":update_id}}),
                         )?;
                     }
                 }
@@ -285,8 +292,111 @@ impl Rpc {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        self.settle_native_turn();
         Ok(())
     }
+    fn settle_native_turn(&mut self) {
+        if self.outcome.is_some() {
+            return;
+        }
+        let Some(outcome) = self.native_outcome.as_ref() else {
+            return;
+        };
+        let pending =
+            !self.tools.is_empty() || !self.pending.is_empty() || !self.steering.is_empty();
+        if !pending {
+            self.outcome = if matches!(outcome, RunOutcome::Completed(_))
+                && self.resident.is_none()
+                && !self.response_seen
+            {
+                Some(RunOutcome::Failed(
+                    "Codex ended without a conventional text response.".into(),
+                ))
+            } else {
+                self.native_outcome.take()
+            };
+        } else if !matches!(outcome, RunOutcome::Completed(_)) {
+            self.outcome = Some(RunOutcome::Interrupted(
+                "Codex ended the turn without confirming the outcome of outstanding work or controls.".into(),
+            ));
+        }
+    }
+
+    fn tracks_turn(&self, params: &Value) -> bool {
+        self.prompt_submitted
+            && params["threadId"]
+                .as_str()
+                .is_none_or(|thread| self.thread.as_deref() == Some(thread))
+            && params["turnId"]
+                .as_str()
+                .or_else(|| params["turn"]["id"].as_str())
+                .is_none_or(|turn| self.turn.as_deref().is_none_or(|active| active == turn))
+    }
+
+    fn observe_turn(&mut self, method: &str, params: &Value) -> Result<()> {
+        if !self.tracks_turn(params) {
+            return Ok(());
+        }
+        let item = &params["item"];
+        match method {
+            "turn/started" => {
+                if let Some(turn) = params["turn"]["id"].as_str() {
+                    self.turn.get_or_insert_with(|| turn.to_owned());
+                }
+            }
+            "item/started"
+                if matches!(
+                    item["type"].as_str(),
+                    Some(
+                        "commandExecution"
+                            | "dynamicToolCall"
+                            | "mcpToolCall"
+                            | "collabAgentToolCall"
+                            | "fileChange"
+                    )
+                ) =>
+            {
+                let id = item["id"].as_str().ok_or("Codex work item has no ID")?;
+                self.tools.start(id)?;
+            }
+            "item/completed" => {
+                if item["type"] == "agentMessage"
+                    && (item["phase"].is_null() || item["phase"] == "final_answer")
+                    && item["text"]
+                        .as_str()
+                        .is_some_and(|text| !text.trim().is_empty())
+                {
+                    self.response_seen = true;
+                }
+                if let Some(id) = item["id"].as_str() {
+                    self.tools.finish(id);
+                }
+            }
+            "turn/completed" if self.native_outcome.is_none() => {
+                let turn = &params["turn"];
+                if let Some(id) = turn["id"].as_str() {
+                    self.turn.get_or_insert_with(|| id.to_owned());
+                }
+                let detail = turn["error"].to_string();
+                let status = turn["status"].as_str();
+                self.native_outcome = Some(match status {
+                    Some("completed") => RunOutcome::Completed(detail),
+                    Some("interrupted") if self.cancel_requested => RunOutcome::Cancelled(detail),
+                    Some("interrupted") => RunOutcome::Interrupted(detail),
+                    _ => RunOutcome::Failed(detail),
+                });
+                self.run.append("backend_prompt_ended", json!({"backend":"codex","reason":status,
+                    "pending_tools":self.tools.len(),"pending_questions":self.pending.len(),"pending_steering":self.steering.len()}))?;
+                self.run.diagnostic(Level::Info, "backend.prompt_ended",
+                    || json!({"turn_id":turn["id"],"reason":status,"pending_tools":self.tools.len(),
+                        "pending_questions":self.pending.len(),"pending_steering":self.steering.len()}),
+                    || Value::Null);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn ingest(&mut self, mut message: Value) -> Result<()> {
         if let Some(id) = self.config_reply
             && message.get("method").is_none()
@@ -324,6 +434,19 @@ impl Rpc {
         let method = message["method"].as_str().unwrap_or("");
         // Ignore legacy duplicates and raw response internals; v2 notifications carry the UI contract.
         if method.starts_with("codex/event/") || method.starts_with("rawResponseItem/") {
+            return Ok(());
+        }
+        if self.prompt_submitted
+            && (method.starts_with("item/") || method.starts_with("turn/"))
+            && !self.tracks_turn(&message["params"])
+        {
+            self.run.append("backend_other_turn", message.clone())?;
+            self.run.diagnostic(Level::Debug, "backend.other_turn",
+                || json!({"method":method,"thread_id":message["params"]["threadId"],"turn_id":message["params"]["turnId"]}),
+                || Value::Null);
+            if let Some(id) = message.get("id") {
+                self.write(json!({"id":id,"error":{"code":-32602,"message":"The operation belongs to a different native turn."}}))?;
+            }
             return Ok(());
         }
         self.run.append("backend", message.clone())?;
@@ -441,19 +564,7 @@ impl Rpc {
                     .status("running", "Backend input request resolved")?;
             }
         }
-        if method == "turn/started" {
-            self.turn = message["params"]["turn"]["id"].as_str().map(str::to_owned);
-        }
-        if method == "turn/completed" {
-            let turn = &message["params"]["turn"];
-            let detail = turn["error"].to_string();
-            self.outcome = Some(match turn["status"].as_str() {
-                Some("completed") => RunOutcome::Completed(detail),
-                Some("interrupted") if self.cancel_requested => RunOutcome::Cancelled(detail),
-                Some("interrupted") => RunOutcome::Interrupted(detail),
-                _ => RunOutcome::Failed(detail),
-            });
-        }
+        self.observe_turn(method, &message["params"])?;
         Ok(())
     }
 }
@@ -609,6 +720,10 @@ pub fn execute(
         pending: HashSet::new(),
         thread: None,
         turn: None,
+        prompt_submitted: false,
+        response_seen: false,
+        native_outcome: None,
+        tools: OutstandingWork::default(),
         outcome: None,
         cancel_requested: false,
         cancel_sent_at: None,
@@ -841,11 +956,15 @@ pub fn execute(
         || json!({"backend_thread_id":thread,"reasoning_effort":effort}),
         || Value::Null,
     );
+    rpc.prompt_submitted = true;
     let response = rpc.request("turn/start", turn)?;
     if let Some(id) = response["turn"]["id"].as_str() {
-        rpc.turn = Some(id.to_owned());
+        if rpc.turn.as_deref().is_some_and(|observed| observed != id) {
+            return Err("Codex acknowledged a different active turn".into());
+        }
+        rpc.turn.get_or_insert_with(|| id.to_owned());
     }
-    if rpc.outcome.is_none() {
+    if rpc.outcome.is_none() && rpc.native_outcome.is_none() && rpc.pending.is_empty() {
         run.status("running", "Codex is executing on this machine")?;
     }
     loop {

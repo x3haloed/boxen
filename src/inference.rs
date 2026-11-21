@@ -988,7 +988,7 @@ pub fn execute(
                 continue;
             }
             let text = assistant["content"].as_str().unwrap_or("");
-            if resident.is_none() && text.is_empty() {
+            if resident.is_none() && text.trim().is_empty() {
                 return Err("anonymous request ended without a conventional text response".into());
             }
             run.append(

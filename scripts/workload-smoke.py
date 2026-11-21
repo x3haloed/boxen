@@ -171,6 +171,41 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
                     break
         print("PASS same operation/event contract for local execution")
 
+        late = {**spec("LATE_TOOL"), "required_capabilities": ["late_activity"]}
+        request({"op": "start_checked", "spec": late})
+        seen = []
+        with request({"id": late["id"], "after": 0}, watch=True) as stream:
+            for line in stream:
+                batch = json.loads(line)
+                seen.extend(batch["events"])
+                assert not batch["done"], batch["snapshot"]
+                if any(e["kind"] == "backend_other_turn" for e in seen):
+                    break
+        assert any(e["kind"] == "backend_prompt_ended" and e["data"]["pending_tools"] == 1 for e in seen)
+        assert not request({"op": "thread_result", "id": late["id"]})["done"]
+        (pathlib.Path(temporary) / "release-late-fixture").touch()
+        replay, settled = collect(late["id"], seen[-1]["seq"])
+        assert settled["status"] == "completed"
+        assert request({"op": "thread_result", "id": late["id"]})["response"] == "Late work completed."
+        assert any(e["kind"] == "backend" and e["data"].get("params",{}).get("delta") == "late command output\n"
+                   for e in replay)
+        assert [e["seq"] for e in seen + replay] == list(range(1, settled["last_seq"] + 1))
+
+        lost = spec("LATE_TOOL_EOF")
+        request({"op": "start", "spec": lost})
+        events, interrupted_late = collect(lost["id"])
+        assert interrupted_late["status"] == "interrupted"
+        assert any(e["kind"] == "backend_prompt_ended" and e["data"]["pending_tools"] == 1 for e in events)
+        print("PASS Codex retains late work across reconnect, ignores another turn's completion, and preserves uncertainty when the wire closes")
+        empty = spec("NO_CONVENTIONAL_RESPONSE")
+        request({"op": "start", "spec": empty})
+        _, incomplete = collect(empty["id"])
+        assert incomplete["status"] == "failed"
+        report = request({"op": "thread_result", "id": empty["id"]})
+        assert report["done"] and report["response"] is None
+        print("PASS anonymous Codex completion requires a conventional backend response")
+
+
         def reasoning(thread, **patch):
             return request({"op": "thread_reasoning", "id": thread, **({"patch": patch} if patch else {})})
 

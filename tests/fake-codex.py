@@ -96,6 +96,28 @@ def work(prompt):
     notification("item/reasoning/summaryTextDelta", {"itemId": "thought", "delta": "Checking the remote workspace."})
     notification("item/started", {"item": {"id": "command", "type": "commandExecution", "command": "fixture command", "status": "inProgress"}})
     notification("item/commandExecution/outputDelta", {"itemId": "command", "delta": "first output\n"})
+    if prompt == "NO_CONVENTIONAL_RESPONSE":
+        notification("item/completed", {"item": {"id": "command", "type": "commandExecution",
+                     "command": "fixture command", "status": "completed", "aggregatedOutput": "fixture output"}})
+        notification("turn/completed", {"turn": {"id": "fixture-turn", "status": "completed"}})
+        return
+    if prompt in ("LATE_TOOL", "LATE_TOOL_EOF"):
+        notification("turn/completed", {"turn": {"id": "fixture-turn", "status": "completed"}})
+        if prompt == "LATE_TOOL_EOF":
+            os._exit(0)
+        notification("item/completed", {"turnId": "old-fixture-turn",
+                     "item": {"id": "command", "type": "commandExecution", "status": "completed"}})
+        deadline = time.monotonic() + 12
+        while not pathlib.Path("release-late-fixture").exists():
+            assert time.monotonic() < deadline, "fixture was never released"
+            time.sleep(.02)
+        notification("item/commandExecution/outputDelta", {"itemId": "command", "delta": "late command output\n"})
+        notification("item/completed", {"item": {"id": "answer", "type": "agentMessage",
+                     "text": "Late work completed."}})
+        notification("item/completed", {"item": {"id": "command", "type": "commandExecution",
+                   "command": "fixture command", "status": "completed", "aggregatedOutput": "late command output"}})
+        return
+
     if prompt.startswith("TOOL_APPROVALS:"):
         for index, case in enumerate(json.loads(prompt.split(":", 1)[1])):
             request_id = 0 if index == 0 else f"tool-permission-{index}"
@@ -400,6 +422,8 @@ for line in sys.stdin:
         if prompt == "TERMINAL_BEFORE_START_ACK":
             notification("turn/started", {"turn": {"id": "fixture-turn"}})
             notification("item/agentMessage/delta", {"itemId": "answer", "delta": "Early response."})
+            notification("item/completed", {"item": {"id": "answer", "type": "agentMessage",
+                         "text": "Early response."}})
             notification("turn/completed", {"turn": {"id": "fixture-turn", "status": "completed"}})
             continue
         direction = (json.loads(prompt.split("\n", 1)[1])["directions"]

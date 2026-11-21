@@ -2,7 +2,38 @@
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
+
+/// Native work that has started and whose settlement remains outstanding.
+#[derive(Default)]
+pub(crate) struct OutstandingWork {
+    items: HashSet<String>,
+}
+
+impl OutstandingWork {
+    pub(crate) fn start(&mut self, id: &str) -> Result<()> {
+        if id.is_empty() || id.len() > 1024 {
+            return Err("The runtime reported an invalid work item ID".into());
+        }
+        if self.items.len() >= 4096 && !self.items.contains(id) {
+            return Err("The runtime exceeded the outstanding work limit".into());
+        }
+        self.items.insert(id.to_owned());
+        Ok(())
+    }
+
+    pub(crate) fn finish(&mut self, id: &str) {
+        self.items.remove(id);
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.items.len()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Backend {
@@ -56,7 +87,12 @@ impl Backend {
     fn capabilities(self, resident: bool) -> impl Iterator<Item = Capability> {
         use Capability::*;
         let capabilities: &[Capability] = match self {
-            Self::Codex => &[LiveSteering, InputResponses, NativeSessionResume],
+            Self::Codex => &[
+                LiveSteering,
+                InputResponses,
+                NativeSessionResume,
+                LateActivity,
+            ],
             Self::OpenRouter => &[QueuedSteering],
             Self::Antigravity => &[
                 LiveSteering,
