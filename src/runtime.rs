@@ -30,6 +30,10 @@ impl OutstandingWork {
         self.items.is_empty()
     }
 
+    pub(crate) fn ids(&self) -> impl Iterator<Item = &str> {
+        self.items.iter().map(String::as_str)
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.items.len()
     }
@@ -40,6 +44,7 @@ pub enum Backend {
     Codex,
     OpenRouter,
     Antigravity,
+    Claude,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -67,13 +72,19 @@ impl Capability {
 pub type Requirements = BTreeSet<Capability>;
 
 impl Backend {
-    pub const ALL: [Self; 3] = [Self::Codex, Self::OpenRouter, Self::Antigravity];
+    pub const ALL: [Self; 4] = [
+        Self::Codex,
+        Self::OpenRouter,
+        Self::Antigravity,
+        Self::Claude,
+    ];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::OpenRouter => "openrouter",
             Self::Antigravity => "antigravity",
+            Self::Claude => "claude",
         }
     }
 
@@ -94,6 +105,7 @@ impl Backend {
                 LateActivity,
             ],
             Self::OpenRouter => &[QueuedSteering],
+            Self::Claude => &[NativeSessionResume, LateActivity],
             Self::Antigravity => &[
                 LiveSteering,
                 InputResponses,
@@ -144,6 +156,9 @@ impl Backend {
             Self::Antigravity => json!({"kind":"managed","protocol":"acp","input":["text"],
                 "attachment_transport":"retained_file_path","tools":true,"full_access":true,"resident":true,
                 "model_selection":"native_session","controls":["cancel","steer_during_prompt","respond"]}),
+            Self::Claude => json!({"kind":"managed","protocol":"stream_json","input":["text"],
+                "attachment_transport":"retained_file_path","tools":true,"full_access":true,"resident":true,
+                "model_selection":"native_session","controls":["cancel"]}),
         };
         info["id"] = json!(self.id());
         info["configured"] = json!(configured);

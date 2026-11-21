@@ -423,7 +423,9 @@ impl Desktop {
         }
         let dest = view::destination(&self.data, &key.peer);
         let running = active(Some(&last));
-        if running.is_some() && last["native_prompt"] == "ended" {
+        if running.is_some()
+            && (last["native_prompt"] == "ended" || last["record"]["spec"]["backend"] == "claude")
+        {
             return;
         }
         if let Some((_, intended)) = self.data.saved.draft_runs.iter().find(|(k, _)| k == &key)
@@ -633,6 +635,8 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     let last = runs.last();
     let running = active(last).map(str::to_owned);
     let native_ended = running.is_some() && last.is_some_and(prompt_ended);
+    let claude_running =
+        running.is_some() && last.is_some_and(|run| run["record"]["spec"]["backend"] == "claude");
     let accepts_followup = last.is_some_and(|run| run["native_prompt"] == "ready");
     let moving = data.saved.moves.iter().any(|m| &m.key == key);
     let pending = data
@@ -1084,18 +1088,30 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             text: &mut draft,
             files: &mut files,
             target,
-            label: if running.is_some() && !native_ended {
+            label: if running.is_some() && !native_ended && !claude_running {
                 "Send update"
             } else {
                 "Send"
             },
             limit: 256 * 1024,
-            blocked: frozen || stale || last.is_none() || (native_ended && !accepts_followup),
+            blocked: frozen
+                || stale
+                || last.is_none()
+                || claude_running
+                || (native_ended && !accepts_followup),
         },
         actions,
     );
     if compose.changed && (!draft.is_empty() || !files.is_empty()) {
-        capture(data, key, running.as_deref());
+        capture(
+            data,
+            key,
+            if claude_running {
+                None
+            } else {
+                running.as_deref()
+            },
+        );
         actions.push(Action::Pin(key.clone()));
     }
     if draft.is_empty()
@@ -1524,39 +1540,44 @@ mod tests {
     }
 
     #[test]
-    fn choosing_a_model_on_an_idle_antigravity_thread_loads_its_machine_catalog() {
-        let ctx = egui::Context::default();
-        let key = ThreadKey {
-            peer: "fixture-peer".into(),
-            id: "fixture-thread".into(),
-        };
-        let destination = crate::model::Destination {
-            key: key.peer.clone(),
-            label: "Fixture peer".into(),
-            address: "127.0.0.1:42426".into(),
-        };
-        let mut data = Data::default();
-        data.saved.destinations.push(destination.clone());
-        data.editing_thread_settings = Some((key.clone(), RunSettings::default()));
-        let mut frame = |events| {
-            let mut actions = vec![];
-            let output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(pos2(0., 0.), vec2(800., 600.))),
-                    events,
-                    ..Default::default()
-                },
-                |ui| next_run_settings(ui, &mut data, &key, true, "antigravity", &mut actions),
-            );
-            (output, actions)
-        };
-        frame(vec![]);
-        let (output, _) = frame(vec![]);
-        let choose = visible_text(&output, "Choose a model").expect("visible model checkbox");
-        let (_, actions) = click(&mut frame, choose);
-        assert!(actions.iter().any(|action| matches!(action,
-            Action::LoadModelCatalog(Runtime::Antigravity, target)
-                if target.key == destination.key && target.address == destination.address)));
+    fn choosing_a_model_on_an_idle_managed_thread_loads_its_machine_catalog() {
+        for (backend, runtime) in [
+            ("antigravity", Runtime::Antigravity),
+            ("claude", Runtime::Claude),
+        ] {
+            let ctx = egui::Context::default();
+            let key = ThreadKey {
+                peer: "fixture-peer".into(),
+                id: "fixture-thread".into(),
+            };
+            let destination = crate::model::Destination {
+                key: key.peer.clone(),
+                label: "Fixture peer".into(),
+                address: "127.0.0.1:42426".into(),
+            };
+            let mut data = Data::default();
+            data.saved.destinations.push(destination.clone());
+            data.editing_thread_settings = Some((key.clone(), RunSettings::default()));
+            let mut frame = |events| {
+                let mut actions = vec![];
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(pos2(0., 0.), vec2(800., 600.))),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| next_run_settings(ui, &mut data, &key, true, backend, &mut actions),
+                );
+                (output, actions)
+            };
+            frame(vec![]);
+            let (output, _) = frame(vec![]);
+            let choose = visible_text(&output, "Choose a model").expect("visible model checkbox");
+            let (_, actions) = click(&mut frame, choose);
+            assert!(actions.iter().any(|action| matches!(action,
+            Action::LoadModelCatalog(actual, target)
+                if *actual == runtime && target.key == destination.key && target.address == destination.address)));
+        }
     }
 
     #[test]

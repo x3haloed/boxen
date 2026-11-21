@@ -103,6 +103,10 @@ impl Bridge {
             "headers": [{"name":"Authorization","value":format!("Bearer {}", self.token)}],
         })
     }
+    pub fn claude_config(&self) -> Value {
+        json!({"type":"http","url":format!("http://{}/mcp",self.address),
+            "headers":{"Authorization":format!("Bearer {}",self.token)}})
+    }
     pub fn config(&self) -> Value {
         json!({"url":format!("http://{}/mcp",self.address),"bearer_token_env_var":TOKEN_ENV,"enabled":true,"required":true,"startup_timeout_sec":15,"tool_timeout_sec":60,
             "default_tools_approval_mode":"approve"})

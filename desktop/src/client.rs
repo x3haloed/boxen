@@ -568,27 +568,33 @@ mod tests {
             assert_eq!(catalog.models[0].model, format!("{prefix}-primary"));
             assert_eq!(catalog.models[1].model, format!("{prefix}-secondary"));
         }
-        client.model_catalog(Runtime::Antigravity, local.clone(), 3, models.publisher());
-        client.model_catalog(Runtime::Antigravity, dest.clone(), 4, models.publisher());
-        for _ in 0..2 {
-            let Update::ModelCatalog(Runtime::Antigravity, machine, serial, result) =
-                models.rx.recv_timeout(Duration::from_secs(12)).unwrap()
-            else {
-                panic!("Expected an Antigravity catalog result");
-            };
-            if machine.key == local.key {
-                assert_eq!(serial, 3);
-                assert!(result.unwrap_err().contains("unavailable"));
-            } else {
-                assert_eq!(machine.key, dest.key);
-                assert_eq!(serial, 4);
-                let catalog = result.unwrap();
-                let ids = catalog
-                    .models
-                    .iter()
-                    .map(|model| model.model.as_str())
-                    .collect::<Vec<_>>();
-                assert_eq!(ids, ["fixture-default", "fixture-model"]);
+        for (runtime, expected) in [
+            (Runtime::Antigravity, ["fixture-default", "fixture-model"]),
+            (Runtime::Claude, ["fixture-default", "fixture-other"]),
+        ] {
+            client.model_catalog(runtime, local.clone(), 3, models.publisher());
+            client.model_catalog(runtime, dest.clone(), 4, models.publisher());
+            for _ in 0..2 {
+                let Update::ModelCatalog(actual, machine, serial, result) =
+                    models.rx.recv_timeout(Duration::from_secs(12)).unwrap()
+                else {
+                    panic!("Expected a managed runtime catalog result");
+                };
+                assert_eq!(actual, runtime);
+                if machine.key == local.key {
+                    assert_eq!(serial, 3);
+                    assert!(result.unwrap_err().contains("unavailable"));
+                } else {
+                    assert_eq!(machine.key, dest.key);
+                    assert_eq!(serial, 4);
+                    let catalog = result.unwrap();
+                    let ids = catalog
+                        .models
+                        .iter()
+                        .map(|model| model.model.as_str())
+                        .collect::<Vec<_>>();
+                    assert_eq!(ids, expected);
+                }
             }
         }
         client.runtimes(local.clone(), 1, models.publisher());
@@ -609,7 +615,7 @@ mod tests {
             } else {
                 assert_eq!(machine.key, dest.key);
                 assert_eq!(serial, 2);
-                assert_eq!(configured, ["codex", "antigravity"]);
+                assert_eq!(configured, ["codex", "antigravity", "claude"]);
             }
         }
         let id = crate::new_id();

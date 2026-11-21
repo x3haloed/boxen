@@ -21,7 +21,7 @@ import tarfile
 import tempfile
 import time
 
-SUITES = ["platform", "smoke", "execution", "tool-approvals", "network", "workload", "antigravity", "agent-work", "transcript-import", "thread-import", "resident-promotion", "recovery", "resident", "resident-class", "mailbox",
+SUITES = ["platform", "smoke", "execution", "tool-approvals", "network", "workload", "antigravity", "claude", "agent-work", "transcript-import", "thread-import", "resident-promotion", "recovery", "resident", "resident-class", "mailbox",
           "logging", "infrastructure", "scheduler", "events", "messaging", "guest-chat", "inference-runtime", "inference-health", "compaction", "media", "attachments", "thread-move", "inference-probe"]
 
 
@@ -258,6 +258,7 @@ def main():
                     archive.add(root / 'scripts' / name, arcname='scripts/' + name)
                 archive.add(root / 'tests/fake-codex.py', arcname='tests/fake-codex.py')
                 archive.add(root / 'tests/fake-antigravity.py', arcname='tests/fake-antigravity.py')
+                archive.add(root / 'tests/fake-claude.py', arcname='tests/fake-claude.py')
                 archive.add(root / 'tests/promotion_checks.py', arcname='tests/promotion_checks.py')
                 archive.add(root / 'tests/event-adapter.py', arcname='tests/event-adapter.py')
                 archive.add(root / 'tests/discord_gateway_fixture.py', arcname='tests/discord_gateway_fixture.py')

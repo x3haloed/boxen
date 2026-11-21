@@ -10,6 +10,7 @@ use std::{
 pub enum Runtime {
     Codex,
     Antigravity,
+    Claude,
 }
 
 impl Runtime {
@@ -17,6 +18,7 @@ impl Runtime {
         match backend {
             "codex" => Some(Self::Codex),
             "antigravity" => Some(Self::Antigravity),
+            "claude" => Some(Self::Claude),
             _ => None,
         }
     }
@@ -25,6 +27,7 @@ impl Runtime {
         match self {
             Self::Codex => "codex_models",
             Self::Antigravity => "antigravity_models",
+            Self::Claude => "claude_models",
         }
     }
 }

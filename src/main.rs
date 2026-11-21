@@ -9,6 +9,7 @@ mod attachments;
 mod browser_assignment;
 mod browser_tools;
 mod chat;
+mod claude;
 mod codex;
 #[path = "../shared/codex_executable.rs"]
 mod codex_executable;
@@ -78,9 +79,9 @@ boxen [--data-dir PATH] identity\n\
 boxen [--data-dir PATH] trust PUBLIC_KEY LABEL [--address HOST:PORT]\n\
 boxen [--data-dir PATH] untrust PUBLIC_KEY\n\
 boxen [--data-dir PATH] peers\n\
-boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--antigravity PATH] [--openrouter-key-file PATH]\n\
+boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--antigravity PATH] [--claude PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
-boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|antigravity|openrouter] [--require CAPABILITY,...] [--complete-on-handoff JSON] [--context JSON] [--reasoning-effort LEVEL]\n\
+boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|antigravity|claude|openrouter] [--require CAPABILITY,...] [--complete-on-handoff JSON] [--context JSON] [--reasoning-effort LEVEL]\n\
 boxen [--data-dir PATH] request HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] messages HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] discord-connector --instance ID [--url http://127.0.0.1:PORT]\n\
@@ -104,7 +105,7 @@ boxen [--data-dir PATH] log-status HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] log-off HOST:PORT PUBLIC_KEY\n\n\
 boxen residents HOST:PORT PUBLIC_KEY\n\
 boxen resident-promote HOST:PORT PUBLIC_KEY JSON_SPEC\n\
-boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|antigravity|openrouter] [--reasoning-effort LEVEL] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
+boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|antigravity|claude|openrouter] [--reasoning-effort LEVEL] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-class HOST:PORT PUBLIC_KEY JSON\n\
 boxen resident-get HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
 boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--model MODEL] [--reasoning-effort LEVEL] [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
@@ -121,7 +122,7 @@ Pair by exchanging identity public keys through a trusted channel and\n\
 running trust on BOTH machines. --ui must bind to IPv4 loopback.\n\
 Default data: ~/.boxen (or BOXEN_HOME). Default peer port: 42424.\n\
 MODEL '-' selects the executing machine's configured default.\n\
-Workloads use Codex app-server or the OpenRouter built-in runtime with Full access on the destination."
+Workloads use managed CLIs or the built-in OpenRouter runtime with Full access on the destination."
         );
         #[cfg(feature = "inference-probe")]
         println!(
@@ -211,6 +212,10 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 .unwrap_or_else(|| "codex".into());
             let antigravity = take_option(&mut args, "--antigravity")?
                 .or_else(|| env::var("BOXEN_ANTIGRAVITY").ok());
+            let claude = take_option(&mut args, "--claude")?
+                .or_else(|| env::var("BOXEN_CLAUDE").ok())
+                .or_else(|| claude::discover(state.directory()))
+                .filter(|path| !path.is_empty());
             let listen =
                 take_option(&mut args, "--listen")?.unwrap_or_else(|| "0.0.0.0:42424".into());
             let ui = take_option(&mut args, "--ui")?.unwrap_or_else(|| "127.0.0.1:42425".into());
@@ -234,6 +239,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 state.public_key().into(),
                 inference_config,
                 antigravity,
+                claude,
             )?;
             network::configure(&state, &name, &advertise)?;
             infrastructure::install(state.directory(), state.public_key())?;

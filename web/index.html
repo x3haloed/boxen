@@ -143,7 +143,7 @@ function loadRuntimes() {
     ()=>{if(runtimeCatalog===lookup){lookup.unavailable=true;controls();}}
   );
 }
-const runtimeLabel=id=>new Map([['codex','Codex'],['openrouter','OpenRouter'],['antigravity','Antigravity']]).get(id)||id;
+const runtimeLabel=id=>new Map([['codex','Codex'],['openrouter','OpenRouter'],['antigravity','Antigravity'],['claude','Claude Code']]).get(id)||id;
 function runtimeAvailable(id, resident=false) {
   return runtimeCatalog?.backends?.some(runtime=>runtime.id===id&&runtime.configured&&(!resident||runtime.resident));
 }
@@ -163,7 +163,7 @@ function syncRuntimePicker(field, selected, pinned, disabled, resident=false) {
   picker.disabled=disabled||!!pinned||!choices.length;
 }
 function syncModelPicker(field, backend, disabled) {
-  const input=$(field), picker=$(field+'Choice'), managed=backend==='codex'||backend==='antigravity';
+  const input=$(field), picker=$(field+'Choice'), managed=['codex','antigravity','claude'].includes(backend);
   input.hidden=managed; input.disabled=disabled||managed;
   picker.hidden=!managed; picker.disabled=disabled||!managed;
   if(!managed)return;
@@ -207,14 +207,15 @@ function controls() {
   const pinned=resident?.backend||pendingStart?.backend||records.find(r=>r.record.spec.thread_id===selectedThread)?.record.spec.backend;
   syncRuntimePicker('backend',threadRuntime,pinned,!connected||syncing||submitting||!!selectedThread);
   syncRuntimePicker('residentBackend',residentRuntime,pendingResident?.spec.backend,!connected||residentBusy||!!pendingResident,true);
-  $('send').textContent = active ? 'Send to active run' : selectedThread ? 'Send follow-up' : 'Start thread';
+  const claudeRunning=active&&currentRun.record.spec.backend==='claude';
+  $('send').textContent = active&&!claudeRunning ? 'Send to active run' : selectedThread ? 'Send follow-up' : 'Start thread';
   if(resident)$('send').textContent='Send message to '+resident.name;
   if(pendingMail?.resident===selectedThread)$('send').textContent='Retry original message';
   $('subjectLabel').hidden=!resident;
   $('activateResident').disabled=!connected||syncing||submitting||!!active;
   $('autoActivate').disabled=!connected||syncing||residentBusy;
   if(resident)$('autoActivate').checked=resident.auto_activate;
-  $('send').disabled = !connected || syncing || submitting || residentBusy || (!selectedThread&&!pendingStart&&!runtimeAvailable(threadRuntime));
+  $('send').disabled = !connected || syncing || submitting || residentBusy || (claudeRunning&&!resident) || (!selectedThread&&!pendingStart&&!runtimeAvailable(threadRuntime));
   $('contextPolicy').disabled=!!resident||!!active||!!pendingStart||$('backend').value!=='openrouter';
   if(resident)$('contextPolicy').value=resident.context?.mode||'verbatim';
   $('createResidentButton').disabled=!connected||residentBusy||submitting||(!pendingResident&&!runtimeAvailable(residentRuntime,true));
@@ -553,6 +554,7 @@ $('work').onsubmit=async event=>{
       mailMessages.set(message.id,message);displayMessages();$('prompt').value='';$('mailStatus').textContent='Saved in the resident mailbox; a reply is optional.';return;
     }
     if(steering) {
+      if(currentRun.record.spec.backend==='claude')return;
       await operation({op:'control',id:currentRun.record.spec.id,action:{type:'steer',text}});$('prompt').value='';return;
     }
     // Keep an uncertain submission's id and exact input so retry cannot duplicate it.

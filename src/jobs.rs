@@ -1127,6 +1127,11 @@ impl Run {
         }
         let mut inner = self.inner.lock().unwrap();
         let cancel = matches!(control, Control::Cancel);
+        if inner.snapshot.record.spec.backend == "claude" && !cancel {
+            return Err(
+                "Claude Code currently accepts cancellation only during a Boxen run".into(),
+            );
+        }
         if terminal(&inner.snapshot.status) {
             return Err("run is no longer active".into());
         }
@@ -1152,7 +1157,14 @@ fn project(snapshot: &mut Snapshot, event: &Event) {
         snapshot.backend_thread = event.data["id"].as_str().map(str::to_owned);
     } else if event.kind == "antigravity_prompt_state" {
         snapshot.native_prompt = event.data["state"].as_str().map(str::to_owned);
-    } else if event.kind == "backend_prompt_ended" && event.data["backend"] == "antigravity" {
+    } else if event.kind == "backend_prompt_started" && event.data["backend"] == "claude" {
+        snapshot.native_prompt = Some("active".into());
+    } else if event.kind == "backend_prompt_ended"
+        && matches!(
+            event.data["backend"].as_str(),
+            Some("antigravity" | "claude")
+        )
+    {
         snapshot.native_prompt = Some("ended".into());
     }
 }
@@ -1204,7 +1216,11 @@ fn load_run(path: &std::path::Path, id: &str) -> Result<Arc<Run>> {
             "inference_frame" => serde_json::from_str::<InferenceRoute<'_>>(row.data.get())
                 .map(|frame| EventProjection::inference(&frame.event.kind))
                 .unwrap_or_default(),
-            "status" | "backend_thread" | "backend_prompt_ended" | "antigravity_prompt_state" => {
+            "status"
+            | "backend_thread"
+            | "backend_prompt_started"
+            | "backend_prompt_ended"
+            | "antigravity_prompt_state" => {
                 let event = serde_json::from_slice(&line).map_err(|_| "corrupt event log")?;
                 project(&mut snapshot, &event);
                 EventProjection::None
@@ -1354,6 +1370,8 @@ pub struct Jobs {
     codex_path: String,
     codex_catalog: Mutex<()>,
     antigravity_path: Option<String>,
+    claude_path: Option<String>,
+    claude_catalog: Mutex<Option<(crate::execution::Execution, Instant, Value)>>,
     antigravity_sessions: Mutex<HashMap<String, Arc<crate::antigravity::SessionSlot>>>,
     antigravity_catalog: Mutex<Option<(crate::execution::Execution, Instant, Value)>>,
     pub inference: crate::inference::Config,
@@ -2043,11 +2061,63 @@ impl Jobs {
         );
         result
     }
+    pub fn claude_models(&self, owner: &str) -> Result<Value> {
+        let result = (|| -> Result<Value> {
+            let binary = self
+                .claude_path
+                .as_ref()
+                .ok_or("Claude Code is unavailable on the executing machine")?;
+            let mut cached = self
+                .claude_catalog
+                .try_lock()
+                .map_err(|_| "A Claude Code model lookup is already running on this machine")?;
+            let home = self.runtime_home().ok_or("Run directory has no home")?;
+            let execution = crate::execution::Execution::capture(home)?;
+            if execution.desktop_available == Some(false)
+                && execution.mode == crate::execution::Mode::UserSession
+            {
+                return Err("Claude Code model lookup becomes available when the configured account has a macOS login session".into());
+            }
+            if let Some((account, fetched, catalog)) = &*cached
+                && *account == execution
+                && fetched.elapsed() < Duration::from_secs(60)
+            {
+                return Ok(catalog.clone());
+            }
+            let cwd = home.canonicalize()?.join("claude-model-catalog");
+            if fs::symlink_metadata(&cwd).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err("Claude Code model catalog directory cannot be a symbolic link".into());
+            }
+            state::private_dir(&cwd)?;
+            execution.own_managed_path(&cwd)?;
+            let catalog = crate::claude::models(execution.command(binary), &cwd, owner)?;
+            *cached = Some((execution, Instant::now(), catalog.clone()));
+            Ok(catalog)
+        })();
+        logging::record(
+            if result.is_ok() {
+                Level::Debug
+            } else {
+                Level::Warn
+            },
+            Target::Runtime,
+            "claude_models.lookup",
+            Context::peer(owner),
+            || {
+                json!({"accepted":result.is_ok(),
+                "count":result.as_ref().ok().and_then(|value| value["models"].as_array()).map(Vec::len)})
+            },
+            || Value::Null,
+        );
+        result
+    }
+
     fn describe_backend(&self, backend: Backend) -> Value {
         backend.describe(match backend {
             Backend::Codex => true,
             Backend::OpenRouter => self.inference.ready().is_ok(),
             Backend::Antigravity => self.antigravity_path.is_some(),
+            Backend::Claude => self.claude_path.is_some(),
         })
     }
 
@@ -2105,7 +2175,7 @@ impl Jobs {
                 .ok_or("runs parent required")?
                 .join("credentials/openrouter.key"),
         };
-        Self::open_with_runtimes(directory, codex_path, machine_id, config, None)
+        Self::open_with_runtimes(directory, codex_path, machine_id, config, None, None)
     }
     pub fn open_with_runtimes(
         directory: PathBuf,
@@ -2113,6 +2183,7 @@ impl Jobs {
         machine_id: String,
         inference: crate::inference::Config,
         antigravity_path: Option<String>,
+        claude_path: Option<String>,
     ) -> Result<Arc<Self>> {
         logging::record(
             Level::Info,
@@ -2196,6 +2267,8 @@ impl Jobs {
             codex_path,
             codex_catalog: Mutex::new(()),
             antigravity_path,
+            claude_path,
+            claude_catalog: Mutex::new(None),
             antigravity_sessions: Mutex::new(HashMap::new()),
             antigravity_catalog: Mutex::new(None),
             inference,
@@ -3259,6 +3332,9 @@ impl Jobs {
                 || Value::Null);
         })?;
         match backend {
+            Backend::Claude if self.claude_path.is_none() => {
+                return Err("Claude Code is unavailable on the executing machine".into());
+            }
             Backend::Antigravity if self.antigravity_path.is_none() => {
                 return Err("Antigravity is unavailable on the executing machine".into());
             }
@@ -3549,6 +3625,7 @@ impl Jobs {
             });
         let binary = self.codex_path.clone();
         let antigravity = self.antigravity_path.clone();
+        let claude = self.claude_path.clone();
         let jobs = self.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<Option<RunOutcome>> {
@@ -3590,6 +3667,15 @@ impl Jobs {
                         history,
                         session.as_deref(),
                     ),
+                    Backend::Claude => crate::claude::execute(
+                        claude.as_deref().ok_or("Claude Code is unavailable")?,
+                        resume,
+                        run.clone(),
+                        receiver,
+                        jobs.clone(),
+                        history,
+                    )
+                    .map(Some),
                     Backend::Codex => codex::execute(
                         &binary,
                         &spec,

@@ -43,6 +43,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
         tokens=[]
         for i in range(2):
             runtime_flags = ['--codex', str(fake_codex())]
+            runtime_flags += ['--claude', str(python_launcher('fake-claude.py')) if i == 1 else '']
             if i == 1:
                 runtime_flags += ['--antigravity', str(python_launcher('fake-antigravity.py'))]
             env = {key: value for key, value in os.environ.items() if key != 'BOXEN_ANTIGRAVITY'}

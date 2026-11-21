@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real Codex app-server or Antigravity ACP execution through two paired daemons, using host-local sign-in.
+"""Real Codex, Antigravity or Claude Code execution through two paired daemons, using host-local sign-in.
 
 Optional live check; not part of the credential-free fixture rotation.
 """
@@ -18,14 +18,20 @@ parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('binary',nargs='?',default='target/release/boxen')
 parser.add_argument('--codex',default='codex')
 parser.add_argument('--model',default='')
-parser.add_argument('--antigravity',metavar='PATH',help='Use this installed Antigravity CLI and its local sign-in')
+managed=parser.add_mutually_exclusive_group()
+managed.add_argument('--claude',metavar='PATH',help='Use this installed Claude Code CLI and its local sign-in')
+parser.add_argument('--claude-background', action='store_true',
+                    help='Also exercise a real Claude Code background task and its wake prompt')
+managed.add_argument('--antigravity',metavar='PATH',help='Use this installed Antigravity CLI and its local sign-in')
 parser.add_argument('--antigravity-form', action='store_true',
                     help='Also exercise a real Antigravity elicitation form')
 args=parser.parse_args()
+if args.claude_background and not args.claude:
+    parser.error('--claude-background requires --claude')
 if args.antigravity_form and not args.antigravity:
     parser.error('--antigravity-form requires --antigravity')
-backend = 'antigravity' if args.antigravity else 'codex'
-runtime_flags = ['--antigravity', args.antigravity] if args.antigravity else ['--codex', args.codex]
+backend = 'claude' if args.claude else 'antigravity' if args.antigravity else 'codex'
+runtime_flags = ['--' + backend, getattr(args, backend)]
 binary=pathlib.Path(args.binary).resolve()
 command=(['/bin/bash'] if binary.suffix=='.com' else [])+[str(binary)]
 def port():
@@ -53,12 +59,17 @@ with tempfile.TemporaryDirectory(prefix='boxen-codex-live-') as temp:
                         assert batch['snapshot']['status']=='completed',batch['snapshot']
                         return events
             raise AssertionError('stream ended early')
+        if args.claude:
+            catalog = api({'op': 'claude_models'})['models']
+            assert catalog and all(row['model'] and row['label'] for row in catalog)
+            if args.model:
+                assert args.model in [row['model'] for row in catalog]
         marker='boxen-live-'+secrets.token_hex(5);ident=secrets.token_hex(32)
         run=api({'op':'start','spec':{'id':ident,'thread_id':ident,'backend':backend,'cwd':temp,'model':args.model,
             'prompt':f'Please run a shell command appropriate for this host that writes exactly {marker} to proof.txt with no newline or byte-order mark, then reads it back. Respond with the marker.'}})
         events=collect(run);assert (root/'proof.txt').read_text()==marker
         assert marker in api({'op':'thread_result','id':ident})['response']
-        if args.antigravity:
+        if args.antigravity or args.claude:
             assert any(e['kind']=='tool_result' for e in events) and any(e['kind']=='assistant_delta' for e in events)
         else:
             assert any(e['data'].get('method')=='item/completed' and e['data'].get('params',{}).get('item',{}).get('type')=='commandExecution' for e in events) and any(e['data'].get('method')=='item/agentMessage/delta' for e in events)
@@ -80,6 +91,23 @@ with tempfile.TemporaryDirectory(prefix='boxen-codex-live-') as temp:
         backend_ids=[e['data']['id'] for e in events if e['kind']=='backend_thread']
         assert len(backend_ids)==4 and backend_ids[0]==backend_ids[1] and backend_ids[2]==backend_ids[3]
         assert not any(e['kind']=='backend_session_rebuilt' for e in events)
+        if args.claude_background:
+            background_id = secrets.token_hex(32)
+            result = api({'op': 'start', 'spec': {
+                'id': background_id, 'thread_id': background_id, 'backend': backend,
+                'cwd': temp, 'model': args.model, 'prompt': (
+                    'Start a Bash tool call with run_in_background=true. '
+                    f'Its command is sleep 8; printf {marker}. '
+                    'Reply immediately after it starts, without using additional tools or waiting.'
+                ),
+            }})
+            background = collect(result)
+            prompt_ends = [e for e in background if e['kind'] == 'backend_prompt_ended']
+            completion = next(e for e in background if e['kind'] == 'tool_result'
+                              and e['data'].get('native_task_id') and e['data']['status'] == 'completed')
+            assert len(prompt_ends) >= 2 and prompt_ends[0]['seq'] < completion['seq'] < prompt_ends[-1]['seq']
+            assert marker in api({'op': 'thread_result', 'id': background_id})['response']
+            events += background
         if args.antigravity_form:
             question_id = secrets.token_hex(32)
             form_run = api({'op': 'start', 'spec': {
@@ -116,7 +144,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-codex-live-') as temp:
             answer = api({'op': 'thread_result', 'id': question_id})['response']
             assert marker in answer and 'square' in answer.lower()
             events += form_events
-        print(json.dumps({'ok':True,'binary':str(binary),'runtime':'antigravity ACP' if args.antigravity else 'codex app-server','model':args.model or 'runtime default','runs':4 + args.antigravity_form,'shell_effect':True,'same_backend_thread_followup':True,'selective_mail':True,'no_send_completion':True,'elicitation_form':args.antigravity_form,'retained_events':len(events)}))
+        print(json.dumps({'ok':True,'binary':str(binary),'runtime':{'claude':'Claude Code stream-json','antigravity':'Antigravity ACP','codex':'Codex app-server'}[backend],'model':args.model or 'runtime default','runs':4 + args.antigravity_form + args.claude_background,'shell_effect':True,'same_backend_thread_followup':True,'selective_mail':True,'no_send_completion':True,'elicitation_form':args.antigravity_form,'background_wake':args.claude_background,'retained_events':len(events)}))
 
     finally:
         for p in processes:

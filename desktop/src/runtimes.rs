@@ -31,6 +31,7 @@ pub fn label(id: &str) -> &str {
         "codex" => "Codex",
         "openrouter" => "OpenRouter",
         "antigravity" => "Antigravity",
+        "claude" => "Claude Code",
         id => id,
     }
 }

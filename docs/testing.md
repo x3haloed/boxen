@@ -44,6 +44,7 @@ statuses and timings. These suites run against the uploaded file:
 - Three-machine membership, shared access, durable mail and removal (`network`).
 - Workload streaming, control, ownership and restart (`workload`).
 - Native ACP integration with a controlled runtime, late work, live controls, session recovery and resident mail (`antigravity`).
+- Claude Code catalog discovery, background wakes, cancellation, resumption, interrupted outcomes and ordered replay (`claude`).
 - Text-history source roles, next-input exposure and effect-free import (`transcript-import`).
 - Independent resident definition instances and manual revision application (`resident-class`).
 - Native Codex thread import, retained historical replay and same-session continuation (`thread-import`).

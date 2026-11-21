@@ -80,7 +80,7 @@ A peer address locates an already-pinned identity; it grants no new trust.
   **Run settings** in the dialog to choose the machine, directory, runtime, or model.
   The Runtime dropdown lists the configured runtimes reported by the selected
   machine. Changing machines refreshes the choices before a new thread can start.
-  The Codex and Antigravity model dropdowns load from the selected machine and
+  The Codex, Antigravity, and Claude Code model dropdowns load from the selected machine and
   include **Default model**. OpenRouter accepts a model ID as text and uses the
   destination's default when left blank.
   When the daemon queues the first run, the dialog closes and the thread opens
@@ -89,11 +89,11 @@ A peer address locates an already-pinned identity; it grants no new trust.
   **Retry same request** submits that exact request again.
   On an idle conversation, **Run settings** can change the directory or model
   for the next send. **Choose a model** uses the same runtime-specific dropdown
-  for Codex and Antigravity. Choosing another machine moves the idle conversation once
+  for Codex, Antigravity, and Claude Code. Choosing another machine moves the idle conversation once
   the destination reports its runtime configured,
   including its retained history and attachments. The draft follows the conversation
-  and remains ready to send. The conversation composer sends a follow-up, or steering while
-  a run is active. **⌘/Ctrl + Enter**
+  and remains ready to send. The composer sends ordinary follow-ups between runs.
+  During a run it offers steering when the runtime supports it. **⌘/Ctrl + Enter**
   submits; cancellation is a separate control.
 
 Pending backend requests appear in Messages and Activity with their original

@@ -179,6 +179,16 @@ selected machine reads the available IDs from an Antigravity ACP discovery
 session under its workload account. The IDs select models independently of
 reasoning effort. Discovery sends no prompt and starts no Boxen run.
 
+The operation `{"op":"claude_models"}` reads the destination Claude Code
+CLI's initialization catalog under the executing account. It has the same
+shape. The default is represented by an empty model on submission. Discovery
+sends no prompt and creates no run.
+
+The `claude` backend supports ordinary requests, resident activations, replay,
+and cancellation. Its `native_prompt` can alternate between `active` and `ended`
+while a run owns an outstanding task and its native wake. A follow-up can
+start after the run settles. [Claude Code runtime](claude.md)
+
 ## Antigravity ACP
 
 Run snapshots and catalog summaries can include `native_prompt`. On an active
