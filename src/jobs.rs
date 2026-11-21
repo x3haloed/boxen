@@ -501,6 +501,23 @@ pub struct SummaryCursor {
     id: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ResponseAttempt {
+    pub id: String,
+    pub machine: String,
+}
+
+fn response_decision(result: &Value) -> &'static str {
+    match result["decision"].as_str().or_else(|| result["action"].as_str()) {
+        Some("accept") => "accept",
+        Some("acceptForSession") => "accept_for_session",
+        Some("decline") => "decline",
+        Some("cancel") => "cancel",
+        _ if result["decision"].is_object() => "policy_decision",
+        _ => "submit",
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Control {
@@ -517,6 +534,8 @@ pub enum Control {
     Respond {
         request_id: Value,
         result: Value,
+        #[serde(skip)]
+        attempt: Option<ResponseAttempt>,
     },
 }
 
@@ -1113,8 +1132,29 @@ impl Run {
         );
         Ok((events, inner.snapshot.clone()))
     }
+    pub(crate) fn response_progress(
+        &self,
+        kind: &str,
+        request: &Value,
+        attempt: Option<&ResponseAttempt>,
+        detail: &'static str,
+    ) -> Result<()> {
+        if let Some(attempt) = attempt {
+            self.append(kind, json!({
+                "request_id":request,"attempt_id":attempt.id,"detail":detail
+            }))?;
+            self.diagnostic(Level::Debug, kind,
+                || json!({"request_id":request,"attempt_id":attempt.id,"machine_id":attempt.machine,"detail":detail}),
+                || Value::Null);
+        }
+        Ok(())
+    }
+
     pub fn control(&self, control: Control) -> Result<()> {
-        self.diagnostic(Level::Debug,"control.requested",||json!({"type":match &control{Control::Cancel=>"cancel",Control::Steer{..}=>"steer",Control::Respond{..}=>"respond"}}),||serde_json::to_value(&control).unwrap_or(Value::Null));
+        self.diagnostic(Level::Debug,"control.requested",||json!({"type":match &control{Control::Cancel=>"cancel",Control::Steer{..}=>"steer",Control::Respond{..}=>"respond"}}),||match &control {
+            Control::Respond { .. } => Value::Null,
+            _ => serde_json::to_value(&control).unwrap_or(Value::Null),
+        });
         if matches!(&control, Control::Steer { .. }) && self.snapshot().record.resident.is_some() {
             return Err("resident communication enters its mailbox; operational cancellation and backend input responses remain separate controls".into());
         }
@@ -1135,11 +1175,30 @@ impl Run {
         if terminal(&inner.snapshot.status) {
             return Err("run is no longer active".into());
         }
-        inner
-            .control
-            .as_ref()
-            .ok_or("runtime is not available")?
-            .send(control)?;
+        let tx = inner.control.clone().ok_or("runtime is not available")?;
+        if let Control::Respond { request_id, result, attempt: Some(attempt) } = &control {
+            if !matches!(inner.snapshot.record.spec.backend.as_str(), "codex" | "antigravity") {
+                return Err("This runtime has no addressable input requests".into());
+            }
+            let attempts = inner.journal.positions("response_attempt");
+            for event in inner.journal.read(attempts.iter().copied()) {
+                if event?.data["attempt_id"] == attempt.id {
+                    return Err("This response attempt ID already has a retained record".into());
+                }
+            }
+            self.append_locked(&mut inner, "response_attempt", json!({
+                "attempt_id":attempt.id,"machine_id":attempt.machine,
+                "request_id":request_id,"decision":response_decision(result)
+            }))?;
+        }
+        if let Err(error) = tx.send(control) {
+            if let Control::Respond { request_id, attempt: Some(attempt), .. } = &error.0 {
+                self.append_locked(&mut inner, "response_refused", json!({
+                    "request_id":request_id,"attempt_id":attempt.id,"reason":"runtime_unavailable"
+                }))?;
+            }
+            return Err(error.into());
+        }
         if cancel {
             inner.cancel_requested = true;
         }

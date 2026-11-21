@@ -27,18 +27,20 @@ pub struct MessageLayout {
 }
 
 impl View {
+    pub fn anchors_run(&self, id: &str) -> bool {
+        self.anchor
+            .as_deref()
+            .and_then(|anchor| anchor.split_once(':'))
+            .is_some_and(|(run, _)| run == id)
+    }
+
     pub fn offscreen_run(
         &self,
         ui: &egui::Ui,
         id: &str,
         layout: MessageLayout,
     ) -> Option<egui::Rect> {
-        if self
-            .anchor
-            .as_deref()
-            .and_then(|anchor| anchor.split_once(':'))
-            .is_some_and(|(run, _)| run == id)
-        {
+        if self.anchors_run(id) {
             return None;
         }
         let (previous, bounds) = self.message_layouts.get(id)?;
@@ -577,6 +579,8 @@ pub fn incident(row: &Row) -> bool {
     row.tool.as_ref().is_some_and(|t| t.failed)
         || row.label == "Incident"
         || row.label == "Context"
+        || row.answer.is_some()
+        || row.label == "Closed · no answer recorded"
         || row.label == "Backend input requested"
         || row.label == "Status"
             && ["failed", "interrupted", "cancelled"]
@@ -610,6 +614,9 @@ pub fn activity_rows(ui: &mut egui::Ui, rows: &[Row]) {
 }
 pub fn activity_row(ui: &mut egui::Ui, row: &Row) {
     ui.push_id(&row.id, |ui| {
+        if let Some(answer) = &row.answer {
+            ui.weak(answer.label());
+        }
         if row.label == "Context" {
             ui.weak(format!("◐ {}", row.text));
             return;

@@ -185,7 +185,8 @@ fn controls(
                     pending.push((message, format!("{text}{file_context}")));
                 }
             }
-            Control::Respond { .. } => {
+            Control::Respond { request_id, attempt, .. } => {
+                run.response_progress("response_refused", &request_id, attempt.as_ref(), "runtime_has_no_input_request")?;
                 run.append(
                     "control_error",
                     json!({"message":"this runtime has no pending backend input request"}),

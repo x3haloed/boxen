@@ -44,6 +44,22 @@ For catalog refresh, pass each response's `next_after` back as `summary_page.aft
 
 Control acceptance means delivery to the runtime control queue, not confirmed execution of the action. Observe retained control outcomes and the terminal status. Steering and backend responses are not idempotent submissions; do not blindly resend after losing their response. An uncertain earlier run remains `interrupted`; a new message can continue the same thread. The new run records `recovery_notice`, and Boxen passes the uncertainty to the runtime without replaying the earlier work or requiring an acknowledgment ceremony.
 
+An operator can submit an attributed response with
+`{"op":"respond_attempt","id":"RUN_ID","request_id":0,"attempt_id":"ATTEMPT_ID","result":{}}`.
+The attempt ID is a fresh lowercase 64-character hex ID. The run journals
+the authenticated machine, request ID and a bounded decision category
+before enqueueing the response. Arbitrary form values stay out of this
+receipt. A repeated attempt ID cannot enqueue another response. Older
+daemons reject this operation.
+
+Replay of `response_attempt` establishes retained admission.
+`response_write_started` marks the backend write boundary. A subsequent
+`request_answered` with that attempt ID establishes that the adapter wrote
+the response. `response_refused` establishes local non-dispatch. A terminal
+run that has a write-start record without an outcome leaves that write
+uncertain. A later answer to the same request does not identify an earlier
+attempt unless its record names that attempt ID.
+
 ## Runtime capability requirements
 
 `runtime_info` lists each backend's `request_capabilities` and

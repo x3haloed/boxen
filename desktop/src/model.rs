@@ -89,6 +89,57 @@ pub fn terminal(snapshot: &Value) -> bool {
         Some("completed" | "failed" | "cancelled" | "interrupted")
     )
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnswerState {
+    Sending,
+    Queued,
+    Writing,
+    Written,
+    Refused,
+    Unconfirmed,
+}
+
+#[derive(Clone, Debug)]
+pub struct AnswerReceipt {
+    pub attempt_id: String,
+    pub machine: String,
+    pub decision: String,
+    pub state: AnswerState,
+    pub yours: bool,
+    pub machine_label: String,
+}
+impl AnswerReceipt {
+    pub fn waiting(&self) -> bool {
+        matches!(
+            self.state,
+            AnswerState::Sending
+                | AnswerState::Queued
+                | AnswerState::Writing
+                | AnswerState::Unconfirmed
+        )
+    }
+
+    pub fn label(&self) -> String {
+        match self.state {
+            AnswerState::Sending => "Sending answer…".into(),
+            AnswerState::Queued | AnswerState::Writing if self.yours => {
+                "◌ your answer queued".into()
+            }
+            AnswerState::Queued | AnswerState::Writing => "◌ answer queued".into(),
+            AnswerState::Written if self.yours => "✓ your answer written".into(),
+            AnswerState::Written => {
+                format!(
+                    "Answered by another client · {} · {}",
+                    self.decision, self.machine_label
+                )
+            }
+            AnswerState::Refused if self.yours => "Your answer was refused before writing".into(),
+            AnswerState::Refused => "Answer was refused before writing".into(),
+            AnswerState::Unconfirmed => "? write uncertain".into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Row {
     pub id: String,
@@ -96,6 +147,7 @@ pub struct Row {
     pub text: String,
     pub attachments: Vec<crate::attachments::FileRef>,
     pub request: Option<Value>,
+    pub answer: Option<AnswerReceipt>,
     pub update_id: Option<String>,
     pub tool: Option<ToolDetail>,
 }
@@ -161,6 +213,7 @@ pub struct Transcript {
     pub context: Option<ContextMeasure>,
     pub rows: Vec<Row>,
     pub rejected_updates: BTreeMap<String, String>,
+    answer_attempts: BTreeMap<String, AnswerReceipt>,
     positions: BTreeMap<String, usize>,
     imported: bool,
 }
@@ -173,6 +226,7 @@ impl Transcript {
                 text: String::new(),
                 attachments: vec![],
                 request: None,
+                answer: None,
                 update_id: None,
                 tool: None,
             });
@@ -186,6 +240,82 @@ impl Transcript {
             row.text = text
         }
     }
+    pub fn decorate_answers(&mut self, mut label: impl FnMut(&mut AnswerReceipt)) {
+        for row in &mut self.rows {
+            if let Some(answer) = &mut row.answer {
+                label(answer);
+            }
+        }
+    }
+
+    pub fn answer_locally(&mut self, request: &Value, attempt: AnswerReceipt) {
+        if let Some(row) = self.pending_request_mut(request)
+            && row.answer.as_ref().is_none_or(|known| {
+                known.attempt_id == attempt.attempt_id
+                    && matches!(known.state, AnswerState::Sending | AnswerState::Unconfirmed)
+            })
+        {
+            row.answer = Some(attempt);
+        }
+    }
+
+    fn pending_request_mut(&mut self, request: &Value) -> Option<&mut Row> {
+        self.rows.iter_mut().rev().find(|row| {
+            row.request
+                .as_ref()
+                .is_some_and(|value| value["id"] == *request)
+        })
+    }
+
+    fn answer_event(&mut self, kind: &str, data: &Value) {
+        let Some(id) = data["attempt_id"].as_str() else {
+            return;
+        };
+        if kind == "response_attempt" {
+            self.answer_attempts.insert(
+                id.into(),
+                AnswerReceipt {
+                    attempt_id: id.into(),
+                    machine: data["machine_id"].as_str().unwrap_or_default().into(),
+                    decision: data["decision"]
+                        .as_str()
+                        .unwrap_or("submit")
+                        .replace('_', " "),
+                    state: AnswerState::Queued,
+                    yours: false,
+                    machine_label: String::new(),
+                },
+            );
+        }
+        let Some(attempt) = self.answer_attempts.get_mut(id) else {
+            return;
+        };
+        attempt.state = match kind {
+            "response_write_started" => AnswerState::Writing,
+            "response_refused" => AnswerState::Refused,
+            "request_answered" => AnswerState::Written,
+            _ => AnswerState::Queued,
+        };
+        let attempt = attempt.clone();
+        if let Some(row) = self.pending_request_mut(&data["request_id"]) {
+            let replace = row.answer.as_ref().is_none_or(|known| {
+                known.attempt_id == id
+                    || matches!(
+                        known.state,
+                        AnswerState::Sending | AnswerState::Refused | AnswerState::Unconfirmed
+                    )
+                    || matches!(attempt.state, AnswerState::Writing | AnswerState::Written)
+            });
+            if replace {
+                row.answer = Some(attempt);
+            }
+        } else if kind == "response_refused" {
+            let row = format!("answer-{id}");
+            self.put(row.clone(), "Response attempt", String::new(), false);
+            self.rows[self.positions[&row]].answer = Some(attempt);
+        }
+    }
+
     pub fn apply(&mut self, event: &Value) -> Result<(), String> {
         let seq = event["seq"].as_u64().ok_or("Event has no sequence")?;
         if seq <= self.seq {
@@ -206,6 +336,12 @@ impl Transcript {
             self.status = Some(data.clone());
         }
         let text = |key: &str| data[key].as_str().unwrap_or("").to_owned();
+        if matches!(
+            kind,
+            "response_attempt" | "response_write_started" | "response_refused" | "request_answered"
+        ) {
+            self.answer_event(kind, data);
+        }
         match kind {
             "backend_thread" => self.context = None,
             "backend_usage" if data["backend"] == "antigravity" => {
@@ -344,6 +480,19 @@ impl Transcript {
                     self.put(format!("event-{seq}"), method, display(p), false);
                 }
             }
+            "input_requested" if data["backend"] == "antigravity" => {
+                let id = format!("event-{seq}");
+                self.put(id.clone(), "Backend input requested", text("question"), false);
+                self.rows[self.positions[&id]].request = Some(serde_json::json!({
+                    "id":data["request_id"],"method":"antigravity/input","params":data
+                }));
+            }
+            "request_cancelled" => {
+                if let Some(row) = self.pending_request_mut(&data["request_id"]) {
+                    row.request = None;
+                    row.label = "Backend input cancelled".into();
+                }
+            }
             "request_answered" => {
                 for row in &mut self.rows {
                     if row.request.as_ref().is_some_and(|r|r["id"] == data["request_id"]) {
@@ -353,6 +502,23 @@ impl Transcript {
                 }
             }
             "control" => self.put(format!("event-{seq}"),"Control",display(data),false),
+            "status" if terminal(data) => {
+                for row in self.rows.iter_mut().filter(|row| row.request.is_some()) {
+                    row.request = None;
+                    row.label = "Closed · no answer recorded".into();
+                    if let Some(answer) = &mut row.answer {
+                        if matches!(answer.state, AnswerState::Writing | AnswerState::Unconfirmed) {
+                            answer.state = AnswerState::Unconfirmed;
+                        } else {
+                            row.answer = None;
+                        }
+                    }
+                }
+                if data["status"] != "completed" {
+                    self.put(format!("event-{seq}"), "Status",
+                        format!("{} · {}", text("status"), text("detail")), false);
+                }
+            }
             "status" if data["status"] != "completed" => self.put(
                 format!("event-{seq}"),
                 "Status",
@@ -399,6 +565,69 @@ pub fn display(value: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn replay_attributes_the_only_written_answer_and_preserves_an_interrupted_write() {
+        let mut transcript = Transcript::default();
+        let events = [
+            (
+                "backend",
+                json!({"id":0,"method":"item/commandExecution/requestApproval"}),
+            ),
+            (
+                "response_attempt",
+                json!({"request_id":0,"attempt_id":"winner","machine_id":"other","decision":"decline"}),
+            ),
+            (
+                "response_attempt",
+                json!({"request_id":0,"attempt_id":"local","machine_id":"here","decision":"accept"}),
+            ),
+            (
+                "response_write_started",
+                json!({"request_id":0,"attempt_id":"winner"}),
+            ),
+            (
+                "request_answered",
+                json!({"request_id":0,"attempt_id":"winner"}),
+            ),
+            (
+                "response_refused",
+                json!({"request_id":0,"attempt_id":"local"}),
+            ),
+            (
+                "input_requested",
+                json!({"backend":"antigravity","request_id":1,"question":"Choose a branch"}),
+            ),
+            (
+                "response_attempt",
+                json!({"request_id":1,"attempt_id":"later","machine_id":"here","decision":"submit"}),
+            ),
+            (
+                "response_write_started",
+                json!({"request_id":1,"attempt_id":"later"}),
+            ),
+            (
+                "status",
+                json!({"status":"interrupted","detail":"runtime stopped during control"}),
+            ),
+        ];
+        for (index, (kind, data)) in events.into_iter().enumerate() {
+            transcript
+                .apply(&json!({"seq":index+1,"kind":kind,"data":data}))
+                .unwrap();
+        }
+        let written = transcript.rows[0].answer.as_ref().unwrap();
+        assert_eq!(written.attempt_id, "winner");
+        assert_eq!(written.state, AnswerState::Written);
+        assert!(transcript.rows[0].request.is_none());
+        let refused = transcript.rows[1].answer.as_ref().unwrap();
+        assert_eq!(refused.attempt_id, "local");
+        assert_eq!(refused.state, AnswerState::Refused);
+        let later = transcript.rows[2].answer.as_ref().unwrap();
+        assert_eq!(later.attempt_id, "later");
+        assert_eq!(later.state, AnswerState::Unconfirmed);
+        assert!(transcript.rows[2].request.is_none());
+    }
+
     #[test]
     fn context_measure_preserves_acp_and_selection_units_and_missing_samples() {
         let mut transcript = Transcript::default();

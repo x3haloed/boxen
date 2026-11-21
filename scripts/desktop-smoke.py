@@ -98,6 +98,37 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
         def host_operation(request):
             req=urllib.request.Request(f'http://127.0.0.1:{controls[1]}/api/operation',headers={'Authorization':'Bearer '+tokens[1],'Content-Type':'application/json'},data=json.dumps({'peer':keys[1],'address':'','request':request}).encode())
             return json.load(urllib.request.urlopen(req,timeout=12))
+        # A destination-local decline wins a race with a remote approval.
+        gate_run = secrets.token_hex(32)
+        operation({'op':'start','spec':{'id':gate_run,'thread_id':gate_run,'backend':'codex',
+                                        'prompt':'ATTRIBUTED_GATE_FIXTURE'}})
+        deadline = time.monotonic() + 10
+        while operation({'op':'get','id':gate_run})['status'] != 'waiting':
+            assert time.monotonic() < deadline
+            time.sleep(.025)
+        winner, contender = secrets.token_hex(32), secrets.token_hex(32)
+        decision = {'op':'respond_attempt','id':gate_run,'request_id':0}
+        assert host_operation(decision|{'attempt_id':winner,'result':{'decision':'decline'}})['accepted']
+        assert operation(decision|{'attempt_id':contender,'result':{'decision':'accept'}})['accepted']
+        req = urllib.request.Request(f'http://127.0.0.1:{controls[0]}/api/watch',
+            headers={'Authorization':'Bearer '+tokens[0],'Content-Type':'application/json'},
+            data=json.dumps({'peer':keys[1],'address':destination['address'],
+                             'request':{'id':gate_run,'after':0}}).encode())
+        events = []
+        with urllib.request.urlopen(req, timeout=12) as stream:
+            for line in stream:
+                batch = json.loads(line)
+                events.extend(batch['events'])
+                if batch['done']:
+                    break
+        attempts = {event['data']['attempt_id']:event['data'] for event in events if event['kind']=='response_attempt'}
+        assert attempts[winner]['machine_id']==keys[1] and attempts[winner]['decision']=='decline'
+        assert attempts[contender]['machine_id']==keys[0] and attempts[contender]['decision']=='accept'
+        writes = [event for event in events if event['kind']=='response_write_started']
+        answers = [event for event in events if event['kind']=='request_answered']
+        assert len(writes)==len(answers)==1 and writes[0]['seq'] < answers[0]['seq']
+        assert writes[0]['data']['attempt_id']==answers[0]['data']['attempt_id']==winner
+        assert any(event['kind']=='response_refused' and event['data']['attempt_id']==contender for event in events)
         host_operation({'op':'resident_create','spec':{'id':historical,'name':'Historical correspondence fixture','cwd':temporary,'auto_activate':False}})
         historical_mail=host_operation({'op':'mailbox_send','client_id':keys[1],'message':{'id':secrets.token_hex(32),'to':{'type':'resident','id':historical},'subject':'Earlier human message','body':'REPLY historical human message'}})
         historical_run=host_operation({'op':'resident_activate','id':historical,'activation_id':secrets.token_hex(32)})

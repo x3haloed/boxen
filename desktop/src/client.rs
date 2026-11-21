@@ -56,6 +56,7 @@ pub enum Update {
     Followup(String, Result<Pending, String>),
     Submitted(String, Result<Value, SubmitError>),
     Controlled(String, Destination, String, Result<Value, String>),
+    AnswerSubmitted(String, Result<Value, String>),
 }
 pub struct Bus {
     pub tx: SyncSender<Update>,
@@ -436,6 +437,18 @@ impl Client {
             publisher.send(Update::Submitted(id, result));
         });
     }
+    pub fn respond(&self, destination: Destination, request: Value, publisher: Publisher) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            let attempt = request["attempt_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let result = client.operation(&destination, request);
+            publisher.send(Update::AnswerSubmitted(attempt, result));
+        });
+    }
+
     pub fn control(&self, dest: Destination, id: String, action: Value, publisher: Publisher) {
         let client = self.clone();
         std::thread::spawn(move || {

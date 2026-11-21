@@ -788,13 +788,9 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     if let Some(error) = data.watches.get(&live_tag).and_then(|w| w.error.as_ref()) {
         ui.label(format!("Reconnecting to activity · {error}"));
     }
-    if let Some(t) = data.transcripts.get(&live_tag) {
+    if !activity && let Some(t) = data.transcripts.get(&live_tag) {
         for row in &t.rows {
-            if row
-                .request
-                .as_ref()
-                .is_some_and(|request| !activity || request["method"] == COMMAND_APPROVAL)
-            {
+            if row.request.is_some() && !data.errors.contains_key(&key.peer) {
                 backend_request(ui, row, key, live_id, actions);
             }
         }
@@ -918,7 +914,8 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                                     &rows[group_start..i],
                                     key,
                                     id,
-                                    !terminal(run),
+                                    !terminal(run) && !data.errors.contains_key(&key.peer),
+                                    &mut data.views,
                                     actions,
                                 );
                             }
@@ -959,7 +956,15 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                         }
                     }
                     if activity {
-                        render_rows(ui, &rows[group_start..], key, id, !terminal(run), actions);
+                        render_rows(
+                            ui,
+                            &rows[group_start..],
+                            key,
+                            id,
+                            !terminal(run) && !data.errors.contains_key(&key.peer),
+                            &mut data.views,
+                            actions,
+                        );
                     }
                     if rows.is_empty() {
                         let spec = &run["record"]["spec"];
@@ -1144,25 +1149,107 @@ fn render_rows(
     key: &ThreadKey,
     run: &str,
     live: bool,
+    views: &mut std::collections::HashMap<ThreadKey, view::View>,
     actions: &mut Vec<Action>,
 ) {
     let mut start = 0;
     for (i, row) in rows.iter().enumerate() {
         if view::incident(row) {
             view::activity_rows(ui, &rows[start..i]);
-            if live && let Some(request) = &row.request {
-                if request["method"] != COMMAND_APPROVAL {
-                    backend_request(ui, row, key, run, actions);
-                }
-            } else {
-                view::activity_row(ui, row);
-            }
+            let response = ui
+                .scope(|ui| {
+                    if live && row.request.is_some() {
+                        backend_request(ui, row, key, run, actions);
+                    } else {
+                        view::activity_row(ui, row);
+                    }
+                })
+                .response;
+            view::record(ui, views, key, &format!("{run}:{}", row.id), response.rect);
             start = i + 1;
         }
     }
     view::activity_rows(ui, &rows[start..]);
 }
-fn backend_request(
+fn antigravity_input(
+    ui: &mut egui::Ui,
+    request: &Value,
+    key: &ThreadKey,
+    run: &str,
+    id: &Value,
+    actions: &mut Vec<Action>,
+) {
+    ui.strong(
+        request["question"]
+            .as_str()
+            .unwrap_or("Antigravity asks for input"),
+    );
+    if let Some(choices) = request["choices"].as_array() {
+        ui.horizontal_wrapped(|ui| {
+            for choice in choices {
+                if let (Some(label), Some(option)) =
+                    (choice["label"].as_str(), choice["id"].as_str())
+                    && ui.button(label).clicked()
+                {
+                    actions.push(Action::Respond(
+                        key.clone(),
+                        run.into(),
+                        id.clone(),
+                        json!({"option_id":option}),
+                    ));
+                }
+            }
+        });
+        return;
+    }
+    let schema = &request["requested_schema"];
+    let properties = schema["properties"].as_object();
+    let single = properties
+        .filter(|fields| fields.len() == 1)
+        .and_then(|fields| fields.iter().next())
+        .and_then(|(field, spec)| Some((field, spec["enum"].as_array()?)));
+    ui.horizontal_wrapped(|ui| {
+        if let Some((field, choices)) = single {
+            for choice in choices {
+                if ui.button(crate::model::display(choice)).clicked() {
+                    actions.push(Action::Respond(
+                        key.clone(),
+                        run.into(),
+                        id.clone(),
+                        json!({"action":"accept","content":{(field):choice}}),
+                    ));
+                }
+            }
+        }
+        for (label, action) in [("Decline", "decline"), ("Cancel", "cancel")] {
+            if ui.button(label).clicked() {
+                actions.push(Action::Respond(
+                    key.clone(),
+                    run.into(),
+                    id.clone(),
+                    json!({"action":action}),
+                ));
+            }
+        }
+    });
+    if single.is_none() {
+        ui.collapsing("Requested form schema", |ui| {
+            ui.monospace(crate::model::display(schema));
+        });
+        if let Some(content) = backend_json_input(ui, "Form values (JSON)")
+            && ui.small_button("Submit form").clicked()
+        {
+            actions.push(Action::Respond(
+                key.clone(),
+                run.into(),
+                id.clone(),
+                json!({"action":"accept","content":content}),
+            ));
+        }
+    }
+}
+
+pub(crate) fn backend_request(
     ui: &mut egui::Ui,
     row: &Row,
     key: &ThreadKey,
@@ -1173,6 +1260,16 @@ fn backend_request(
     let method = req["method"].as_str().unwrap_or("");
     let p = &req["params"];
     ui.push_id((&row.id, run), |ui| {
+        if let Some(answer) = &row.answer {
+            ui.weak(answer.label());
+            if answer.waiting() {
+                return;
+            }
+        }
+        if method == "antigravity/input" {
+            antigravity_input(ui, p, key, run, &req["id"], actions);
+            return;
+        }
         if method == COMMAND_APPROVAL {
             if let Some(decision) = command_approval(ui, p) {
                 actions.push(Action::Respond(

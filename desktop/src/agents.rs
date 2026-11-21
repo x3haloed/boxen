@@ -79,6 +79,32 @@ impl State {
                 .unwrap_or_default(),
         )
     }
+    pub fn active_runs(&self) -> impl Iterator<Item = (ThreadKey, &Value)> {
+        self.peers.iter().flat_map(|(peer, state)| {
+            state
+                .residents
+                .iter()
+                .filter_map(|resident| {
+                    let id = resident["id"].as_str()?;
+                    let thread = resident["thread_id"].as_str().unwrap_or(id);
+                    Some((id, state.histories.get(thread)?))
+                })
+                .flat_map(move |(id, runs)| {
+                    runs.iter()
+                        .filter(|run| !crate::model::terminal(run))
+                        .map(move |run| {
+                            (
+                                ThreadKey {
+                                    peer: peer.clone(),
+                                    id: id.into(),
+                                },
+                                run,
+                            )
+                        })
+                })
+        })
+    }
+
     pub fn error(&self, key: &ThreadKey) -> Option<&str> {
         let p = self.peers.get(&key.peer)?;
         p.runs_error.as_deref().or(p.metadata_error.as_deref())

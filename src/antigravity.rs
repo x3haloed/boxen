@@ -738,12 +738,13 @@ impl Turn {
                         self.steering.insert(id, update);
                     }
                 }
-                Control::Respond { request_id, result } => {
+                Control::Respond { request_id, result, attempt } => {
                     let key = request_id.to_string();
                     if let Some(question) = self.questions.get(&key)
                         && let Some(response) = question.kind.response(&result)
                     {
                         let action = response["action"].as_str().unwrap_or("accept").to_owned();
+                        self.run.response_progress("response_write_started", &request_id, attempt.as_ref(), "writing_to_antigravity")?;
                         rpc.reply(&question.id, response)?;
                         self.questions.remove(&key);
                         self.run.diagnostic(Level::Info, "antigravity.input_answered",
@@ -751,12 +752,13 @@ impl Turn {
                         self.run.append(
                             "request_answered",
                             json!({"backend":"antigravity","request_id":request_id,
-                                "action":action}),
+                                "action":action,"attempt_id":attempt.as_ref().map(|attempt| &attempt.id)}),
                         )?;
                         if self.questions.is_empty() {
                             self.run.status("running", "Answer sent to Antigravity")?;
                         }
                     } else {
+                        self.run.response_progress("response_refused", &request_id, attempt.as_ref(), "request_or_answer_does_not_match")?;
                         self.run.diagnostic(
                             Level::Warn,
                             "antigravity.input_rejected",
@@ -1063,7 +1065,8 @@ fn drive_session(
                                 "update":{"update_id":update_id}
                             }))?;
                         }
-                        Ok(Control::Respond { request_id, .. }) => {
+                        Ok(Control::Respond { request_id, attempt, .. }) => {
+                            turn.run.response_progress("response_refused", &request_id, attempt.as_ref(), "request_not_pending")?;
                             turn.run.append(
                                 "control_error",
                                 json!({

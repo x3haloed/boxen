@@ -150,6 +150,15 @@ def work(prompt):
             result = responses.pop(0)
         assert result == {"action": expected, "content": {} if expected == "accept" else None}, result
         notification("serverRequest/resolved", {"requestId": 0})
+    if prompt == "ATTRIBUTED_GATE_FIXTURE":
+        emit({"id": 0, "method": "item/commandExecution/requestApproval", "params": {
+            "threadId": thread, "turnId": "fixture-turn", "itemId": "command",
+            "command": "echo fixture", "availableDecisions": ["accept", "decline"]}})
+        with response_ready:
+            assert response_ready.wait_for(lambda: 0 in responses, timeout=20), "fixture approval was not answered"
+            assert responses.pop(0) == {"decision": "decline"}
+        notification("serverRequest/resolved", {"requestId": 0})
+        time.sleep(0.8)
     if prompt == "LONG_COMMAND_REVIEW":
         emit({"id": 0, "method": "item/commandExecution/requestApproval", "params": {
             "threadId": thread, "turnId": "fixture-turn", "itemId": "command",

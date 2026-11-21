@@ -200,6 +200,22 @@ pub fn operation(jobs: &Arc<Jobs>, actor: &str, request: &Value) -> Result<Value
     let result = (|| -> Result<Value> {
         match op {
             "tool_approvals" => return jobs.tool_approvals.operation(&request["args"]),
+            "respond_attempt" => {
+                let id = request["id"].as_str().ok_or("run ID required")?;
+                let attempt_id = request["attempt_id"].as_str().ok_or("response attempt ID required")?;
+                crate::jobs::valid_id(attempt_id)?;
+                let request_id = &request["request_id"];
+                if !(request_id.is_string() || request_id.is_i64() || request_id.is_u64()) {
+                    return Err("Backend request ID must be a string or integer".into());
+                }
+                let result = request.get("result").ok_or("response result required")?;
+                run(jobs, id)?.control(crate::jobs::Control::Respond {
+                    request_id: request_id.clone(),
+                    result: result.clone(),
+                    attempt: Some(crate::jobs::ResponseAttempt { id: attempt_id.into(), machine: actor.into() }),
+                })?;
+                return Ok(json!({"accepted":true,"attempt_id":attempt_id}));
+            }
             "infrastructure_history" => return crate::infrastructure::page(request),
             "start_handoff" => {
                 return start_handoff(jobs, actor, &namespace(jobs, actor, request)?, request);

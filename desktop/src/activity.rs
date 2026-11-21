@@ -1,6 +1,6 @@
 //! An observer of the existing run journals; opening it never activates a resident.
 use crate::{
-    Data,
+    Action, Data,
     client::run_key,
     conversation,
     model::{ThreadKey, terminal},
@@ -51,7 +51,13 @@ pub fn earlier(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey) {
         window.first = previous;
     }
 }
-pub fn run(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, run: &Value) {
+pub fn run(
+    ui: &mut egui::Ui,
+    data: &mut Data,
+    key: &ThreadKey,
+    run: &Value,
+    actions: &mut Vec<Action>,
+) {
     let id = run["record"]["spec"]["id"].as_str().unwrap_or_default();
     let tag = run_key(&key.peer, id);
     let imported =
@@ -81,12 +87,31 @@ pub fn run(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, run: &Value) {
         if let Some(error) = data.watches.get(&tag).and_then(|w| w.error.as_ref()) {
             ui.label(format!("Reconnecting observation · {error}"));
         }
+        let anchored = data.views.get(key).is_some_and(|view| view.anchors_run(id));
         let details = egui::CollapsingHeader::new(title)
+            .open(anchored.then_some(true))
             .default_open(!terminal(run) || matches!(status, "failed" | "interrupted"))
             .show(ui, |ui| {
                 if let Some(t) = data.transcripts.get(&tag) {
                     for row in &t.rows {
-                        conversation::activity_row(ui, row);
+                        let response = ui
+                            .scope(|ui| {
+                                if row.request.is_some()
+                                    && !terminal(run)
+                                    && !data.errors.contains_key(&key.peer)
+                                    && data
+                                        .watches
+                                        .get(&tag)
+                                        .is_some_and(|watch| watch.error.is_none())
+                                {
+                                    crate::thread_view::backend_request(ui, row, key, id, actions);
+                                } else {
+                                    conversation::activity_row(ui, row);
+                                }
+                            })
+                            .response;
+                        let anchor = format!("{id}:{}", row.id);
+                        conversation::record(ui, &mut data.views, key, &anchor, response.rect);
                     }
                     if t.seq < run["last_seq"].as_u64().unwrap_or(0) {
                         ui.weak("Replaying retained activity…");

@@ -52,8 +52,22 @@ pub struct Mailbox {
     pub watching: Arc<Mutex<HashSet<ThreadKey>>>,
     pub history_errors: HashMap<ThreadKey, String>,
     pub human_inbox_errors: HashMap<String, String>,
+    operator_inboxes: HashMap<ThreadKey, OperatorInbox>,
+}
+#[derive(Default)]
+struct OperatorInbox {
+    page: Value,
+    past: Vec<u64>,
+    after: u64,
+    pending: Option<(String, u64)>,
+    error: Option<String>,
 }
 pub enum MailUpdate {
+    OperatorInbox {
+        key: ThreadKey,
+        request_id: String,
+        result: Result<Value, String>,
+    },
     HumanInbox {
         destination: Destination,
         inbox: Result<Value, String>,
@@ -90,6 +104,7 @@ pub enum MailAction {
     Resume(String),
     Send(String),
     Retry(String),
+    OperatorInbox(ThreadKey, u64),
 }
 impl Client {
     pub fn mail_poll(
@@ -293,9 +308,60 @@ impl Client {
         });
     }
 }
+impl Mailbox {
+    pub fn note_presentation(&mut self, peer: &str, snapshot: &Value) {
+        let record = &snapshot["record"];
+        let Some(run) = record["spec"]["id"].as_str() else {
+            return;
+        };
+        let Some(ids) = record["mailbox"]["message_ids"].as_array() else {
+            return;
+        };
+        for id in ids.iter().filter_map(Value::as_str) {
+            let key = ThreadKey {
+                peer: peer.into(),
+                id: id.into(),
+            };
+            if let Some(message) = self.outgoing.get_mut(&key) {
+                message["presented_in"] = json!(run);
+            }
+        }
+    }
+}
+
 impl Desktop {
     pub(crate) fn mail_update(&mut self, update: MailUpdate) {
         match update {
+            MailUpdate::OperatorInbox {
+                key,
+                request_id,
+                result,
+            } => {
+                let Some(inbox) = self.data.mail.operator_inboxes.get_mut(&key) else {
+                    return;
+                };
+                let Some((pending, after)) = &inbox.pending else {
+                    return;
+                };
+                if *pending != request_id {
+                    return;
+                }
+                let after = *after;
+                inbox.pending = None;
+                match result {
+                    Ok(page) => {
+                        if inbox.after < after {
+                            inbox.past.push(inbox.after);
+                        } else if inbox.after > after {
+                            inbox.past.pop();
+                        }
+                        inbox.after = after;
+                        inbox.page = page;
+                        inbox.error = None;
+                    }
+                    Err(error) => inbox.error = Some(error),
+                }
+            }
             MailUpdate::HumanInbox { destination, inbox } => match inbox {
                 Ok(page) => {
                     self.data.mail.human_inbox_errors.remove(&destination.key);
@@ -462,6 +528,36 @@ impl Desktop {
     }
     pub(crate) fn mail_action(&mut self, action: MailAction) {
         match action {
+            MailAction::OperatorInbox(key, after) => {
+                let Some(client) = self.client.clone() else {
+                    return;
+                };
+                let inbox = self
+                    .data
+                    .mail
+                    .operator_inboxes
+                    .entry(key.clone())
+                    .or_default();
+                if inbox.pending.is_some() {
+                    return;
+                }
+                let request_id = crate::new_id();
+                inbox.pending = Some((request_id.clone(), after));
+                let destination = crate::conversation::destination(&self.data, &key.peer);
+                let publisher = self.bus.publisher();
+                std::thread::spawn(move || {
+                    let result = client.operation(
+                        &destination,
+                        json!({"op":"resident_inbox","id":key.id,"after":after}),
+                    );
+                    publisher.send(Update::Mail(MailUpdate::OperatorInbox {
+                        key,
+                        request_id,
+                        result,
+                    }));
+                });
+            }
+
             MailAction::Open(key, pin) => {
                 self.data.saved.mail.read.insert(key.clone());
                 self.data.mail.selected = Some(key.clone());
@@ -971,6 +1067,124 @@ pub fn details(ui: &mut egui::Ui, pane: &Pane, data: &mut Data, actions: &mut Ve
     }
 }
 
+fn mail_receipt(message: &Value) -> Option<String> {
+    if let Some(run) = message["presented_in"].as_str() {
+        Some(format!(
+            "Presented in activation {}",
+            run.chars().take(8).collect::<String>()
+        ))
+    } else if message["delivery"]["status"] == "queued" {
+        Some("Saved in outbox".into())
+    } else if message["delivery"] == "queued" || message["delivery"]["status"] == "accepted" {
+        Some("Accepted by destination mailbox · queued".into())
+    } else {
+        None
+    }
+}
+
+fn operator_inbox(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut Vec<Action>) {
+    ui.weak("Operator view · All incoming mail to this resident");
+    let Some(inbox) = data.mail.operator_inboxes.get(key) else {
+        ui.weak("Loading resident inbox…");
+        return;
+    };
+    if let Some(error) = &inbox.error {
+        ui.label(error);
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(inbox.pending.is_none(), egui::Button::new("Refresh"))
+            .clicked()
+        {
+            actions.push(Action::Mail(MailAction::OperatorInbox(
+                key.clone(),
+                inbox.after,
+            )));
+        }
+        if let Some(&previous) = inbox.past.last()
+            && ui
+                .add_enabled(inbox.pending.is_none(), egui::Button::new("Previous page"))
+                .clicked()
+        {
+            actions.push(Action::Mail(MailAction::OperatorInbox(
+                key.clone(),
+                previous,
+            )));
+        }
+        if let Some(next) = inbox.page["next_after"]
+            .as_u64()
+            .filter(|next| *next > inbox.after)
+            && ui
+                .add_enabled(inbox.pending.is_none(), egui::Button::new("Next page"))
+                .clicked()
+        {
+            actions.push(Action::Mail(MailAction::OperatorInbox(key.clone(), next)));
+        }
+    });
+    let owner = crate::conversation::destination(data, &key.peer);
+    let messages = inbox.page["messages"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let names = messages
+        .iter()
+        .map(|message| {
+            let from = &message["sender"];
+            let name = if from["type"] == "client" {
+                from["machine"]
+                    .as_str()
+                    .and_then(|id| data.saved.destinations.iter().find(|dest| dest.key == id))
+                    .map(|dest| dest.label.clone())
+                    .unwrap_or_else(|| "Client".into())
+            } else if let Some(id) = from["id"].as_str() {
+                agent_name(
+                    data,
+                    &ThreadKey {
+                        peer: key.peer.clone(),
+                        id: id.into(),
+                    },
+                )
+            } else {
+                from["type"].as_str().unwrap_or("Sender").into()
+            };
+            name
+        })
+        .collect::<Vec<_>>();
+    egui::ScrollArea::vertical()
+        .id_salt(("operator-inbox", key, inbox.after))
+        .show(ui, |ui| {
+            if messages.is_empty() {
+                ui.weak(if inbox.pending.is_some() {
+                    "Loading resident inbox…"
+                } else {
+                    "No messages on this page"
+                });
+            }
+            for (message, name) in messages.iter().zip(names) {
+                ui.weak(name);
+                if let Some(subject) = message["subject"].as_str() {
+                    ui.strong(subject);
+                }
+                if let Some(body) = message["body"].as_str() {
+                    ui.add(egui::Label::new(body).wrap().selectable(true));
+                }
+                if let Some(receipt) = mail_receipt(message) {
+                    ui.weak(receipt);
+                }
+                let mut files = crate::attachments::FileRef::parse(&message["attachments"]);
+                crate::conversation::chips(
+                    ui,
+                    &mut files,
+                    &owner,
+                    false,
+                    &mut data.file_previews,
+                    actions,
+                );
+                ui.separator();
+            }
+        });
+}
+
 /// A read-only timeline over accepted correspondence, with an ordinary mailbox composer.
 pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut Vec<Action>) {
     use crate::{
@@ -978,6 +1192,27 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
         conversation as view,
     };
     let activity = view::header(ui, data, key);
+    if !activity {
+        let scope = ui.make_persistent_id(("resident-mail-scope", key));
+        let mut all = ui
+            .data_mut(|memory| memory.get_temp::<bool>(scope))
+            .unwrap_or(false);
+        ui.horizontal(|ui| {
+            if ui.selectable_label(!all, "With you").clicked() {
+                all = false;
+                data.mail.operator_inboxes.remove(key);
+            }
+            if ui.selectable_label(all, "All mail").clicked() && !all {
+                all = true;
+                actions.push(Action::Mail(MailAction::OperatorInbox(key.clone(), 0)));
+            }
+        });
+        ui.data_mut(|memory| memory.insert_temp(scope, all));
+        if all {
+            operator_inbox(ui, data, key, actions);
+            return;
+        }
+    }
     let local = view::local(data);
     if !data.mail.errors.contains_key(&key.peer)
         && let Some(run) = data.agents.history(key).and_then(|runs| runs.last())
@@ -1122,7 +1357,7 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
                     if run["record"]["created_at"].as_u64() > m["accepted_at"].as_u64() {
                         break;
                     }
-                    crate::activity::run(ui, data, key, runs.next().unwrap());
+                    crate::activity::run(ui, data, key, runs.next().unwrap(), actions);
                 }
                 let mut files = FileRef::parse(&m["attachments"]);
                 let owner = if *outgoing && m["accepted_on"] == data.local_key {
@@ -1171,8 +1406,8 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
                                 {
                                     switch = Some(id.clone());
                                 }
-                                if *outgoing && m["delivery"]["status"] == "queued" {
-                                    ui.small("Queued for delivery");
+                                if *outgoing && let Some(receipt) = mail_receipt(m) {
+                                    ui.small(receipt);
                                 }
                             },
                         )
@@ -1195,7 +1430,7 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
                 ui.add_space(4.);
             }
             for run in runs {
-                crate::activity::run(ui, data, key, run);
+                crate::activity::run(ui, data, key, run, actions);
             }
         },
     );

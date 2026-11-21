@@ -214,7 +214,7 @@ fn identifier(value: Option<&str>) -> Option<String> {
 pub fn operation(request: &Value) -> Option<&'static str> {
     Some(match request["op"].as_str()? {
         "start" => "start",
-        "control" => "control",
+        "control" | "respond_attempt" => "control",
         "resident_activate" => "resident_activate",
         "inference_resume" => "inference_resume",
         "thread_move" => "thread_move",
@@ -256,7 +256,7 @@ impl Attempt {
             operation(request)?,
             Some(peer),
             request["spec"]["id"].as_str().or_else(|| {
-                (request["op"] == "control")
+                matches!(request["op"].as_str(), Some("control" | "respond_attempt"))
                     .then(|| request["id"].as_str())
                     .flatten()
             }),

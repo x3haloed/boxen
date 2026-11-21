@@ -437,6 +437,7 @@ impl Desktop {
                     self.data.tool_approvals.open();
                 }
                 ui.weak(format!("{columns} × 2"));
+                crate::needs::toolbar(ui, &self.data, actions);
                 if has_holes && !visible.is_empty() {
                     ui.menu_button("Tidy", |ui| {
                         for (name, even) in [("Fill holes", false), ("Even grid", true)] {

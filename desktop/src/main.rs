@@ -9,6 +9,7 @@ mod grid;
 mod menu;
 mod model;
 mod model_catalogs;
+mod needs;
 mod new_conversation;
 #[cfg(test)]
 mod performance;
@@ -52,11 +53,18 @@ struct Saved {
     draft_runs: Vec<(ThreadKey, String)>,
     steering: Vec<thread_view::Steering>,
     pending: Vec<Pending>,
+    answers: Vec<AnswerAttempt>,
     mail: correspondence::SavedMail,
     correspondence_added: bool,
     agents_added: bool,
     work_added: bool,
     work: work::Saved,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct AnswerAttempt {
+    id: String,
+    run_tag: String,
+    request: Value,
 }
 struct Observing {
     epoch: u64,
@@ -64,6 +72,7 @@ struct Observing {
     retry: Instant,
     error: Option<String>,
     done: bool,
+    frontier: Option<u64>,
 }
 #[derive(Default)]
 struct Data {
@@ -108,6 +117,7 @@ enum Action {
     Work(work::Action),
     File(attachments::FileAction),
     Respond(ThreadKey, String, Value, Value),
+    OpenGate(ThreadKey, bool, String),
     OpenActivity(ThreadKey, bool),
     OpenChat(ThreadKey, bool),
     Mail(correspondence::MailAction),
@@ -504,16 +514,50 @@ impl Desktop {
                             break;
                         }
                     }
+                    if batch["events"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|event| {
+                            matches!(
+                                event["kind"].as_str(),
+                                Some(
+                                    "response_attempt"
+                                        | "response_write_started"
+                                        | "response_refused"
+                                        | "request_answered"
+                                )
+                            )
+                        })
+                    {
+                        let saved = &self.data.saved;
+                        transcript.decorate_answers(|answer| {
+                            answer.yours = saved
+                                .answers
+                                .iter()
+                                .any(|attempt| attempt.id == answer.attempt_id);
+                            answer.machine_label = saved
+                                .destinations
+                                .iter()
+                                .find(|destination| destination.key == answer.machine)
+                                .map(|destination| destination.label.clone())
+                                .unwrap_or_else(|| "machine unavailable".into());
+                        });
+                    }
                     if let Some(w) = self.data.watches.get_mut(&id) {
                         w.error = failed;
                         w.done = batch["done"] == true && w.error.is_none();
+                        w.frontier = batch["snapshot"]["last_seq"].as_u64();
                         if w.error.is_some() {
                             w.stop.store(true, Ordering::Relaxed);
                             w.retry = Instant::now() + Duration::from_secs(2);
                         }
                     }
-                    if let Some(s) = batch.get("snapshot") {
-                        self.replace_snapshot(id.split(':').next().unwrap_or(""), s.clone());
+                    if let Some(s) = batch.get("snapshot")
+                        && let Some((peer, _)) = id.split_once(':')
+                    {
+                        self.data.mail.note_presentation(peer, s);
+                        self.replace_snapshot(peer, s.clone());
                     }
                     self.reconcile_steering(&id);
                 }
@@ -547,6 +591,37 @@ impl Desktop {
                     let current = conversation::destination(&self.data, &destination.key);
                     if current.address == destination.address {
                         self.replace_snapshot(&destination.key, snapshot);
+                    }
+                }
+                Update::AnswerSubmitted(id, result) => {
+                    if let Err(error) = result
+                        && let Some(attempt) = self
+                            .data
+                            .saved
+                            .answers
+                            .iter()
+                            .find(|attempt| attempt.id == id)
+                        && let Some(transcript) = self.data.transcripts.get_mut(&attempt.run_tag)
+                    {
+                        let state = if error.starts_with("HTTP 422:") {
+                            model::AnswerState::Refused
+                        } else {
+                            model::AnswerState::Unconfirmed
+                        };
+                        transcript.answer_locally(
+                            &attempt.request,
+                            model::AnswerReceipt {
+                                attempt_id: id,
+                                machine: String::new(),
+                                decision: String::new(),
+                                state,
+                                yours: true,
+                                machine_label: String::new(),
+                            },
+                        );
+                        if state == model::AnswerState::Refused {
+                            self.data.notice = error;
+                        }
                     }
                 }
                 Update::Controlled(id, _dest, _text, result) => {
@@ -736,6 +811,9 @@ impl Desktop {
                 _ => {}
             }
         }
+        for active in needs::active_runs(&self.data) {
+            selected.push((active.key, active.run.clone()));
+        }
         // Live work gets an observer before older replay, across every open surface.
         selected.sort_by_key(|(_, r)| {
             (
@@ -803,6 +881,7 @@ impl Desktop {
                         retry: Instant::now(),
                         error: None,
                         done: false,
+                        frontier: None,
                     },
                 );
             }
@@ -869,13 +948,57 @@ impl Desktop {
             },
             Action::File(action) => self.file_action(action),
             Action::Respond(key, id, request_id, result) => {
-                if let Some(client) = &self.client {
-                    client.control(
-                        conversation::destination(&self.data, &key.peer),
-                        id,
-                        json!({"type":"respond","request_id":request_id,"result":result}),
-                        self.bus.publisher(),
-                    );
+                let tag = run_key(&key.peer, &id);
+                let pending = !self.data.errors.contains_key(&key.peer)
+                    && self
+                        .data
+                        .watches
+                        .get(&tag)
+                        .is_some_and(|watch| watch.error.is_none())
+                    && self.data.transcripts.get(&tag).is_some_and(|transcript| {
+                        transcript.rows.iter().any(|row| {
+                            row.request
+                                .as_ref()
+                                .is_some_and(|request| request["id"] == request_id)
+                                && row.answer.as_ref().is_none_or(|receipt| !receipt.waiting())
+                        })
+                    });
+                if pending && let Some(client) = self.client.clone() {
+                    let attempt = new_id();
+                    self.data.saved.answers.push(AnswerAttempt {
+                        id: attempt.clone(),
+                        run_tag: tag.clone(),
+                        request: request_id.clone(),
+                    });
+                    if self.persist() {
+                        if let Some(transcript) = self.data.transcripts.get_mut(&tag) {
+                            transcript.answer_locally(
+                                &request_id,
+                                model::AnswerReceipt {
+                                    attempt_id: attempt.clone(),
+                                    machine: String::new(),
+                                    decision: String::new(),
+                                    state: model::AnswerState::Sending,
+                                    yours: true,
+                                    machine_label: String::new(),
+                                },
+                            );
+                        }
+                        client.respond(conversation::destination(&self.data, &key.peer),
+                            json!({"op":"respond_attempt","id":id,"request_id":request_id,"attempt_id":attempt,"result":result}),
+                            self.bus.publisher());
+                    }
+                }
+            }
+            Action::OpenGate(key, resident, anchor) => {
+                conversation::switch(&mut self.data, &key, true, Some(anchor));
+                if resident {
+                    self.data
+                        .saved
+                        .workspace
+                        .open_editor(Pane::Chat(key), false);
+                } else {
+                    self.action(Action::Open(key, false));
                 }
             }
             Action::OpenChat(key, pin) => {

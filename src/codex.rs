@@ -253,13 +253,16 @@ impl Rpc {
                         )?;
                     }
                 }
-                Control::Respond { request_id, result } => {
+                Control::Respond { request_id, result, attempt } => {
                     if !self.pending.remove(&request_id.to_string()) {
+                        self.run.response_progress("response_refused", &request_id, attempt.as_ref(), "request_not_pending")?;
                         self.run.append("control_error", json!({"message":"Request is no longer pending","request_id":request_id}))?;
                     } else {
+                        self.run.response_progress("response_write_started", &request_id, attempt.as_ref(), "writing_to_codex")?;
                         self.write(json!({"id":request_id,"result":result}))?;
-                        self.run
-                            .append("request_answered", json!({"request_id":request_id}))?;
+                        self.run.append("request_answered", json!({
+                            "request_id":request_id,"attempt_id":attempt.as_ref().map(|attempt| &attempt.id)
+                        }))?;
                         if self.pending.is_empty() && self.outcome.is_none() {
                             self.run.status("running", "Input sent to backend")?;
                         }
