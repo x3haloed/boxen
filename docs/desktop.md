@@ -159,6 +159,14 @@ reports that the same session can take a fresh prompt. Late command updates
 remain visible on the run that started the command.
 The GUI does not store credentials, copy model keys, or depend on browser storage.
 
+Thread panes project context measurements from retained runtime events. Codex
+uses its last exchange token count and reported model window. The 85% mark is
+a Boxen warning line. A Codex compaction completion appears as a context row and
+invalidates the earlier gauge until a new sample arrives. Antigravity uses its
+reported session token counts. OpenRouter shows selected bytes against the
+budget available after reservations. Missing samples and incomplete replay show
+an unknown gauge.
+
 ## Verification
 
 ```sh

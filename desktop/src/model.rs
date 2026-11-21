@@ -105,11 +105,60 @@ pub struct ToolDetail {
     pub result: Option<String>,
     pub failed: bool,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextMeasure {
+    Codex { tokens: u64, window: u64 },
+    Antigravity { tokens: u64, window: u64 },
+    Selection { selected: u64, available: u64 },
+}
+impl ContextMeasure {
+    pub fn label(self) -> String {
+        match self {
+            Self::Codex { tokens, window } => {
+                format!("ctx {:.0}%", tokens as f64 * 100.0 / window as f64)
+            }
+            Self::Antigravity { tokens, window } => format!("ctx {tokens} / {window} tok"),
+            Self::Selection {
+                selected,
+                available,
+            } => {
+                format!(
+                    "ctx {:.0}/{:.0} KiB selectable",
+                    selected as f64 / 1024.0,
+                    available as f64 / 1024.0
+                )
+            }
+        }
+    }
+
+    pub fn past_warning_line(self) -> bool {
+        matches!(self, Self::Codex { tokens, window } if u128::from(tokens) * 100 >= u128::from(window) * 85)
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Codex { .. } => {
+                "Codex last reported exchange tokens against its model window. Boxen marks 85% as a warning. Codex controls its own compaction."
+            }
+            Self::Antigravity { .. } => {
+                "Antigravity reported current session tokens and window size."
+            }
+            Self::Selection { .. } => {
+                "Selected history bytes against the space available for selection after reservations."
+            }
+        }
+    }
+}
+fn context_amounts(used: &Value, limit: &Value) -> Option<(u64, u64)> {
+    Some((used.as_u64()?, limit.as_u64().filter(|&n| n != 0)?))
+}
+
 #[derive(Default)]
 pub struct Transcript {
     pub seq: u64,
     pub execution: Option<Value>,
     pub status: Option<Value>,
+    pub context: Option<ContextMeasure>,
     pub rows: Vec<Row>,
     pub rejected_updates: BTreeMap<String, String>,
     positions: BTreeMap<String, usize>,
@@ -158,6 +207,15 @@ impl Transcript {
         }
         let text = |key: &str| data[key].as_str().unwrap_or("").to_owned();
         match kind {
+            "backend_thread" => self.context = None,
+            "backend_usage" if data["backend"] == "antigravity" => {
+                self.context = context_amounts(&data["used"], &data["size"])
+                    .map(|(tokens, window)| ContextMeasure::Antigravity { tokens, window });
+            }
+            "context_budget" => {
+                self.context = context_amounts(&data["selected_bytes"], &data["selection_available_bytes"])
+                    .map(|(selected, available)| ContextMeasure::Selection { selected, available });
+            }
             "activation_input" => self.put(format!("event-{seq}"),"Activation input",text("text"),false),
             "transcript_imported" => {self.imported=true;self.put(format!("event-{seq}"),"Imported history",display(data),false);}
             "inference_message" if self.imported => self.put(format!("event-{seq}"),if data["role"]=="user" {"Imported user"} else {"Imported assistant"},display(&data["content"]),false),
@@ -205,7 +263,18 @@ impl Transcript {
             "backend" => {
                 let method = data["method"].as_str().unwrap_or("");
                 let p = &data["params"];
-                if method == "item/tool/call" && let Some(call) = p["callId"].as_str() {
+                if method == "thread/tokenUsage/updated" {
+                    let usage = &p["tokenUsage"];
+                    self.context = context_amounts(&usage["last"]["totalTokens"], &usage["modelContextWindow"])
+                        .map(|(tokens, window)| ContextMeasure::Codex { tokens, window });
+                } else if matches!(method, "item/started" | "item/completed")
+                    && p["item"]["type"] == "contextCompaction"
+                {
+                    if method == "item/completed" {
+                        self.context = None;
+                        self.put(format!("event-{seq}"), "Context", "Codex reported compaction".into(), false);
+                    }
+                } else if method == "item/tool/call" && let Some(call) = p["callId"].as_str() {
                     self.put(format!("tool-{call}"),"Tool",format!("{}\n{}",display(&p["tool"]),display(&p["arguments"])),false);
                 } else if method == "item/started" || method == "item/completed" {
                     let item = &p["item"];
@@ -308,6 +377,9 @@ impl Transcript {
             | "backend_session_rebuilt"
             | "context_summary_failed"
             | "observation_incident" => {
+                if kind == "backend_session_rebuilt" {
+                    self.context = None;
+                }
                 self.put(format!("event-{seq}"), "Incident", display(data), false)
             }
             _ => {}
@@ -327,6 +399,35 @@ pub fn display(value: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn context_measure_preserves_acp_and_selection_units_and_missing_samples() {
+        let mut transcript = Transcript::default();
+        transcript.apply(&json!({
+            "seq":1,"kind":"backend_usage","data":{"backend":"antigravity","used":38,"size":1000}
+        })).unwrap();
+        assert_eq!(
+            transcript.context,
+            Some(ContextMeasure::Antigravity {
+                tokens: 38,
+                window: 1000
+            })
+        );
+        transcript.apply(&json!({
+            "seq":2,"kind":"backend_usage","data":{"backend":"antigravity","used":null,"size":1000}
+        })).unwrap();
+        assert!(transcript.context.is_none());
+        transcript.apply(&json!({
+            "seq":3,"kind":"context_budget","data":{
+                "configured_bytes":196608,"selected_bytes":75776,"selection_available_bytes":163840
+            }
+        })).unwrap();
+        assert_eq!(
+            transcript.context.unwrap().label(),
+            "ctx 74/160 KiB selectable"
+        );
+        assert!(!transcript.context.unwrap().past_warning_line());
+    }
+
     #[test]
     fn execution_context_replay_preserves_the_observed_account_and_session() {
         let mut transcript = Transcript::default();

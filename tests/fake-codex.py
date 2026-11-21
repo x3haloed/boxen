@@ -95,6 +95,10 @@ def work(prompt):
     notification("item/started", {"item": {"id": "thought", "type": "reasoning", "summary": []}})
     notification("item/reasoning/summaryTextDelta", {"itemId": "thought", "delta": "Checking the remote workspace."})
     notification("item/started", {"item": {"id": "command", "type": "commandExecution", "command": "fixture command", "status": "inProgress"}})
+    if prompt == "SLOW desktop transport proof":
+        notification("thread/tokenUsage/updated", {"tokenUsage": {
+            "last": {"totalTokens": 88}, "total": {"totalTokens": 880},
+            "modelContextWindow": 100}})
     notification("item/commandExecution/outputDelta", {"itemId": "command", "delta": "first output\n"})
     if prompt == "NO_CONVENTIONAL_RESPONSE":
         notification("item/completed", {"item": {"id": "command", "type": "commandExecution",
@@ -309,6 +313,13 @@ def work(prompt):
         if cancel.wait(0.1):
             break
         notification("item/commandExecution/outputDelta", {"itemId": "command", "delta": f"tick {number}\n"})
+    if prompt == "SLOW desktop transport proof":
+        compaction = {"item": {"id": "fixture-compaction", "type": "contextCompaction"}}
+        notification("item/started", compaction)
+        notification("item/completed", compaction)
+        notification("thread/tokenUsage/updated", {"tokenUsage": {
+            "last": {"totalTokens": 22}, "total": {"totalTokens": 902},
+            "modelContextWindow": 100}})
     if "LARGE" in prompt:
         notification("item/commandExecution/outputDelta", {"itemId": "command", "delta": "🐈" * 50000})
     status = "interrupted" if cancel.is_set() else "completed"

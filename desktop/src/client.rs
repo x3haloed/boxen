@@ -651,6 +651,13 @@ mod tests {
                 _ => {}
             }
         }
+        assert_eq!(
+            transcript.context,
+            Some(crate::model::ContextMeasure::Codex {
+                tokens: 88,
+                window: 100
+            })
+        );
         stop.store(true, Ordering::Relaxed);
         let cursor = transcript.seq;
         let replay = Bus::new(egui::Context::default());
@@ -678,6 +685,21 @@ mod tests {
             }
         }
         assert!(transcript.rows.iter().any(|r| r.label == "Thinking"));
+        assert_eq!(
+            transcript.context,
+            Some(crate::model::ContextMeasure::Codex {
+                tokens: 22,
+                window: 100
+            })
+        );
+        assert_eq!(
+            transcript
+                .rows
+                .iter()
+                .filter(|row| row.text == "Codex reported compaction")
+                .count(),
+            1
+        );
         assert!(
             transcript
                 .rows

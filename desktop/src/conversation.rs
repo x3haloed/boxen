@@ -543,12 +543,40 @@ fn markdown(ui: &mut egui::Ui, text: &str) {
         }
     }
 }
+pub fn context_label(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, run: &serde_json::Value) {
+    let Some(id) = run["record"]["spec"]["id"].as_str() else {
+        return;
+    };
+    let tag = crate::client::run_key(&key.peer, id);
+    let connected = !data.errors.contains_key(&key.peer)
+        && data
+            .watches
+            .get(&tag)
+            .is_none_or(|watch| watch.error.is_none());
+    let measure = data.transcripts.get(&tag).and_then(|t| {
+        (connected && t.seq >= run["last_seq"].as_u64().unwrap_or(0))
+            .then_some(t.context)
+            .flatten()
+    });
+    if let Some(measure) = measure {
+        ui.weak(measure.label())
+            .on_hover_text(measure.description());
+        if measure.past_warning_line() {
+            ui.colored_label(egui::Color32::from_rgb(216, 162, 58), "past 85% line")
+                .on_hover_text(measure.description());
+        }
+    } else {
+        ui.weak("ctx unknown");
+    }
+}
+
 pub fn is_message(row: &Row) -> bool {
     matches!(row.label.as_str(), "You" | "You · steering" | "Agent")
 }
 pub fn incident(row: &Row) -> bool {
     row.tool.as_ref().is_some_and(|t| t.failed)
         || row.label == "Incident"
+        || row.label == "Context"
         || row.label == "Backend input requested"
         || row.label == "Status"
             && ["failed", "interrupted", "cancelled"]
@@ -582,6 +610,10 @@ pub fn activity_rows(ui: &mut egui::Ui, rows: &[Row]) {
 }
 pub fn activity_row(ui: &mut egui::Ui, row: &Row) {
     ui.push_id(&row.id, |ui| {
+        if row.label == "Context" {
+            ui.weak(format!("◐ {}", row.text));
+            return;
+        }
         let label = if row.label == "Agent" {
             "Private narration"
         } else {
