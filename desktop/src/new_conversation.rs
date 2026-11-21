@@ -5,7 +5,7 @@ use crate::{
     codex_models::Catalogs,
     conversation,
     model::{Destination, ThreadKey},
-    new_id,
+    new_id, runtimes,
 };
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -118,7 +118,7 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
                 preparation.errors.clear();
             }
         }
-        let model_valid = if data.show_new_thread_settings {
+        if data.show_new_thread_settings {
             ui.add_enabled_ui(editable, |ui| {
                 settings(
                     ui,
@@ -126,24 +126,22 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
                     &data.saved.destinations,
                     &local,
                     &data.codex_models,
+                    &data.runtimes,
                     actions,
                 )
-            })
-            .inner
-        } else {
-            data.codex_models.can_submit(
-                data.saved
-                    .new_thread_settings
-                    .destination(&data.saved.destinations, &local)
-                    .as_ref(),
-                &data.saved.new_thread_settings.backend,
-                &data.saved.new_thread_settings.model,
-            )
-        };
-        let destination = data
-            .saved
-            .new_thread_settings
-            .destination(&data.saved.destinations, &local);
+            });
+        }
+        let settings = &data.saved.new_thread_settings;
+        let destination = settings.destination(&data.saved.destinations, &local);
+        let runtime_valid = destination
+            .as_ref()
+            .is_some_and(|destination| data.runtimes.available(destination, &settings.backend));
+        let model_valid =
+            data.codex_models
+                .can_submit(destination.as_ref(), &settings.backend, &settings.model);
+        if editable && let Some(destination) = &destination {
+            data.runtimes.render_status(ui, destination, actions);
+        }
         if sending {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -155,7 +153,13 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
             ui.label("Queue status is unknown. Retrying uses the same request.");
         } else if destination.is_none() {
             ui.label("Waiting for the selected machine.");
-        } else if !model_valid {
+        } else if !runtime_valid
+            && destination
+                .as_ref()
+                .is_some_and(|d| data.runtimes.catalog(d).is_some())
+        {
+            ui.label("Choose an available runtime in Run settings.");
+        } else if runtime_valid && !model_valid {
             ui.label("Choose an available model in Run settings.");
         }
         let text = &data.saved.new_thread_text;
@@ -165,6 +169,7 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
         let can_start = editable
             && !working
             && destination.is_some()
+            && runtime_valid
             && model_valid
             && text.len() <= MESSAGE_LIMIT
             && (!text.trim().is_empty() || !data.saved.new_thread_files.is_empty());
@@ -225,8 +230,9 @@ fn settings(
     destinations: &[Destination],
     local: &Destination,
     catalogs: &Catalogs,
+    runtimes: &runtimes::Catalogs,
     actions: &mut Vec<Action>,
-) -> bool {
+) {
     let before_machine = settings.machine.clone();
     let before_backend = settings.backend.clone();
     let machine_label = match &settings.machine {
@@ -261,44 +267,56 @@ fn settings(
             ui.end_row();
 
             ui.label("Runtime");
-            let runtime = if settings.backend == "openrouter" {
-                "OpenRouter"
-            } else {
-                "Codex"
-            };
+            let destination = settings.destination(destinations, local);
+            let catalog = destination.as_ref().and_then(|d| runtimes.catalog(d));
+            let available =
+                catalog.is_some_and(|catalog| catalog.available().any(|id| id == settings.backend));
             egui::ComboBox::from_id_salt("runtime")
                 .width(width)
-                .selected_text(runtime)
+                .selected_text(if available {
+                    runtimes::label(&settings.backend)
+                } else {
+                    "Choose runtime"
+                })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut settings.backend, "codex".into(), "Codex");
-                    ui.selectable_value(&mut settings.backend, "openrouter".into(), "OpenRouter");
+                    if let Some(catalog) = catalog {
+                        let mut options = catalog.available().peekable();
+                        if options.peek().is_none() {
+                            ui.label("No runtimes configured");
+                        }
+                        for id in options {
+                            ui.selectable_value(
+                                &mut settings.backend,
+                                id.into(),
+                                runtimes::label(id),
+                            );
+                        }
+                    } else {
+                        ui.label("Runtime catalog unavailable");
+                    }
                 });
             ui.end_row();
 
-            if settings.backend != before_backend
-                || (settings.backend == "codex" && settings.machine != before_machine)
-            {
+            if settings.backend != before_backend || settings.machine != before_machine {
                 settings.model.clear();
             }
             ui.label("Model");
-            let valid = if settings.backend == "codex" {
-                let destination = settings.destination(destinations, local);
+            if !catalog.is_some_and(|catalog| catalog.available().any(|id| id == settings.backend))
+            {
+                ui.add_enabled(false, egui::Label::new("Choose a runtime"));
+            } else if settings.backend == "codex" {
                 ui.vertical(|ui| {
-                    catalogs.picker(ui, width, destination, &mut settings.model, actions)
-                })
-                .inner
+                    catalogs.picker(ui, width, destination, &mut settings.model, actions);
+                });
             } else {
                 ui.add(
                     egui::TextEdit::singleline(&mut settings.model)
                         .desired_width(width)
                         .hint_text("Default model"),
                 );
-                true
-            };
+            }
             ui.end_row();
-            valid
-        })
-        .inner
+        });
 }
 
 impl Desktop {
@@ -313,11 +331,16 @@ impl Desktop {
         ) else {
             return;
         };
-        if !self.data.codex_models.can_submit(
-            Some(&destination),
-            &settings.backend,
-            &settings.model,
-        ) {
+        if !self
+            .data
+            .runtimes
+            .available(&destination, &settings.backend)
+            || !self.data.codex_models.can_submit(
+                Some(&destination),
+                &settings.backend,
+                &settings.model,
+            )
+        {
             return;
         }
         let id = new_id();

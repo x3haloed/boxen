@@ -39,7 +39,7 @@ fn next_run_settings(
     data: &mut Data,
     key: &ThreadKey,
     enabled: bool,
-    codex: bool,
+    backend: &str,
     actions: &mut Vec<Action>,
 ) {
     if ui
@@ -91,17 +91,31 @@ fn next_run_settings(
             } else {
                 settings.cwd = None;
             }
-            if codex && settings.target != before_target {
+            if settings.target != before_target {
                 settings.model = None;
             }
+            let destination =
+                view::destination(data, settings.target.as_deref().unwrap_or(&key.peer));
+            let target_valid =
+                settings.target.is_none() || data.runtimes.available(&destination, backend);
+            if settings.target.is_some() {
+                data.runtimes.render_status(ui, &destination, actions);
+                if !target_valid && data.runtimes.catalog(&destination).is_some() {
+                    ui.label(format!(
+                        "{} is unavailable on this machine.",
+                        crate::runtimes::label(backend)
+                    ));
+                }
+            }
             let mut change_model = settings.model.is_some();
-            ui.checkbox(&mut change_model, "Choose a model");
+            ui.add_enabled(
+                target_valid,
+                egui::Checkbox::new(&mut change_model, "Choose a model"),
+            );
             let model_valid = if !change_model {
                 settings.model = None;
                 true
-            } else if codex {
-                let machine = settings.target.as_deref().unwrap_or(&key.peer);
-                let destination = view::destination(data, machine);
+            } else if backend == "codex" && target_valid {
                 ui.vertical(|ui| {
                     data.codex_models.picker(
                         ui,
@@ -122,7 +136,7 @@ fn next_run_settings(
             ui.horizontal(|ui| {
                 (
                     ui.button("Cancel").clicked(),
-                    ui.add_enabled(model_valid, egui::Button::new("Done"))
+                    ui.add_enabled(target_valid && model_valid, egui::Button::new("Done"))
                         .clicked(),
                 )
             })
@@ -176,6 +190,12 @@ impl Desktop {
             return;
         }
         let dest = view::destination(&self.data, target);
+        let backend = last["record"]["spec"]["backend"]
+            .as_str()
+            .unwrap_or("codex");
+        if !self.data.runtimes.available(&dest, backend) {
+            return;
+        }
         let mut request = json!({"op":"thread_move","id":new_id(),"thread_id":key.id,
             "after":head,"target":dest.key,"address":dest.address});
         if let Some(cwd) = settings.cwd {
@@ -586,7 +606,8 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                     .preparing_followups
                     .values()
                     .any(|target| target == key),
-            last.is_some_and(|run| run["record"]["spec"]["backend"] == "codex"),
+            last.and_then(|run| run["record"]["spec"]["backend"].as_str())
+                .unwrap_or("codex"),
             actions,
         );
         if activity {

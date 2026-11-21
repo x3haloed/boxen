@@ -11,6 +11,7 @@ mod model;
 mod new_conversation;
 #[cfg(test)]
 mod performance;
+mod runtimes;
 mod thread_view;
 mod tool_approvals;
 mod work;
@@ -66,6 +67,7 @@ struct Observing {
 #[derive(Default)]
 struct Data {
     codex_models: codex_models::Catalogs,
+    runtimes: runtimes::Catalogs,
     tool_approvals: tool_approvals::State,
     work: work::State,
     views: HashMap<ThreadKey, conversation::View>,
@@ -96,6 +98,7 @@ struct Data {
 }
 enum Action {
     LoadCodexModels(Destination),
+    LoadRuntimes(Destination),
     NewConversation,
     StartConversation,
     SaveDesktop,
@@ -246,6 +249,7 @@ impl Desktop {
     }
     fn connect(&mut self) {
         self.ready = false;
+        self.data.runtimes.clear();
         for (_, stop) in self.polls.drain() {
             stop.store(true, Ordering::Relaxed)
         }
@@ -423,6 +427,9 @@ impl Desktop {
     fn updates(&mut self) {
         while let Ok(update) = self.bus.rx.try_recv() {
             match update {
+                Update::Runtimes(destination, serial, result) => {
+                    self.data.runtimes.received(destination, serial, result)
+                }
                 Update::CodexModels(machine, result) => {
                     self.data.codex_models.received(machine, result)
                 }
@@ -811,6 +818,7 @@ impl Desktop {
     fn action(&mut self, action: Action) {
         match action {
             Action::LoadCodexModels(destination) => self.load_codex_models(destination),
+            Action::LoadRuntimes(destination) => self.load_runtimes(destination),
             Action::NewConversation => {
                 if !self.data.new_thread_dialog {
                     self.data.new_thread_dialog = true;

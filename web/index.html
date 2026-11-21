@@ -31,7 +31,7 @@
 <form id="createResident">
   <label>Name<input id="residentName" required maxlength="100"></label>
   <label>Resident working directory<input id="residentCwd" placeholder="/absolute/path/on/that/machine" required></label>
-  <label>Resident backend<select id="residentBackend"><option value="codex">Codex app-server</option><option value="openrouter">OpenRouter · built-in runtime</option></select></label>
+  <label>Resident backend<select id="residentBackend"></select></label>
   <label>Built-in context policy<select id="residentContext"><option value="summary">Summary compaction</option><option value="verbatim">Verbatim continuity</option></select></label>
   <label>Resident model<input id="residentModel" placeholder="Executing machine’s configured default" hidden><select id="residentModelChoice" aria-label="Resident model"><option value="">Default model</option></select></label>
   <label>Initial identity<textarea id="residentIdentity" rows="3"></textarea></label>
@@ -56,7 +56,7 @@
 </details>
 <form id="work">
   <label>Working directory on executing machine<input id="cwd" placeholder="/absolute/path/on/that/machine" required></label>
-  <label>Backend<select id="backend"><option value="codex">Codex app-server</option><option value="openrouter">OpenRouter · built-in runtime</option></select></label>
+  <label>Backend<select id="backend"></select></label>
   <label>Built-in context policy<select id="contextPolicy"><option value="summary">Summary compaction</option><option value="verbatim">Verbatim continuity</option></select></label>
   <label>Model<input id="model" placeholder="Executing machine’s configured default" hidden><select id="modelChoice" aria-label="Model"><option value="">Default model</option></select></label>
   <p class="meta">Full access · files and tools belong to the executing machine.</p>
@@ -100,8 +100,8 @@
 <script>
 const $ = id => document.getElementById(id);
 $('residentContext').value='verbatim';
-$('backend').onchange=()=>{$('model').value='';controls();};
-$('residentBackend').onchange=()=>{$('residentModel').value='';controls();};
+$('backend').onchange=()=>{threadRuntime=$('backend').value;$('model').value='';controls();};
+$('residentBackend').onchange=()=>{residentRuntime=$('residentBackend').value;$('residentModel').value='';controls();};
 const token = location.hash.slice(1);
 if (token) { sessionStorage.setItem('boxen-token', token); history.replaceState(null, '', '/'); }
 const headers = {Authorization: 'Bearer ' + (token || sessionStorage.getItem('boxen-token') || ''), 'Content-Type':'application/json'};
@@ -116,7 +116,7 @@ let residents=[], editorRevision=0, residentBusy=false;
 let pendingResident;try{pendingResident=JSON.parse(localStorage.getItem('boxen-pending-resident')||'null');}catch{}
 let editingSchedule=null, pendingSchedule=null, scheduleBusy=false;
 let pendingStart = null, syncing = false, observing = false;
-let codexCatalog;
+let codexCatalog, runtimeCatalog, threadRuntime='codex', residentRuntime='codex';
 for(const field of ['model','residentModel']){
   $(field+'Choice').onchange=()=>{$(field).value=$(field+'Choice').value;controls();};
 }
@@ -134,6 +134,33 @@ async function operation(request, destination=target) {
   unauthorized(response);
   if (!response.ok) {const error=new Error(await response.text());error.definitive=response.status===422;throw error;}
   return response.json();
+}
+function loadRuntimes() {
+  if(!connected||!target||runtimeCatalog)return;
+  const lookup=runtimeCatalog={};
+  operation({op:'runtime_info'},target).then(
+    result=>{if(runtimeCatalog===lookup){lookup.backends=result.backends;controls();}},
+    ()=>{if(runtimeCatalog===lookup){lookup.unavailable=true;controls();}}
+  );
+}
+const runtimeLabel=id=>new Map([['codex','Codex'],['openrouter','OpenRouter'],['antigravity','Antigravity']]).get(id)||id;
+function runtimeAvailable(id, resident=false) {
+  return runtimeCatalog?.backends?.some(runtime=>runtime.id===id&&runtime.configured&&(!resident||runtime.resident));
+}
+function syncRuntimePicker(field, selected, pinned, disabled, resident=false) {
+  const picker=$(field);
+  const choices=pinned?[pinned]:(runtimeCatalog?.backends||[]).filter(runtime=>runtimeAvailable(runtime.id,resident)).map(runtime=>runtime.id);
+  const status=!connected?'Connect to load runtimes':runtimeCatalog?.unavailable?'Runtime list unavailable. Reconnect to retry.'
+    :!runtimeCatalog?.backends?'Loading runtimes…':choices.length?'Choose a runtime':'No runtimes configured';
+  const renderKey=JSON.stringify([choices,pinned,status]);
+  if(picker.dataset.options!==renderKey){
+    picker.dataset.options=renderKey;
+    const placeholder=new Option(status,'');
+    placeholder.disabled=true;
+    picker.replaceChildren(...(pinned?[]:[placeholder]),...choices.map(runtime=>new Option(runtimeLabel(runtime),runtime)));
+  }
+  picker.value=choices.includes(pinned||selected)?pinned||selected:'';
+  picker.disabled=disabled||!!pinned||!choices.length;
 }
 function syncModelPicker(field, backend, disabled) {
   const input=$(field), picker=$(field+'Choice'), codex=backend==='codex';
@@ -176,6 +203,10 @@ function controls() {
   const resident=residents.find(r=>r.id===selectedThread);
   const pendingMail=target?pendingMails[mailKey(target,selectedThread)]:null;
   const submissionPending=!resident&&!!pendingStart;
+  loadRuntimes();
+  const pinned=resident?.backend||pendingStart?.backend||records.find(r=>r.record.spec.thread_id===selectedThread)?.record.spec.backend;
+  syncRuntimePicker('backend',threadRuntime,pinned,!connected||syncing||submitting||!!selectedThread);
+  syncRuntimePicker('residentBackend',residentRuntime,pendingResident?.spec.backend,!connected||residentBusy||!!pendingResident,true);
   $('send').textContent = active ? 'Send to active run' : selectedThread ? 'Send follow-up' : 'Start thread';
   if(resident)$('send').textContent='Send message to '+resident.name;
   if(pendingMail?.resident===selectedThread)$('send').textContent='Retry original message';
@@ -183,13 +214,12 @@ function controls() {
   $('activateResident').disabled=!connected||syncing||submitting||!!active;
   $('autoActivate').disabled=!connected||syncing||residentBusy;
   if(resident)$('autoActivate').checked=resident.auto_activate;
-  $('send').disabled = !connected || syncing || submitting || residentBusy;
+  $('send').disabled = !connected || syncing || submitting || residentBusy || (!selectedThread&&!pendingStart&&!runtimeAvailable(threadRuntime));
   $('contextPolicy').disabled=!!resident||!!active||!!pendingStart||$('backend').value!=='openrouter';
-  $('backend').disabled=!!selectedThread||!!pendingStart;
-  if(resident){$('backend').value=resident.backend||'codex';$('contextPolicy').value=resident.context?.mode||'verbatim';}
-  $('createResidentButton').disabled=!connected||residentBusy||submitting;
+  if(resident)$('contextPolicy').value=resident.context?.mode||'verbatim';
+  $('createResidentButton').disabled=!connected||residentBusy||submitting||(!pendingResident&&!runtimeAvailable(residentRuntime,true));
   $('createResidentButton').textContent=pendingResident?'Retry original resident creation':'Create resident';
-  for(const input of $('createResident').querySelectorAll('input,textarea,select'))input.disabled=residentBusy||!!pendingResident;
+  for(const input of $('createResident').querySelectorAll('input,textarea,select'))if(input!==$('residentBackend'))input.disabled=residentBusy||!!pendingResident;
   for(const input of $('editResident').querySelectorAll('input,textarea,select,button'))input.disabled=!connected||syncing||residentBusy;
   $('residentContext').disabled=residentBusy||!!pendingResident||$('residentBackend').value!=='openrouter';
   $('editContext').disabled=!connected||syncing||residentBusy||resident?.backend!=='openrouter';
@@ -455,7 +485,7 @@ async function showThread(thread, refresh=false) {
       const resident=residents.find(r=>r.id===selectedThread);
       if(resident){$('cwd').value=resident.cwd;$('model').value=resident.model;}
       if(related.length){
-        $('backend').value=related[0].record.spec.backend;$('cwd').value=related[0].record.spec.cwd;
+        $('cwd').value=related[0].record.spec.cwd;
         const latest=related.at(-1).record.spec;
         if(modelSource!==latest.id&&!pendingStart){$('model').value=latest.model;modelSource=latest.id;}
       }
@@ -479,7 +509,12 @@ async function showThread(thread, refresh=false) {
   }
 }
 async function connect() {
-  detach();codexCatalog=undefined;const gen=generation;target={peer:$('peer').value,address:$('address').value};const destination={...target};
+  const previous=target;
+  target={peer:$('peer').value,address:$('address').value};
+  if(previous&&(previous.peer!==target.peer||previous.address!==target.address)){
+    $('model').value='';$('residentModel').value='';
+  }
+  connected=false;codexCatalog=runtimeCatalog=undefined;detach();const gen=generation;const destination={...target};
   observing=true;save();$('connection').textContent='Connecting…';connected=false;syncing=true;controls();let attempt=0;
   while(gen===generation){
     try {
@@ -499,9 +534,10 @@ $('threads').onchange=()=>{
   $('model').value='';
   showThread($('threads').value,true);
 };
-$('peer').onchange=()=>{codexCatalog=undefined;$('model').value='';$('residentModel').value='';$('observationStatus').textContent='';editingSchedule=null;pendingSchedule=null;$('scheduleList').replaceChildren();$('saveSchedule').textContent='Create schedule';detach();connected=false;selectedThread='';currentRun=null;pendingStart=null;records=[];residents=[];mailMessages.clear();$('messagesView').hidden=true;$('mailMessages').replaceChildren();updateThreads();$('transcript').replaceChildren();$('residentDetails').hidden=true;target={peer:$('peer').value,address:$('address').value};$('addressLabel').hidden=$('peer').value===identity;controls();};
+$('peer').onchange=()=>{connected=false;codexCatalog=runtimeCatalog=undefined;$('model').value='';$('residentModel').value='';$('observationStatus').textContent='';editingSchedule=null;pendingSchedule=null;$('scheduleList').replaceChildren();$('saveSchedule').textContent='Create schedule';detach();selectedThread='';currentRun=null;pendingStart=null;records=[];residents=[];mailMessages.clear();$('messagesView').hidden=true;$('mailMessages').replaceChildren();updateThreads();$('transcript').replaceChildren();$('residentDetails').hidden=true;target={peer:$('peer').value,address:$('address').value};$('addressLabel').hidden=$('peer').value===identity;controls();};
 $('work').onsubmit=async event=>{
   event.preventDefault();if(!connected||syncing)return;
+  if(!selectedThread&&!pendingStart&&!runtimeAvailable(threadRuntime))return;
   const gen=generation,destination={...target};
   const resident=residents.find(r=>r.id===selectedThread);
   const steering=!resident&&currentRun&&!terminal(currentRun.status);
@@ -529,6 +565,7 @@ $('work').onsubmit=async event=>{
 };
 $('createResident').onsubmit=async event=>{
   event.preventDefault();if(!connected||residentBusy)return;
+  if(!pendingResident&&!runtimeAvailable(residentRuntime,true))return;
   residentBusy=true;controls();const destination={...target},gen=generation;
   try {
     if(pendingResident&&pendingResident.target.peer!==destination.peer)throw new Error('A resident creation is unconfirmed on another machine. Reconnect there to retry its original ID.');

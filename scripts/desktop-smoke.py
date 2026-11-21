@@ -4,7 +4,7 @@
 --interactive leaves them up until Ctrl-C; the printed launch command contains no capability.
 """
 import argparse
-from smoke_helpers import fake_codex
+from smoke_helpers import fake_codex, python_launcher
 import json
 import os
 import pathlib
@@ -42,7 +42,12 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
     try:
         tokens=[]
         for i in range(2):
-            process=subprocess.Popen(command+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{ports[i]}','--ui',f'127.0.0.1:{controls[i]}','--codex',str(fake_codex())],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,env=os.environ|{'BOXEN_FIXTURE_MODEL_MACHINE':('local','remote')[i]})
+            runtime_flags = ['--codex', str(fake_codex())]
+            if i == 1:
+                runtime_flags += ['--antigravity', str(python_launcher('fake-antigravity.py'))]
+            env = {key: value for key, value in os.environ.items() if key != 'BOXEN_ANTIGRAVITY'}
+            env['BOXEN_FIXTURE_MODEL_MACHINE'] = ('local', 'remote')[i]
+            process=subprocess.Popen(command+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{ports[i]}','--ui',f'127.0.0.1:{controls[i]}',*runtime_flags],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,env=env)
             processes.append(process)
             lines=[process.stdout.readline() for _ in range(3)]
             assert 'Local controls:' in lines[-1]

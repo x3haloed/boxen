@@ -36,6 +36,7 @@ pub struct SubmitError {
 }
 
 pub enum Update {
+    Runtimes(Destination, u64, Result<crate::runtimes::Catalog, String>),
     CodexModels(String, Result<crate::codex_models::Catalog, String>),
     ToolApprovals(String, Result<Value, String>),
     Mail(crate::correspondence::MailUpdate),
@@ -82,6 +83,15 @@ impl Publisher {
     }
 }
 impl Client {
+    pub fn runtimes(&self, destination: Destination, serial: u64, publisher: Publisher) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            let result = client
+                .operation(&destination, json!({"op":"runtime_info"}))
+                .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()));
+            publisher.send(Update::Runtimes(destination, serial, result));
+        });
+    }
     pub fn codex_models(&self, destination: Destination, publisher: Publisher) {
         let client = self.clone();
         std::thread::spawn(move || {
@@ -528,6 +538,27 @@ mod tests {
             assert_eq!(catalog.models.len(), 2);
             assert_eq!(catalog.models[0].model, format!("{prefix}-primary"));
             assert_eq!(catalog.models[1].model, format!("{prefix}-secondary"));
+        }
+        client.runtimes(local.clone(), 1, models.publisher());
+        client.runtimes(dest.clone(), 2, models.publisher());
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..2 {
+            let Update::Runtimes(machine, serial, result) =
+                models.rx.recv_timeout(Duration::from_secs(12)).unwrap()
+            else {
+                panic!("Expected a host runtime catalog");
+            };
+            assert!(seen.insert(machine.key.clone()));
+            let catalog = result.unwrap();
+            let configured = catalog.available().collect::<Vec<_>>();
+            if machine.key == local.key {
+                assert_eq!(serial, 1);
+                assert_eq!(configured, ["codex"]);
+            } else {
+                assert_eq!(machine.key, dest.key);
+                assert_eq!(serial, 2);
+                assert_eq!(configured, ["codex", "antigravity"]);
+            }
         }
         let id = crate::new_id();
         let spec = json!({"id":id,"thread_id":id,"backend":"codex","cwd":home,"model":"remote-secondary","reasoning_effort":"low","prompt":"SLOW desktop transport proof"});

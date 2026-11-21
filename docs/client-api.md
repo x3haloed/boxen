@@ -50,6 +50,8 @@ Control acceptance means delivery to the runtime control queue, not confirmed ex
 `activation_capabilities`, alongside the host's runtime configuration. These
 describe operations the selected integration supports. Credentials, a concrete
 session, and model access still have their own runtime availability.
+Boxen's browser control page uses the selected machine's configured entries
+for both thread and resident runtime selectors.
 
 `{"op":"runtime_info","run_id":"RUN_ID"}` returns the admitted request's
 model, reasoning effort, required capabilities, and the selected backend's
