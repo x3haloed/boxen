@@ -2,9 +2,9 @@ use crate::{
     Action, Data, Desktop,
     attachments::{self, Target},
     client::{self, Pending},
-    codex_models::Catalogs,
     conversation,
     model::{Destination, ThreadKey},
+    model_catalogs::{Catalogs, Runtime},
     new_id, runtimes,
 };
 use eframe::egui;
@@ -125,7 +125,7 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
                     &mut data.saved.new_thread_settings,
                     &data.saved.destinations,
                     &local,
-                    &data.codex_models,
+                    &data.model_catalogs,
                     &data.runtimes,
                     actions,
                 )
@@ -136,9 +136,11 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
         let runtime_valid = destination
             .as_ref()
             .is_some_and(|destination| data.runtimes.available(destination, &settings.backend));
-        let model_valid =
-            data.codex_models
-                .can_submit(destination.as_ref(), &settings.backend, &settings.model);
+        let model_valid = data.model_catalogs.can_submit(
+            destination.as_ref(),
+            &settings.backend,
+            &settings.model,
+        );
         if editable && let Some(destination) = &destination {
             data.runtimes.render_status(ui, destination, actions);
         }
@@ -304,9 +306,16 @@ fn settings(
             if !catalog.is_some_and(|catalog| catalog.available().any(|id| id == settings.backend))
             {
                 ui.add_enabled(false, egui::Label::new("Choose a runtime"));
-            } else if settings.backend == "codex" {
+            } else if let Some(runtime) = Runtime::for_backend(&settings.backend) {
                 ui.vertical(|ui| {
-                    catalogs.picker(ui, width, destination, &mut settings.model, actions);
+                    catalogs.picker(
+                        ui,
+                        width,
+                        runtime,
+                        destination,
+                        &mut settings.model,
+                        actions,
+                    );
                 });
             } else {
                 ui.add(
@@ -335,7 +344,7 @@ impl Desktop {
             .data
             .runtimes
             .available(&destination, &settings.backend)
-            || !self.data.codex_models.can_submit(
+            || !self.data.model_catalogs.can_submit(
                 Some(&destination),
                 &settings.backend,
                 &settings.model,

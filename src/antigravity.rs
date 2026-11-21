@@ -3,7 +3,7 @@ use crate::{
     Result,
     acp_form::Form,
     jobs::{Control, History, Jobs, Run, RunOutcome, Spec},
-    logging::Level,
+    logging::{self, Context, Level, Target},
     resident_bridge::Bridge,
     runtime::OutstandingWork,
 };
@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     io::{BufRead, BufReader, Read, Write},
+    path::Path,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, mpsc},
     time::{Duration, Instant},
@@ -20,9 +21,35 @@ const MAX_LINE: u64 = 4 * 1024 * 1024;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(Clone)]
+enum Scope {
+    Run(Arc<Run>),
+    Catalog(String),
+}
+
+impl Scope {
+    fn diagnostic(&self, level: Level, event: &str, fields: impl FnOnce() -> Value) {
+        match self {
+            Self::Run(run) => run.diagnostic(level, event, fields, || Value::Null),
+            Self::Catalog(owner) => logging::record(
+                level,
+                Target::Runtime,
+                event,
+                Context::peer(owner),
+                fields,
+                || Value::Null,
+            ),
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        matches!(self, Self::Run(run) if run.cancellation_requested())
+    }
+}
+
 struct Process {
     child: Child,
-    run: Arc<Run>,
+    scope: Scope,
 }
 
 impl Drop for Process {
@@ -34,11 +61,10 @@ impl Drop for Process {
         }
         let _ = self.child.kill();
         let exit = self.child.wait();
-        self.run.diagnostic(
+        self.scope.diagnostic(
             Level::Info,
             "antigravity.process_stopped",
             || json!({"pid":self.child.id(),"exit":exit.ok().and_then(|status|status.code())}),
-            || Value::Null,
         );
     }
 }
@@ -47,37 +73,39 @@ struct Rpc {
     input: ChildStdin,
     output: mpsc::Receiver<Result<Value>>,
     next: u64,
-    run: Arc<Run>,
+    scope: Scope,
 }
 
 impl Rpc {
-    fn launch(binary: &str, spec: &Spec, run: Arc<Run>) -> Result<(Process, Self)> {
-        let execution = run.snapshot().record.execution;
-        let mut command = execution
-            .as_ref()
-            .map_or_else(|| Command::new(binary), |e| e.command(binary));
+    fn launch(mut command: Command, cwd: &Path, scope: Scope) -> Result<(Process, Self)> {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        run.diagnostic(
+        scope.diagnostic(
             Level::Info,
             "antigravity.process_starting",
-            || json!({"cwd":spec.cwd}),
-            || Value::Null,
+            || json!({"cwd":cwd}),
         );
         let child = command
             .args(["acp", "--process-per-session", "--disable-telemetry"])
-            .current_dir(&spec.cwd)
+            .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| format!("Cannot start Antigravity: {error}"))?;
+            .map_err(|error| {
+                scope.diagnostic(
+                    Level::Warn,
+                    "antigravity.process_start_failed",
+                    || json!({"error_kind":format!("{:?}",error.kind())}),
+                );
+                format!("Cannot start Antigravity: {error}")
+            })?;
         let mut process = Process {
             child,
-            run: run.clone(),
+            scope: scope.clone(),
         };
         let input = process
             .child
@@ -121,11 +149,10 @@ impl Rpc {
                 }
             }
         });
-        run.diagnostic(
+        scope.diagnostic(
             Level::Info,
             "antigravity.process_started",
             || json!({"pid":process.child.id()}),
-            || Value::Null,
         );
         Ok((
             process,
@@ -133,7 +160,7 @@ impl Rpc {
                 input,
                 output: output_rx,
                 next: 1,
-                run,
+                scope,
             },
         ))
     }
@@ -143,11 +170,10 @@ impl Rpc {
         self.input.write_all(b"\n")?;
         self.input.flush()?;
         // ACP setup frames may contain the MCP capability, including in header values.
-        self.run.diagnostic(
+        self.scope.diagnostic(
             Level::Trace,
             "antigravity.rpc_sent",
             || json!({"method":message["method"],"id":message["id"]}),
-            || Value::Null,
         );
         Ok(())
     }
@@ -175,9 +201,8 @@ impl Rpc {
         match self.output.recv_timeout(Duration::from_millis(25)) {
             Ok(item) => {
                 let message = item?;
-                self.run.diagnostic(Level::Trace, "antigravity.rpc_received",
-                    || json!({"method":message["method"],"id":message["id"],"error_code":message["error"]["code"]}),
-                    || Value::Null);
+                self.scope.diagnostic(Level::Trace, "antigravity.rpc_received",
+                    || json!({"method":message["method"],"id":message["id"],"error_code":message["error"]["code"]}));
                 Ok(Some(message))
             }
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
@@ -188,10 +213,13 @@ impl Rpc {
     }
 
     fn setup(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.setup_until(method, params, Instant::now() + SETUP_TIMEOUT)
+    }
+
+    fn setup_until(&mut self, method: &str, params: Value, deadline: Instant) -> Result<Value> {
         let id = self.call(method, params)?;
-        let deadline = Instant::now() + SETUP_TIMEOUT;
         while Instant::now() < deadline {
-            if self.run.cancellation_requested() {
+            if self.scope.cancelled() {
                 return Err("Cancellation requested before the Antigravity prompt".into());
             }
             if let Some(message) = self.receive()? {
@@ -206,6 +234,30 @@ impl Rpc {
             }
         }
         Err(format!("Antigravity {method} did not respond before the setup deadline").into())
+    }
+
+    fn initialize(&mut self, deadline: Instant) -> Result<Value> {
+        let reply = self.setup_until("initialize", json!({"protocolVersion":1,
+            "clientInfo":{"name":"boxen","title":"Boxen","version":env!("CARGO_PKG_VERSION")},
+            "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,
+                "elicitation":{"form":{}}}}), deadline)?;
+        let init = result(&reply, "initialize")?;
+        let capabilities = &init["agentCapabilities"];
+        if init["protocolVersion"] != 1 || capabilities["mcpCapabilities"]["http"] != true {
+            return Err("Antigravity requires ACP v1 with HTTP MCP support".into());
+        }
+        let version = init["agentInfo"]["version"].as_str().unwrap_or("");
+        let mut parts = version.split(['.', '-']).map(str::parse::<u32>);
+        let supported = match (parts.next(), parts.next(), parts.next()) {
+            (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch))) => {
+                (major, minor, patch) >= (1, 5, 1)
+            }
+            _ => false,
+        };
+        if !supported {
+            return Err("Antigravity 1.5.1 or later is required for native prompt steering".into());
+        }
+        Ok(capabilities.clone())
     }
 }
 
@@ -247,6 +299,68 @@ fn offered(options: &Value, value: &str) -> bool {
             .iter()
             .any(|entry| entry["value"] == value || offered(&entry["options"], value))
     })
+}
+
+fn collect_models(
+    options: &Value,
+    models: &mut Vec<Value>,
+    seen: &mut HashSet<String>,
+) -> Result<()> {
+    for entry in options
+        .as_array()
+        .ok_or("Antigravity returned an invalid model list")?
+    {
+        if let Some(group) = entry.get("options") {
+            collect_models(group, models, seen)?;
+            continue;
+        }
+        let id = entry["value"]
+            .as_str()
+            .filter(|id| !id.trim().is_empty() && id.len() <= 256)
+            .ok_or("Antigravity returned an invalid model ID")?;
+        if seen.insert(id.to_owned()) {
+            if models.len() >= 800 {
+                return Err("Antigravity model list exceeds its size bound".into());
+            }
+            let label = entry["name"]
+                .as_str()
+                .filter(|label| !label.trim().is_empty() && label.len() <= 256)
+                .unwrap_or(id);
+            models.push(json!({"model":id,"label":label}));
+        }
+    }
+    Ok(())
+}
+
+pub fn models(command: Command, cwd: &Path, owner: &str) -> Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let (_process, mut rpc) = Rpc::launch(command, cwd, Scope::Catalog(owner.into()))?;
+    let capabilities = rpc.initialize(deadline)?;
+    let reply = rpc.setup_until("session/new", json!({"cwd":cwd,"mcpServers":[]}), deadline)?;
+    let session = result(&reply, "session/new")?;
+    let id = session["sessionId"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 256)
+        .ok_or("Antigravity returned an invalid catalog session ID")?;
+    if !capabilities["sessionCapabilities"]["close"].is_null() {
+        let close = rpc
+            .setup_until("session/close", json!({"sessionId":id}), deadline)
+            .and_then(|reply| result(&reply, "session/close").map(|_| ()));
+        rpc.scope.diagnostic(
+            if close.is_ok() {
+                Level::Debug
+            } else {
+                Level::Warn
+            },
+            "antigravity.catalog_session_close",
+            || json!({"session_id":id,"confirmed":close.is_ok()}),
+        );
+    }
+    let mut models = Vec::new();
+    let model = config(&session["configOptions"], "model")
+        .ok_or("Antigravity catalog session has no model selector")?;
+    collect_models(&model["options"], &mut models, &mut HashSet::new())?;
+    Ok(json!({"models":models}))
 }
 
 fn select(rpc: &mut Rpc, session: &str, options: &mut Value, key: &str, value: &str) -> Result<()> {
@@ -698,28 +812,13 @@ pub fn execute(
         Some(resident) => Bridge::start(jobs.clone(), run.clone(), resident.clone())?,
         None => Bridge::start_work(jobs.clone(), run.clone())?,
     };
-    let (_process, mut rpc) = Rpc::launch(binary, spec, run.clone())?;
+    let command = record.execution.as_ref().map_or_else(
+        || Command::new(binary),
+        |execution| execution.command(binary),
+    );
+    let (_process, mut rpc) = Rpc::launch(command, Path::new(&spec.cwd), Scope::Run(run.clone()))?;
     let prepared = (|| -> Result<(String, Value, Option<String>)> {
-        let init = rpc.setup("initialize",json!({"protocolVersion":1,
-            "clientInfo":{"name":"boxen","title":"Boxen","version":env!("CARGO_PKG_VERSION")},
-            "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,
-                "elicitation":{"form":{}}}}))?;
-        let init = result(&init, "initialize")?;
-        let capabilities = &init["agentCapabilities"];
-        if init["protocolVersion"] != 1 || capabilities["mcpCapabilities"]["http"] != true {
-            return Err("Antigravity requires ACP v1 with HTTP MCP support".into());
-        }
-        let version = init["agentInfo"]["version"].as_str().unwrap_or("");
-        let mut parts = version.split(['.', '-']).map(str::parse::<u32>);
-        let supported = match (parts.next(), parts.next(), parts.next()) {
-            (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch))) => {
-                (major, minor, patch) >= (1, 5, 1)
-            }
-            _ => false,
-        };
-        if !supported {
-            return Err("Antigravity 1.5.1 or later is required for native prompt steering".into());
-        }
+        let capabilities = rpc.initialize(Instant::now() + SETUP_TIMEOUT)?;
         let mut setup = json!({"cwd":spec.cwd,"mcpServers":[bridge.acp_config()]});
         let mut rebuild = history.rebuild_reason.clone();
         let mut native_id = None;

@@ -107,6 +107,14 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
 
         runtime = lambda **kw: next(b for b in api({'op': 'runtime_info'}, **kw)['backends'] if b['id'] == 'antigravity')
         assert runtime()['configured'] and not runtime(local=True)['configured']
+        expected_models = {'models': [{'model': name, 'label': name}
+                                      for name in ('fixture-default', 'fixture-model')]}
+        assert api({'op': 'antigravity_models'}) == expected_models
+        assert api({'op': 'antigravity_models'}) == expected_models
+        assert (paths[1] / 'antigravity-model-catalog' / 'catalog-opened').read_text() == 'open\n'
+        assert (paths[1] / 'antigravity-model-catalog' / 'catalog-closed').read_text() == 'close\n'
+        assert api({'op': 'list'}) == []
+        print('PASS authenticated Antigravity catalog, grouped models, native close, cache and no accepted run')
         request_id = uid()
         assert 'late_activity' in runtime()['request_capabilities']
         assert 'live_steering' not in runtime()['activation_capabilities']
@@ -186,6 +194,17 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
         assert any(e['kind'] == 'request_declined' and e['data']['request_id'] == 42 for e in events)
         assert not any(e['kind'] == 'input_requested' for e in events)
         print('PASS Antigravity ACP forms, exact IDs, invalid answers, decline and native cancellation')
+
+        chosen = start('initial model', model=expected_models['models'][0]['model'])
+        _, initial = collect(chosen['id'])
+        model_change = dict(chosen, id=uid(), prompt='changed model for this follow-up',
+                            model=expected_models['models'][1]['model'])
+        api({'op': 'start', 'spec': model_change, 'after': chosen['id']})
+        _, changed = collect(model_change['id'])
+        assert changed['status'] == 'completed' and changed['backend_thread'] == initial['backend_thread']
+        assert api({'op': 'runtime_info', 'run_id': chosen['id']})['observed']['session']['model'] == 'fixture-default'
+        assert api({'op': 'runtime_info', 'run_id': model_change['id']})['observed']['session']['model'] == 'fixture-model'
+        print('PASS an offered Antigravity model change on a resumed idle thread')
 
         for action in ('steer', 'cancel'):
             active = start('WAIT')

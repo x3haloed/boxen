@@ -27,7 +27,7 @@ pub enum Mode {
     UserSession,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Execution {
     pub platform: String,
     pub mode: Mode,

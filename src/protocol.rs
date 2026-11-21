@@ -456,6 +456,7 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 None => Ok(jobs.runtime_info()),
             },
             "codex_models" => jobs.codex_models(owner),
+            "antigravity_models" => jobs.antigravity_models(owner),
             "messaging" => crate::messaging::operation(
                 jobs,
                 owner,

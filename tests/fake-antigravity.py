@@ -56,10 +56,18 @@ for line in sys.stdin:
         assert params['clientInfo']['name'] == 'boxen'
         assert params['clientCapabilities']['elicitation'] == {'form': {}}
         send(id=ident, result={'protocolVersion': 1, 'agentInfo': {'version': '1.5.13'},
-             'agentCapabilities': {'sessionCapabilities': {'resume': {}}, 'mcpCapabilities': {'http': True}}})
+             'agentCapabilities': {'sessionCapabilities': {'resume': {}, 'close': {}}, 'mcpCapabilities': {'http': True}}})
     elif method in ('session/new', 'session/resume'):
-        mcp, = params['mcpServers']
         assert pathlib.Path(params['cwd']).resolve() == pathlib.Path.cwd().resolve()
+        if not params['mcpServers']:
+            assert method == 'session/new' and pathlib.Path.cwd().name == 'antigravity-model-catalog'
+            with open('catalog-opened', 'a') as marker:
+                marker.write('open\n')
+            group = {'group': 'fixture', 'name': 'Fixture models', 'options': opts[0]['options']}
+            send(id=ident, result={'sessionId': 'fixture-catalog',
+                 'configOptions': [{**opts[0], 'options': [group]}, opts[1]]})
+            continue
+        mcp, = params['mcpServers']
         if method == 'session/resume' and (not state.exists() or state.read_text() != params['sessionId']):
             send(id=ident, error={'code': -32602, 'message': 'Unknown session'})
             continue
@@ -75,7 +83,13 @@ for line in sys.stdin:
         option = next(option for option in opts if option['id'] == params['configId'])
         option['currentValue'] = params['value']
         send(id=ident, result={'configOptions': opts})
+    elif method == 'session/close':
+        assert params == {'sessionId': 'fixture-catalog'} and mcp is None
+        with open('catalog-closed', 'a') as marker:
+            marker.write('close\n')
+        send(id=ident, result={})
     elif method == 'session/prompt':
+        assert mcp is not None
         prompt, *additional = [part['text'] for part in params['prompt']]
         if prompt == 'DROP_TRANSPORT':
             sys.exit(0)

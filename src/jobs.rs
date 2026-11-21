@@ -16,7 +16,7 @@ use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, mpsc},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[path = "inference_health.rs"]
@@ -1347,6 +1347,7 @@ pub struct Jobs {
     codex_path: String,
     codex_catalog: Mutex<()>,
     antigravity_path: Option<String>,
+    antigravity_catalog: Mutex<Option<(crate::execution::Execution, Instant, Value)>>,
     pub inference: crate::inference::Config,
     _lock: File,
     pub residents: Arc<Residents>,
@@ -1983,6 +1984,57 @@ impl Jobs {
         );
         result
     }
+
+    pub fn antigravity_models(&self, owner: &str) -> Result<Value> {
+        let result = (|| -> Result<Value> {
+            let binary = self
+                .antigravity_path
+                .as_ref()
+                .ok_or("Antigravity is unavailable on the executing machine")?;
+            let mut cached = self
+                .antigravity_catalog
+                .try_lock()
+                .map_err(|_| "An Antigravity model lookup is already running on this machine")?;
+            let home = self.runtime_home().ok_or("run directory has no home")?;
+            let execution = crate::execution::Execution::capture(home)?;
+            if execution.desktop_available == Some(false)
+                && execution.mode == crate::execution::Mode::UserSession
+            {
+                return Err("Antigravity model lookup becomes available when the configured account has a macOS login session".into());
+            }
+            if let Some((account, fetched, catalog)) = &*cached
+                && *account == execution
+                && fetched.elapsed() < Duration::from_secs(60)
+            {
+                return Ok(catalog.clone());
+            }
+            let cwd = home.canonicalize()?.join("antigravity-model-catalog");
+            if fs::symlink_metadata(&cwd).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err("Antigravity model catalog directory cannot be a symbolic link".into());
+            }
+            state::private_dir(&cwd)?;
+            execution.own_managed_path(&cwd)?;
+            let catalog = crate::antigravity::models(execution.command(binary), &cwd, owner)?;
+            *cached = Some((execution, Instant::now(), catalog.clone()));
+            Ok(catalog)
+        })();
+        logging::record(
+            if result.is_ok() {
+                Level::Debug
+            } else {
+                Level::Warn
+            },
+            Target::Runtime,
+            "antigravity_models.lookup",
+            Context::peer(owner),
+            || {
+                json!({"accepted":result.is_ok(),
+                "count":result.as_ref().ok().and_then(|v| v["models"].as_array()).map(Vec::len)})
+            },
+            || Value::Null,
+        );
+        result
+    }
     fn describe_backend(&self, backend: Backend) -> Value {
         backend.describe(match backend {
             Backend::Codex => true,
@@ -2136,6 +2188,7 @@ impl Jobs {
             codex_path,
             codex_catalog: Mutex::new(()),
             antigravity_path,
+            antigravity_catalog: Mutex::new(None),
             inference,
             _lock: lock,
         });

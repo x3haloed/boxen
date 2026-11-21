@@ -116,7 +116,7 @@ let residents=[], editorRevision=0, residentBusy=false;
 let pendingResident;try{pendingResident=JSON.parse(localStorage.getItem('boxen-pending-resident')||'null');}catch{}
 let editingSchedule=null, pendingSchedule=null, scheduleBusy=false;
 let pendingStart = null, syncing = false, observing = false;
-let codexCatalog, runtimeCatalog, threadRuntime='codex', residentRuntime='codex';
+let modelCatalogs={}, runtimeCatalog, threadRuntime='codex', residentRuntime='codex';
 for(const field of ['model','residentModel']){
   $(field+'Choice').onchange=()=>{$(field).value=$(field+'Choice').value;controls();};
 }
@@ -163,20 +163,20 @@ function syncRuntimePicker(field, selected, pinned, disabled, resident=false) {
   picker.disabled=disabled||!!pinned||!choices.length;
 }
 function syncModelPicker(field, backend, disabled) {
-  const input=$(field), picker=$(field+'Choice'), codex=backend==='codex';
-  input.hidden=codex; input.disabled=disabled||codex;
-  picker.hidden=!codex; picker.disabled=disabled||!codex;
-  if(!codex)return;
-  if(connected&&target&&!codexCatalog){
-    const lookup=codexCatalog={};
-    operation({op:'codex_models'},target).then(
-      result=>{if(codexCatalog===lookup){lookup.models=result.models;controls();}},
-      ()=>{if(codexCatalog===lookup){lookup.unavailable=true;controls();}}
+  const input=$(field), picker=$(field+'Choice'), managed=backend==='codex'||backend==='antigravity';
+  input.hidden=managed; input.disabled=disabled||managed;
+  picker.hidden=!managed; picker.disabled=disabled||!managed;
+  if(!managed)return;
+  if(connected&&target&&!modelCatalogs[backend]){
+    const lookup=modelCatalogs[backend]={};
+    operation({op:backend+'_models'},target).then(
+      result=>{if(modelCatalogs[backend]===lookup){lookup.models=result.models;controls();}},
+      ()=>{if(modelCatalogs[backend]===lookup){lookup.unavailable=true;controls();}}
     );
   }
-  const models=codexCatalog?.models||[];
+  const catalog=modelCatalogs[backend], models=catalog?.models||[];
   const missing=input.value&&!models.some(model=>model.model===input.value);
-  const renderKey=JSON.stringify([codexCatalog?.unavailable,codexCatalog?.models,missing?input.value:null]);
+  const renderKey=JSON.stringify([backend,catalog?.unavailable,catalog?.models,missing?input.value:null]);
   if(picker.dataset.options!==renderKey){
     picker.dataset.options=renderKey;
     picker.replaceChildren(new Option('Default model',''),...models.map(model=>new Option(model.label,model.model)));
@@ -185,8 +185,8 @@ function syncModelPicker(field, backend, disabled) {
       previous.disabled=true;picker.append(previous);
     }
     if(!models.length){
-      const status=codexCatalog?.unavailable?'Model list unavailable. Reconnect to retry.'
-        :codexCatalog?.models?'No models listed':codexCatalog?'Loading models…':'Connect to load models';
+      const status=catalog?.unavailable?'Model list unavailable. Reconnect to retry.'
+        :catalog?.models?'No models listed':catalog?'Loading models…':'Connect to load models';
       const option=new Option(status,'');
       option.disabled=true;picker.append(option);
     }
@@ -514,7 +514,7 @@ async function connect() {
   if(previous&&(previous.peer!==target.peer||previous.address!==target.address)){
     $('model').value='';$('residentModel').value='';
   }
-  connected=false;codexCatalog=runtimeCatalog=undefined;detach();const gen=generation;const destination={...target};
+  connected=false;modelCatalogs={};runtimeCatalog=undefined;detach();const gen=generation;const destination={...target};
   observing=true;save();$('connection').textContent='Connecting…';connected=false;syncing=true;controls();let attempt=0;
   while(gen===generation){
     try {
@@ -534,7 +534,7 @@ $('threads').onchange=()=>{
   $('model').value='';
   showThread($('threads').value,true);
 };
-$('peer').onchange=()=>{connected=false;codexCatalog=runtimeCatalog=undefined;$('model').value='';$('residentModel').value='';$('observationStatus').textContent='';editingSchedule=null;pendingSchedule=null;$('scheduleList').replaceChildren();$('saveSchedule').textContent='Create schedule';detach();selectedThread='';currentRun=null;pendingStart=null;records=[];residents=[];mailMessages.clear();$('messagesView').hidden=true;$('mailMessages').replaceChildren();updateThreads();$('transcript').replaceChildren();$('residentDetails').hidden=true;target={peer:$('peer').value,address:$('address').value};$('addressLabel').hidden=$('peer').value===identity;controls();};
+$('peer').onchange=()=>{connected=false;modelCatalogs={};runtimeCatalog=undefined;$('model').value='';$('residentModel').value='';$('observationStatus').textContent='';editingSchedule=null;pendingSchedule=null;$('scheduleList').replaceChildren();$('saveSchedule').textContent='Create schedule';detach();selectedThread='';currentRun=null;pendingStart=null;records=[];residents=[];mailMessages.clear();$('messagesView').hidden=true;$('mailMessages').replaceChildren();updateThreads();$('transcript').replaceChildren();$('residentDetails').hidden=true;target={peer:$('peer').value,address:$('address').value};$('addressLabel').hidden=$('peer').value===identity;controls();};
 $('work').onsubmit=async event=>{
   event.preventDefault();if(!connected||syncing)return;
   if(!selectedThread&&!pendingStart&&!runtimeAvailable(threadRuntime))return;

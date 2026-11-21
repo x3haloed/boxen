@@ -80,15 +80,16 @@ A peer address locates an already-pinned identity; it grants no new trust.
   **Run settings** in the dialog to choose the machine, directory, runtime, or model.
   The Runtime dropdown lists the configured runtimes reported by the selected
   machine. Changing machines refreshes the choices before a new thread can start.
-  The Codex model dropdown loads from the selected machine and includes
-  **Default model**. Antigravity and OpenRouter accept a model ID as text or use
-  the destination's default when left blank.
+  The Codex and Antigravity model dropdowns load from the selected machine and
+  include **Default model**. OpenRouter accepts a model ID as text and uses the
+  destination's default when left blank.
   When the daemon queues the first run, the dialog closes and the thread opens
   in **Messages**. A rejected submission preserves the draft and settings.
   When queue status is uncertain, the catalog checks for the same request ID and
   **Retry same request** submits that exact request again.
   On an idle conversation, **Run settings** can change the directory or model
-  for the next send. Choosing another machine moves the idle conversation once
+  for the next send. **Choose a model** uses the same runtime-specific dropdown
+  for Codex and Antigravity. Choosing another machine moves the idle conversation once
   the destination reports its runtime configured,
   including its retained history and attachments. The draft follows the conversation
   and remains ready to send. The conversation composer sends a follow-up, or steering while

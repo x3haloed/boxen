@@ -2,12 +2,12 @@ mod activity;
 mod agents;
 mod attachments;
 mod client;
-mod codex_models;
 mod conversation;
 mod correspondence;
 mod field;
 mod menu;
 mod model;
+mod model_catalogs;
 mod new_conversation;
 #[cfg(test)]
 mod performance;
@@ -66,7 +66,7 @@ struct Observing {
 }
 #[derive(Default)]
 struct Data {
-    codex_models: codex_models::Catalogs,
+    model_catalogs: model_catalogs::Catalogs,
     runtimes: runtimes::Catalogs,
     tool_approvals: tool_approvals::State,
     work: work::State,
@@ -97,7 +97,7 @@ struct Data {
     sending: HashSet<String>,
 }
 enum Action {
-    LoadCodexModels(Destination),
+    LoadModelCatalog(model_catalogs::Runtime, Destination),
     LoadRuntimes(Destination),
     NewConversation,
     StartConversation,
@@ -250,6 +250,7 @@ impl Desktop {
     fn connect(&mut self) {
         self.ready = false;
         self.data.runtimes.clear();
+        self.data.model_catalogs.clear();
         for (_, stop) in self.polls.drain() {
             stop.store(true, Ordering::Relaxed)
         }
@@ -430,9 +431,10 @@ impl Desktop {
                 Update::Runtimes(destination, serial, result) => {
                     self.data.runtimes.received(destination, serial, result)
                 }
-                Update::CodexModels(machine, result) => {
-                    self.data.codex_models.received(machine, result)
-                }
+                Update::ModelCatalog(runtime, destination, serial, result) => self
+                    .data
+                    .model_catalogs
+                    .received(runtime, destination, serial, result),
                 Update::ToolApprovals(machine, result) => {
                     self.data.tool_approvals.received(machine, result)
                 }
@@ -817,7 +819,9 @@ impl Desktop {
     }
     fn action(&mut self, action: Action) {
         match action {
-            Action::LoadCodexModels(destination) => self.load_codex_models(destination),
+            Action::LoadModelCatalog(runtime, destination) => {
+                self.load_model_catalog(runtime, destination)
+            }
             Action::LoadRuntimes(destination) => self.load_runtimes(destination),
             Action::NewConversation => {
                 if !self.data.new_thread_dialog {

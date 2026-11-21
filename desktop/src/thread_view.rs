@@ -4,6 +4,7 @@ use crate::{
     client::{Update, run_key},
     conversation as view, find_thread,
     model::{Row, ThreadKey, terminal},
+    model_catalogs::Runtime,
     new_id,
 };
 use eframe::egui;
@@ -115,11 +116,12 @@ fn next_run_settings(
             let model_valid = if !change_model {
                 settings.model = None;
                 true
-            } else if backend == "codex" && target_valid {
+            } else if let Some(runtime) = Runtime::for_backend(backend).filter(|_| target_valid) {
                 ui.vertical(|ui| {
-                    data.codex_models.picker(
+                    data.model_catalogs.picker(
                         ui,
                         210.,
+                        runtime,
                         Some(destination),
                         settings.model.get_or_insert_with(String::new),
                         actions,
@@ -1380,6 +1382,42 @@ mod tests {
             pressed: false,
             modifiers: Modifiers::NONE,
         }])
+    }
+
+    #[test]
+    fn choosing_a_model_on_an_idle_antigravity_thread_loads_its_machine_catalog() {
+        let ctx = egui::Context::default();
+        let key = ThreadKey {
+            peer: "fixture-peer".into(),
+            id: "fixture-thread".into(),
+        };
+        let destination = crate::model::Destination {
+            key: key.peer.clone(),
+            label: "Fixture peer".into(),
+            address: "127.0.0.1:42426".into(),
+        };
+        let mut data = Data::default();
+        data.saved.destinations.push(destination.clone());
+        data.editing_thread_settings = Some((key.clone(), RunSettings::default()));
+        let mut frame = |events| {
+            let mut actions = vec![];
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0., 0.), vec2(800., 600.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| next_run_settings(ui, &mut data, &key, true, "antigravity", &mut actions),
+            );
+            (output, actions)
+        };
+        frame(vec![]);
+        let (output, _) = frame(vec![]);
+        let choose = visible_text(&output, "Choose a model").expect("visible model checkbox");
+        let (_, actions) = click(&mut frame, choose);
+        assert!(actions.iter().any(|action| matches!(action,
+            Action::LoadModelCatalog(Runtime::Antigravity, target)
+                if target.key == destination.key && target.address == destination.address)));
     }
 
     #[test]

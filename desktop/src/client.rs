@@ -37,7 +37,12 @@ pub struct SubmitError {
 
 pub enum Update {
     Runtimes(Destination, u64, Result<crate::runtimes::Catalog, String>),
-    CodexModels(String, Result<crate::codex_models::Catalog, String>),
+    ModelCatalog(
+        crate::model_catalogs::Runtime,
+        Destination,
+        u64,
+        Result<crate::model_catalogs::Catalog, String>,
+    ),
     ToolApprovals(String, Result<Value, String>),
     Mail(crate::correspondence::MailUpdate),
     Files(crate::attachments::FileUpdate),
@@ -92,13 +97,19 @@ impl Client {
             publisher.send(Update::Runtimes(destination, serial, result));
         });
     }
-    pub fn codex_models(&self, destination: Destination, publisher: Publisher) {
+    pub fn model_catalog(
+        &self,
+        runtime: crate::model_catalogs::Runtime,
+        destination: Destination,
+        serial: u64,
+        publisher: Publisher,
+    ) {
         let client = self.clone();
         std::thread::spawn(move || {
             let result = client
-                .operation(&destination, json!({"op":"codex_models"}))
+                .operation(&destination, json!({"op":runtime.operation()}))
                 .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()));
-            publisher.send(Update::CodexModels(destination.key, result));
+            publisher.send(Update::ModelCatalog(runtime, destination, serial, result));
         });
     }
     pub fn tool_approvals(&self, destination: Destination, args: Value, publisher: Publisher) {
@@ -520,24 +531,48 @@ mod tests {
         client.status().unwrap();
         let local = client.local();
         let models = Bus::new(egui::Context::default());
-        client.codex_models(local.clone(), models.publisher());
-        client.codex_models(dest.clone(), models.publisher());
+        use crate::model_catalogs::Runtime;
+        client.model_catalog(Runtime::Codex, local.clone(), 1, models.publisher());
+        client.model_catalog(Runtime::Codex, dest.clone(), 2, models.publisher());
         for _ in 0..2 {
-            let Update::CodexModels(machine, result) =
+            let Update::ModelCatalog(Runtime::Codex, machine, _, result) =
                 models.rx.recv_timeout(Duration::from_secs(12)).unwrap()
             else {
                 panic!("Expected a Codex catalog result");
             };
-            let prefix = if machine == local.key {
+            let prefix = if machine.key == local.key {
                 "local"
             } else {
-                assert_eq!(machine, dest.key);
+                assert_eq!(machine.key, dest.key);
                 "remote"
             };
             let catalog = result.unwrap();
             assert_eq!(catalog.models.len(), 2);
             assert_eq!(catalog.models[0].model, format!("{prefix}-primary"));
             assert_eq!(catalog.models[1].model, format!("{prefix}-secondary"));
+        }
+        client.model_catalog(Runtime::Antigravity, local.clone(), 3, models.publisher());
+        client.model_catalog(Runtime::Antigravity, dest.clone(), 4, models.publisher());
+        for _ in 0..2 {
+            let Update::ModelCatalog(Runtime::Antigravity, machine, serial, result) =
+                models.rx.recv_timeout(Duration::from_secs(12)).unwrap()
+            else {
+                panic!("Expected an Antigravity catalog result");
+            };
+            if machine.key == local.key {
+                assert_eq!(serial, 3);
+                assert!(result.unwrap_err().contains("unavailable"));
+            } else {
+                assert_eq!(machine.key, dest.key);
+                assert_eq!(serial, 4);
+                let catalog = result.unwrap();
+                let ids = catalog
+                    .models
+                    .iter()
+                    .map(|model| model.model.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(ids, ["fixture-default", "fixture-model"]);
+            }
         }
         client.runtimes(local.clone(), 1, models.publisher());
         client.runtimes(dest.clone(), 2, models.publisher());
