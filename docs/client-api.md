@@ -176,9 +176,13 @@ This query starts no thread or inference turn.
 
 The `antigravity` backend uses the same submission, observation, control, and
 resident activation operations. The executing daemon exposes its configuration
-through `runtime_info`. Antigravity reports fixed-choice questions as
-`input_requested` events. A `respond` control carries the event’s `request_id`
-and a result object with an offered `option_id`. The
+through `runtime_info`. Antigravity reports questions as `input_requested`
+events. A `respond` control carries the event’s exact JSON `request_id`.
+For a form (`kind: "form"`), its result can be
+`{"action":"accept","content":{...}}` with values from the event’s
+`requested_schema`, `{"action":"decline"}`, or `{"action":"cancel"}`.
+Older fixed-choice events provide a `choices` list and take a result with an
+offered `option_id`. An invalid response leaves the request pending. The
 [Antigravity runtime guide](antigravity.md) describes setup and native session behavior.
 
 ## Built-in inference events

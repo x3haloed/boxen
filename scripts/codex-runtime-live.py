@@ -19,7 +19,11 @@ parser.add_argument('binary',nargs='?',default='target/release/boxen')
 parser.add_argument('--codex',default='codex')
 parser.add_argument('--model',default='')
 parser.add_argument('--antigravity',metavar='PATH',help='Use this installed Antigravity CLI and its local sign-in')
+parser.add_argument('--antigravity-form', action='store_true',
+                    help='Also exercise a real Antigravity elicitation form')
 args=parser.parse_args()
+if args.antigravity_form and not args.antigravity:
+    parser.error('--antigravity-form requires --antigravity')
 backend = 'antigravity' if args.antigravity else 'codex'
 runtime_flags = ['--antigravity', args.antigravity] if args.antigravity else ['--codex', args.codex]
 binary=pathlib.Path(args.binary).resolve()
@@ -40,9 +44,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-codex-live-') as temp:
             request=urllib.request.Request(f'http://127.0.0.1:{uis[0]}/api/'+('watch' if watch else 'operation'),data=json.dumps({**({'peer':keys[0],'address':''} if local else target),'request':op}).encode(),headers={'Authorization':'Bearer '+tokens[0],'Content-Type':'application/json'})
             response=urllib.request.urlopen(request,timeout=150)
             return response if watch else json.load(response)
-        def collect(run):
+        def collect(run, after=0):
             events=[]
-            with api({'id':run['record']['spec']['id'],'after':0},True) as stream:
+            with api({'id':run['record']['spec']['id'],'after':after},True) as stream:
                 for line in stream:
                     batch=json.loads(line);assert 'error' not in batch,batch;events+=batch['events']
                     if batch['done']:
@@ -76,7 +80,43 @@ with tempfile.TemporaryDirectory(prefix='boxen-codex-live-') as temp:
         backend_ids=[e['data']['id'] for e in events if e['kind']=='backend_thread']
         assert len(backend_ids)==4 and backend_ids[0]==backend_ids[1] and backend_ids[2]==backend_ids[3]
         assert not any(e['kind']=='backend_session_rebuilt' for e in events)
-        print(json.dumps({'ok':True,'binary':str(binary),'runtime':'antigravity ACP' if args.antigravity else 'codex app-server','model':args.model or 'runtime default','runs':4,'shell_effect':True,'same_backend_thread_followup':True,'selective_mail':True,'no_send_completion':True,'retained_events':len(events)}))
+        if args.antigravity_form:
+            question_id = secrets.token_hex(32)
+            form_run = api({'op': 'start', 'spec': {
+                'id': question_id, 'thread_id': question_id, 'backend': backend, 'cwd': temp,
+                'model': args.model, 'prompt': (
+                    'The operator wants to pick one shape. Please use the native ask_question tool '
+                    'to ask which shape they choose, offering Circle and Square as the two options. '
+                    'Then respond with the chosen shape followed by this marker: ' + marker
+                ),
+            }})
+            with api({'id': question_id, 'after': 0}, watch=True) as stream:
+                for line in stream:
+                    batch = json.loads(line)
+                    assert 'error' not in batch, batch
+                    events += batch['events']
+                    form = next((e['data'] for e in batch['events'] if e['kind'] == 'input_requested'), None)
+                    if form:
+                        break
+                    assert not batch['done'], 'Antigravity completed without requesting a form'
+                else:
+                    raise AssertionError('Antigravity closed the stream without a form')
+            assert form['kind'] == 'form'
+            field, value = next(
+                (name, option['const'])
+                for name, prop in form['requested_schema']['properties'].items()
+                for option in prop.get('oneOf', [])
+                if option['title'].lower() == 'square'
+            )
+            cli(0, 'respond', target['address'], target['peer'], question_id,
+                json.dumps(form['request_id']), json.dumps({'action': 'accept', 'content': {field: value}}))
+            form_events = collect(form_run, after=batch['events'][-1]['seq'])
+            assert any(e['kind'] == 'request_answered' and e['data']['request_id'] == form['request_id']
+                       for e in form_events)
+            answer = api({'op': 'thread_result', 'id': question_id})['response']
+            assert marker in answer and 'square' in answer.lower()
+            events += form_events
+        print(json.dumps({'ok':True,'binary':str(binary),'runtime':'antigravity ACP' if args.antigravity else 'codex app-server','model':args.model or 'runtime default','runs':4 + args.antigravity_form,'shell_effect':True,'same_backend_thread_followup':True,'selective_mail':True,'no_send_completion':True,'elicitation_form':args.antigravity_form,'retained_events':len(events)}))
 
     finally:
         for p in processes:

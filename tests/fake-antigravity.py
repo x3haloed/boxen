@@ -54,6 +54,7 @@ for line in sys.stdin:
     params = message.get('params', {})
     if method == 'initialize':
         assert params['clientInfo']['name'] == 'boxen'
+        assert params['clientCapabilities']['elicitation'] == {'form': {}}
         send(id=ident, result={'protocolVersion': 1, 'agentInfo': {'version': '1.5.13'},
              'agentCapabilities': {'sessionCapabilities': {'resume': {}}, 'mcpCapabilities': {'http': True}}})
     elif method in ('session/new', 'session/resume'):
@@ -82,6 +83,27 @@ for line in sys.stdin:
             send(id=prompt_id, result={'stopReason': 'end_turn'})
             prompt_id = None
         chunk('Fixture reasoning.', thought=True)
+        if prompt == 'FORM':
+            prompt_id = ident
+            update('tool_call', toolCallId='form-tool', kind='other', title='Ask a question', status='in_progress')
+            send(id=41, method='elicitation/create', params={
+                'sessionId': session, 'mode': 'form', 'toolCallId': 'form-tool',
+                'message': 'Which shape?',
+                'requestedSchema': {'type': 'object', 'required': ['shape'], 'properties': {
+                    'shape': {'type': 'string', 'oneOf': [{'const': '1', 'title': 'Circle'},
+                                                          {'const': '2', 'title': 'Square'}]},
+                    'other': {'type': 'string', 'maxLength': 20},
+                    'extras': {'type': 'array', 'items': {'anyOf': [{'const': 'x', 'title': 'Extra'}]}},
+                }},
+            })
+            continue
+        if prompt == 'UNSUPPORTED_FORM':
+            prompt_id = ident
+            send(id=42, method='elicitation/create', params={
+                'sessionId': session, 'mode': 'form', 'message': 'Unsupported fixture form',
+                'requestedSchema': {'type': 'object', 'properties': {'nested': {'type': 'object'}}},
+            })
+            continue
         if prompt == 'LATE_WAKE':
             update('tool_call', toolCallId='timer', kind='other', title='Running schedule', status='in_progress')
             send(id=ident, result={'stopReason': 'end_turn'})
@@ -131,6 +153,22 @@ for line in sys.stdin:
         if prompt_id is not None:
             send(id=prompt_id, result={'stopReason': 'cancelled'})
             prompt_id = None
+    elif method is None and ident == 41:
+        result = message['result']
+        if result == {'action': 'cancel'}:
+            assert prompt_id is None
+            update('tool_call_update', toolCallId='form-tool', status='cancelled')
+            continue
+        assert result in ({'action': 'accept', 'content': {'shape': '2', 'extras': ['x']}}, {'action': 'decline'})
+        update('tool_call_update', toolCallId='form-tool', status='completed')
+        chunk('Form outcome: ' + result['action'])
+        send(id=prompt_id, result={'stopReason': 'end_turn'})
+        prompt_id = None
+    elif method is None and ident == 42:
+        assert message['result'] == {'action': 'decline'}
+        chunk('Unsupported form declined.')
+        send(id=prompt_id, result={'stopReason': 'end_turn'})
+        prompt_id = None
     elif method is None and ident == 'wake-question':
         assert message['result'] == {'outcome': {'outcome': 'selected', 'optionId': 'second'}}
         update('tool_call_update', toolCallId='timer', status='completed')

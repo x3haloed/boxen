@@ -1,6 +1,7 @@
 #[cfg(cosmo)]
 extern crate cosmo_compat as _;
 
+mod acp_form;
 mod agent_tools;
 mod antigravity;
 mod attachments;

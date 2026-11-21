@@ -40,7 +40,7 @@ Accept a managed agent runtime when available. When only inference is available,
 
 The built-in runtime owns its tool loop, history, context management, and compaction. Compaction is not a second universal runtime layered over managed backends.
 
-Codex app-server and OpenRouter text/tool workloads are implemented. Claude Code, other reasonable backends, and broader provider/modality coverage remain compatibility goals.
+Codex app-server, Antigravity ACP, and the built-in OpenRouter runtime use the authenticated Boxen workload and resident APIs. Claude Code and broader provider and modality coverage remain compatibility goals.
 
 Early versions use full execution access, including Full access for Codex app-server threads. Sandboxing is not an early implementation prerequisite. Full access on a host does not automatically grant movement to other hosts or distribution of credentials. Execution access settings and a comfortable sandbox implementation may be revisited later.
 

@@ -1,6 +1,7 @@
 //! Antigravity's native ACP session. Boxen's journal owns run settlement.
 use crate::{
     Result,
+    acp_form::Form,
     jobs::{Control, History, Jobs, Run, RunOutcome, Spec},
     logging::Level,
     resident_bridge::Bridge,
@@ -279,7 +280,33 @@ fn prompt_parts(text: &str, context: &str) -> Vec<Value> {
 
 struct Question {
     id: Value,
-    choices: HashSet<String>,
+    kind: QuestionKind,
+}
+
+enum QuestionKind {
+    Choices(HashSet<String>),
+    Form(Form),
+}
+
+impl QuestionKind {
+    fn response(&self, result: &Value) -> Option<Value> {
+        match self {
+            Self::Choices(choices) => {
+                let option = result["option_id"].as_str()?;
+                choices
+                    .contains(option)
+                    .then(|| json!({"outcome":{"outcome":"selected","optionId":option}}))
+            }
+            Self::Form(form) => form.response(result),
+        }
+    }
+
+    fn cancel(&self) -> Value {
+        match self {
+            Self::Choices(_) => json!({"outcome":{"outcome":"cancelled"}}),
+            Self::Form(_) => json!({"action":"cancel"}),
+        }
+    }
 }
 
 struct Turn<'a> {
@@ -412,17 +439,85 @@ impl Turn<'_> {
             .as_str()
             .unwrap_or("Antigravity is requesting input")
             .replace(self.secret, "[redacted]");
-        if self.questions.len() >= 64 && !self.questions.contains_key(&id.to_string()) {
+        self.register_question(
+            id,
+            QuestionKind::Choices(values),
+            json!({
+                "request_id":id,"backend":"antigravity","question":title,"choices":choices,
+                "answer":{"option_id":"offered choice ID"}
+            }),
+        )
+    }
+
+    fn elicitation(&mut self, message: &Value) -> Result<()> {
+        let id = &message["id"];
+        let params = &message["params"];
+        if self.cancel_sent.is_some() {
+            self.rpc.reply(id, json!({"action":"cancel"}))?;
+            self.run.append(
+                "request_cancelled",
+                json!({"backend":"antigravity","request_id":id}),
+            )?;
+            return Ok(());
+        }
+        let schema = &params["requestedSchema"];
+        let title = params["message"].as_str().unwrap_or("");
+        let encoded = schema.to_string();
+        let form = (params["mode"] == "form"
+            && !title.is_empty()
+            && title.len() <= 4096
+            && encoded.len() <= 32 * 1024
+            && !encoded.contains(self.secret))
+        .then(|| Form::parse(schema))
+        .flatten();
+        let Some(form) = form else {
+            self.rpc.reply(id, json!({"action":"decline"}))?;
+            self.run.diagnostic(
+                Level::Warn,
+                "antigravity.form_declined",
+                || json!({"request_id":id,"session_id":self.session}),
+                || Value::Null,
+            );
+            self.run.append("request_declined",json!({
+                "backend":"antigravity","request_id":id,
+                "reason":"The ACP request exceeds the supported local form limits or uses an unsupported schema"
+            }))?;
+            return Ok(());
+        };
+        self.register_question(
+            id,
+            QuestionKind::Form(form),
+            json!({
+                "request_id":id,"backend":"antigravity","kind":"form",
+                "question":title.replace(self.secret,"[redacted]"),"requested_schema":schema,
+                "call_id":params["toolCallId"]
+            }),
+        )
+    }
+
+    fn register_question(&mut self, id: &Value, kind: QuestionKind, event: Value) -> Result<()> {
+        if !(id.is_string() || id.is_i64() || id.is_u64())
+            || self.questions.contains_key(&id.to_string())
+        {
+            return Err("Antigravity supplied an invalid or repeated pending question ID".into());
+        }
+        if self.questions.len() >= 64 {
             return Err("Antigravity exceeded the pending question limit".into());
         }
         self.questions.insert(
             id.to_string(),
             Question {
                 id: id.clone(),
-                choices: values,
+                kind,
             },
         );
-        self.run.append("input_requested",json!({"request_id":id,"backend":"antigravity","question":title,"choices":choices,"answer":{"option_id":"offered choice ID"}}))?;
+        self.run.diagnostic(
+            Level::Info,
+            "antigravity.input_requested",
+            || json!({"request_id":id,"session_id":self.session,"kind":event["kind"]}),
+            || Value::Null,
+        );
+        self.run.append("input_requested", event)?;
         self.run
             .status("waiting", "Antigravity is requesting input")?;
         Ok(())
@@ -437,6 +532,9 @@ impl Turn<'_> {
                 }
                 if method == "session/request_permission" && message.get("id").is_some() {
                     return self.permission(&message);
+                }
+                if method == "elicitation/create" && message.get("id").is_some() {
+                    return self.elicitation(&message);
                 }
             }
             if let Some(id) = message.get("id") {
@@ -487,8 +585,7 @@ impl Turn<'_> {
                             .notification("session/cancel", json!({"sessionId":self.session}))?;
                         self.cancel_sent = Some(Instant::now());
                         for (_, question) in self.questions.drain() {
-                            self.rpc
-                                .reply(&question.id, json!({"outcome":{"outcome":"cancelled"}}))?;
+                            self.rpc.reply(&question.id, question.kind.cancel())?;
                             self.run.append(
                                 "request_cancelled",
                                 json!({"backend":"antigravity","request_id":question.id}),
@@ -519,24 +616,30 @@ impl Turn<'_> {
                 }
                 Control::Respond { request_id, result } => {
                     let key = request_id.to_string();
-                    let option = result["option_id"].as_str();
                     if let Some(question) = self.questions.get(&key)
-                        && let Some(option) = option.filter(|id| question.choices.contains(*id))
+                        && let Some(response) = question.kind.response(&result)
                     {
-                        self.rpc.reply(
-                            &question.id,
-                            json!({"outcome":{"outcome":"selected","optionId":option}}),
-                        )?;
+                        let action = response["action"].as_str().unwrap_or("accept").to_owned();
+                        self.rpc.reply(&question.id, response)?;
                         self.questions.remove(&key);
+                        self.run.diagnostic(Level::Info, "antigravity.input_answered",
+                            || json!({"request_id":request_id,"session_id":self.session,"action":action}), || Value::Null);
                         self.run.append(
                             "request_answered",
-                            json!({"backend":"antigravity","request_id":request_id}),
+                            json!({"backend":"antigravity","request_id":request_id,
+                                "action":action}),
                         )?;
                         if self.questions.is_empty() {
                             self.run.status("running", "Answer sent to Antigravity")?;
                         }
                     } else {
-                        self.run.append("control_error",json!({"message":"The answer must select an offered option for a pending Antigravity question","request_id":request_id}))?;
+                        self.run.diagnostic(
+                            Level::Warn,
+                            "antigravity.input_rejected",
+                            || json!({"request_id":request_id,"session_id":self.session}),
+                            || Value::Null,
+                        );
+                        self.run.append("control_error",json!({"message":"The response ID or answer does not match a pending Antigravity request","request_id":request_id}))?;
                     }
                 }
             }
@@ -599,7 +702,8 @@ pub fn execute(
     let prepared = (|| -> Result<(String, Value, Option<String>)> {
         let init = rpc.setup("initialize",json!({"protocolVersion":1,
             "clientInfo":{"name":"boxen","title":"Boxen","version":env!("CARGO_PKG_VERSION")},
-            "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}}))?;
+            "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,
+                "elicitation":{"form":{}}}}))?;
         let init = result(&init, "initialize")?;
         let capabilities = &init["agentCapabilities"];
         if init["protocolVersion"] != 1 || capabilities["mcpCapabilities"]["http"] != true {

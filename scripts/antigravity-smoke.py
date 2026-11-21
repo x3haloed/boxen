@@ -152,6 +152,41 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
         assert restored['status'] == 'completed' and restored['backend_thread'] != resumed['backend_thread']
         assert any(e['kind'] == 'backend_session_rebuilt' for e in events)
 
+        for action in ('accept', 'decline', 'cancel'):
+            form = start('FORM', require='input_responses')
+            waiting, _ = collect(form['id'], kind='input_requested')
+            event = next(e['data'] for e in waiting if e['kind'] == 'input_requested')
+            assert event['kind'] == 'form' and event['request_id'] == 41 and event['call_id'] == 'form-tool'
+            assert event['requested_schema']['properties']['shape']['oneOf'][1]['const'] == '2'
+            if action == 'cancel':
+                cli(0, 'cancel', *remote, form['id'])
+                events, settled = collect(form['id'], waiting[-1]['seq'])
+                assert settled['status'] == 'cancelled'
+                assert any(e['kind'] == 'request_cancelled' and e['data']['request_id'] == 41 for e in events)
+                continue
+            respond = ['respond', *remote, form['id']]
+            cursor = waiting[-1]['seq']
+            if action == 'accept':
+                for request, content in (('"41"', {'shape': '2'}), ('41', {}),
+                                         ('41', {'shape': 'Square'}), ('41', {'shape': '2', 'extras': ['x', 'x']})):
+                    cli(0, *respond, request, json.dumps({'action': 'accept', 'content': content}))
+                    errors, snapshot = collect(form['id'], cursor, kind='control_error')
+                    assert snapshot['status'] == 'waiting'
+                    cursor = errors[-1]['seq']
+            reply = {'action': action}
+            if action == 'accept':
+                reply['content'] = {'shape': '2', 'extras': ['x']}
+            cli(0, *respond, '41', json.dumps(reply))
+            events, settled = collect(form['id'], cursor)
+            assert settled['status'] == 'completed'
+            assert any(e['kind'] == 'request_answered' and e['data']['action'] == action for e in events)
+            assert api({'op': 'thread_result', 'id': form['id']})['response'] == 'Form outcome: ' + action
+        events, settled = collect(start('UNSUPPORTED_FORM')['id'])
+        assert settled['status'] == 'completed'
+        assert any(e['kind'] == 'request_declined' and e['data']['request_id'] == 42 for e in events)
+        assert not any(e['kind'] == 'input_requested' for e in events)
+        print('PASS Antigravity ACP forms, exact IDs, invalid answers, decline and native cancellation')
+
         for action in ('steer', 'cancel'):
             active = start('WAIT')
             collect(active['id'], kind='reasoning_delta')
