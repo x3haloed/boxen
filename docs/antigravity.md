@@ -1,0 +1,19 @@
+# Antigravity runtime
+
+Boxen runs the official Antigravity CLI as a native ACP subprocess on the executing machine. Configure its executable with `serve --antigravity /opt/example/bin/agy` or `BOXEN_ANTIGRAVITY`. The workload account uses its existing Antigravity sign-in. Sign-in can be completed on that host with `agy acp --login`. The daemon does not collect browser sign-in codes or distribute provider credentials. Boxen requires ACP v1, HTTP MCP, and Antigravity 1.5.1 or newer. It launches `agy acp --process-per-session` for native HTTP MCP.
+
+Use `start --backend antigravity` for anonymous work and `resident-create --backend antigravity` for resident activations. Model `-` selects the native default. Explicit model and thinking selections are checked against the options offered by that native session before prompting. The authenticated `runtime_info` operation lists Antigravity and reports whether an executable has been configured. Sign-in and model availability are determined by the runtime when opening a session.
+
+The same authenticated execution and watch operations provide ordered replay, exact-ID retries, cancellation, and conventional anonymous responses. The managed runtime receives retained Boxen attachments as file references. Antigravity advertises native thinking and message chunks and tool activity. Command output reported as `combinedOutput` is retained as aggregate output. Boxen supplies its run-scoped work or resident MCP tools through the existing bridge. Resident assistant narration is private, and outbound messages are explicit tool calls.
+
+A completed native prompt can leave tools or a scheduled wake outstanding. In that case the Boxen run remains active. The journal records prompt completion separately from run completion. A late reply remains part of the originating run, including its tool and input activity. Antigravity reports the end of the reply through its usage update. A missing confirmation after Stop leaves an interrupted run with an uncertain outcome. Tool effects remain attributable to their original run.
+
+During an active native prompt, `steer` sends a new ACP prompt as live steering. A fixed-choice Antigravity question appears as an `input_requested` event with `request_id` and `choices`. The response has the form `{"option_id":"offered-choice-id"}`. The CLI sends it through `respond`. Under Full access the adapter selects a one-time allow option for ordinary tool permission requests while keeping question choices distinct.
+
+A new run resumes the existing native session when available. An explicit missing-session error or a recorded relocation opens a replacement session with bounded retained Boxen history. The journal preserves the recovery reason and previous binding. Native hidden state and omitted historical payloads remain unavailable. Earlier prompts and effectful tools are never dispatched as part of reconstruction.
+
+Verification uses `scripts/antigravity-smoke.py` against the native and portable daemon. The Linux rotation includes this controlled ACP fixture. The optional live check `python3 scripts/codex-runtime-live.py target/release/boxen --antigravity /opt/example/bin/agy` exercises a real host-local account and can consume usage. It checks an actual shell effect and native resumption, then selective explicit mail and no-send completion through the daemon.
+
+The CLI and authenticated API are the current Antigravity control surfaces. Open possibilities include native media transport, runtime-managed child-work evidence and handoff, and provider incidents that surface only inside native session storage.
+
+[T3 Code Antigravity adapter](https://github.com/pingdotgg/t3code/blob/8cfd2b5211/apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts) · [Google ACP documentation](https://antigravity.google/docs/cli/acp/)

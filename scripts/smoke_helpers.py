@@ -12,11 +12,15 @@ _wrappers = tempfile.TemporaryDirectory(prefix='boxen-smoke-launchers-')
 
 
 def fake_codex():
-    fixture = pathlib.Path(__file__).resolve().parent.parent / 'tests/fake-codex.py'
+    return python_launcher('fake-codex.py')
+
+
+def python_launcher(name):
+    fixture = pathlib.Path(__file__).resolve().parent.parent / 'tests' / name
     if os.name != 'nt':
         fixture.chmod(0o755)
         return fixture
-    wrapper = pathlib.Path(_wrappers.name) / 'fake-codex.cmd'
+    wrapper = pathlib.Path(_wrappers.name) / (fixture.stem + '.cmd')
     wrapper.write_text(f'@echo off\n"{sys.executable}" "{fixture}" %*\n')
     return wrapper
 

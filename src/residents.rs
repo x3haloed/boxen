@@ -103,7 +103,10 @@ impl Resident {
                 return Err("resident promotion provenance does not match its canonical native conversation".into());
             }
         }
-        if !matches!(self.backend.as_str(), "codex" | "openrouter") {
+        if !matches!(
+            self.backend.as_str(),
+            "codex" | "openrouter" | "antigravity"
+        ) {
             return Err("unsupported resident backend".into());
         }
         if let Some(effort) = &self.reasoning_effort {

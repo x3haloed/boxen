@@ -2,6 +2,7 @@
 extern crate cosmo_compat as _;
 
 mod agent_tools;
+mod antigravity;
 mod attachments;
 #[path = "../shared/browser_assignment.rs"]
 mod browser_assignment;
@@ -75,9 +76,9 @@ boxen [--data-dir PATH] identity\n\
 boxen [--data-dir PATH] trust PUBLIC_KEY LABEL [--address HOST:PORT]\n\
 boxen [--data-dir PATH] untrust PUBLIC_KEY\n\
 boxen [--data-dir PATH] peers\n\
-boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--openrouter-key-file PATH]\n\
+boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--antigravity PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
-boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|openrouter] [--context JSON] [--reasoning-effort LEVEL]\n\
+boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|antigravity|openrouter] [--context JSON] [--reasoning-effort LEVEL]\n\
 boxen [--data-dir PATH] request HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] messages HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] discord-connector --instance ID [--url http://127.0.0.1:PORT]\n\
@@ -101,7 +102,7 @@ boxen [--data-dir PATH] log-status HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] log-off HOST:PORT PUBLIC_KEY\n\n\
 boxen residents HOST:PORT PUBLIC_KEY\n\
 boxen resident-promote HOST:PORT PUBLIC_KEY JSON_SPEC\n\
-boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|openrouter] [--reasoning-effort LEVEL] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
+boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|antigravity|openrouter] [--reasoning-effort LEVEL] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-class HOST:PORT PUBLIC_KEY JSON\n\
 boxen resident-get HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
 boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--model MODEL] [--reasoning-effort LEVEL] [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
@@ -206,6 +207,8 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
             let codex = take_option(&mut args, "--codex")?
                 .or_else(|| env::var("BOXEN_CODEX").ok())
                 .unwrap_or_else(|| "codex".into());
+            let antigravity = take_option(&mut args, "--antigravity")?
+                .or_else(|| env::var("BOXEN_ANTIGRAVITY").ok());
             let listen =
                 take_option(&mut args, "--listen")?.unwrap_or_else(|| "0.0.0.0:42424".into());
             let ui = take_option(&mut args, "--ui")?.unwrap_or_else(|| "127.0.0.1:42425".into());
@@ -223,11 +226,12 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
             let ui_listener = TcpListener::bind(ui_addr)?;
             let token = state.control_token()?;
             logging::install(state.public_key())?;
-            let jobs = jobs::Jobs::open_with_inference(
+            let jobs = jobs::Jobs::open_with_runtimes(
                 state.directory().join("runs"),
                 codex,
                 state.public_key().into(),
                 inference_config,
+                antigravity,
             )?;
             network::configure(&state, &name, &advertise)?;
             infrastructure::install(state.directory(), state.public_key())?;

@@ -132,13 +132,14 @@ with tempfile.TemporaryDirectory(prefix='boxen-agent-work-') as temporary:
             step('boxen_work', {'action':'read','request_id':'local'}, 'local_read', {'done':True,'response':'WORK_CHILD_COMPLETE'},until_done=True),
             step('boxen_work', {'action':'request','request_id':'large','prompt':'WORK_LONG'}, 'large'),
             step('boxen_work', {'action':'read','request_id':'large'}, 'large_read', {'response_truncated':True},until_done=True),
+            step('boxen_work', {'action':'read','request_id':'large','after':0}, 'large_replay'),
             step('boxen_work', {'action':'read','request_id':'large','response_offset':ref('large_read.next_response_offset')}, 'response_page'),
         ], after=first)
         assert pathlib.Path(retry['original']['path']).read_text() == 'immutable original 🐈'
         assert retry['large_read']['next_response_offset']==16384
         assert retry['response_page']['response']=='🐈'*4096
         assert retry['response_page']['next_response_offset']==32768
-        assert any(e.get('truncated') for e in retry['large_read']['events'])
+        assert any(e.get('truncated') for e in retry['large_replay']['events'])
         assert len([r for r in api(1,{'op':'list'}) if r['record']['spec']['id']==child_id]) == 1
         print('PASS resumed native conversation, source restart, receipt-backed exact retry after original removal, cursor replay, retained attachment and local work')
 

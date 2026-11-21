@@ -111,6 +111,15 @@ workload account. Use `model` in submissions and display `label` in pickers.
 An empty model in a submission selects the machine's configured default.
 This query starts no thread or inference turn.
 
+## Antigravity ACP
+
+The `antigravity` backend uses the same submission, observation, control, and
+resident activation operations. The executing daemon exposes its configuration
+through `runtime_info`. Antigravity reports fixed-choice questions as
+`input_requested` events. A `respond` control carries the event’s `request_id`
+and a result object with an offered `option_id`. The
+[Antigravity runtime guide](antigravity.md) describes setup and native session behavior.
+
 ## Built-in inference events
 
 The authenticated operation `{"op":"runtime_info"}` reports available runtime kinds and configuration readiness without returning credentials. OpenRouter threads use the existing start/list/control/watch operations; resident creation adds optional `backend` (default `codex`). See [inference](inference.md) for configuration, lifecycle, limits and verification.

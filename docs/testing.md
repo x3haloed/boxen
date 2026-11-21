@@ -34,7 +34,7 @@ a CLI or copy authentication material. Its report distinguishes real Codex from
 the controlled fixture and records whether command-output deltas were observed.
 See [headless Codex setup and live evidence](workloads.md#headless-codex-on-linux).
 
-Only the binary, selected test scripts, and controlled Codex fixture are copied
+Only the binary, selected test scripts, and controlled runtime fixtures are copied
 to a private `/tmp/boxen-linux-*` directory. The worker records the actual OS,
 architecture, kernel, distribution, Python version, binary SHA-256, suite exit
 statuses and timings. These suites run against the uploaded file:
@@ -43,6 +43,7 @@ statuses and timings. These suites run against the uploaded file:
 - Pairing, authenticated controls and revocation (`smoke`).
 - Three-machine membership, shared access, durable mail and removal (`network`).
 - Workload streaming, control, ownership and restart (`workload`).
+- Native ACP integration with a controlled runtime, late work, live controls, session recovery and resident mail (`antigravity`).
 - Text-history source roles, next-input exposure and effect-free import (`transcript-import`).
 - Independent resident definition instances and manual revision application (`resident-class`).
 - Native Codex thread import, retained historical replay and same-session continuation (`thread-import`).

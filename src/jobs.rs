@@ -1119,6 +1119,7 @@ pub struct Jobs {
     runs: Mutex<HashMap<String, Arc<Run>>>,
     codex_path: String,
     codex_catalog: Mutex<()>,
+    antigravity_path: Option<String>,
     pub inference: crate::inference::Config,
     _lock: File,
     pub residents: Arc<Residents>,
@@ -1702,6 +1703,11 @@ impl Jobs {
     }
     pub fn runtime_info(&self) -> Value {
         let mut info = json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]});
+        if let Some(backends) = info["backends"].as_array_mut() {
+            backends.push(crate::antigravity::capabilities(
+                self.antigravity_path.is_some(),
+            ));
+        }
         info["platform"] =
             json!({"os":crate::platform::host_os(),"architecture":std::env::consts::ARCH});
         info["agent_work"] = json!({"tools":["boxen_machines","boxen_work","boxen_thread_files"],"transport":"existing_authenticated_peer_operations","native_registration":"per_run_mcp"});
@@ -1726,13 +1732,14 @@ impl Jobs {
                 .ok_or("runs parent required")?
                 .join("credentials/openrouter.key"),
         };
-        Self::open_with_inference(directory, codex_path, machine_id, config)
+        Self::open_with_runtimes(directory, codex_path, machine_id, config, None)
     }
-    pub fn open_with_inference(
+    pub fn open_with_runtimes(
         directory: PathBuf,
         codex_path: String,
         machine_id: String,
         inference: crate::inference::Config,
+        antigravity_path: Option<String>,
     ) -> Result<Arc<Self>> {
         logging::record(
             Level::Info,
@@ -1815,6 +1822,7 @@ impl Jobs {
             runs: Mutex::new(HashMap::new()),
             codex_path,
             codex_catalog: Mutex::new(()),
+            antigravity_path,
             inference,
             _lock: lock,
         });
@@ -2831,8 +2839,14 @@ impl Jobs {
         {
             return Err("resident working directory and model are pinned to its definition".into());
         }
-        if !matches!(spec.backend.as_str(), "codex" | "openrouter") {
+        if !matches!(
+            spec.backend.as_str(),
+            "codex" | "openrouter" | "antigravity"
+        ) {
             return Err("unsupported backend".into());
+        }
+        if spec.backend == "antigravity" && self.antigravity_path.is_none() {
+            return Err("Antigravity is unavailable on the executing machine".into());
         }
         if spec.backend == "openrouter" && activation.is_none() {
             self.inference.ready()?;
@@ -3056,6 +3070,7 @@ impl Jobs {
             || Value::Null,
         );
         let binary = self.codex_path.clone();
+        let antigravity = self.antigravity_path.clone();
         let jobs = self.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<RunOutcome> {
@@ -3081,6 +3096,16 @@ impl Jobs {
                 }
                 if spec.backend == "openrouter" {
                     crate::inference::execute(&spec, run.clone(), receiver, jobs.clone(), history)
+                } else if spec.backend == "antigravity" {
+                    crate::antigravity::execute(
+                        antigravity.as_deref().ok_or("Antigravity is unavailable")?,
+                        &spec,
+                        resume,
+                        run.clone(),
+                        receiver,
+                        jobs.clone(),
+                        history,
+                    )
                 } else {
                     codex::execute(
                         &binary,

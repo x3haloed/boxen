@@ -6,7 +6,7 @@ pub fn validate(backend: &str, effort: &str) -> Result<()> {
         return Ok(());
     }
     match backend {
-        "codex"
+        "codex" | "antigravity"
             if !effort.is_empty()
                 && effort.len() <= 64
                 && effort.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-') =>
@@ -15,6 +15,7 @@ pub fn validate(backend: &str, effort: &str) -> Result<()> {
         }
         "openrouter" if matches!(effort, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => Ok(()),
         "codex" => Err("Codex reasoning effort requires a model-advertised name of 1–64 lowercase letters, digits, underscores or hyphens, or default".into()),
+        "antigravity" => Err("Antigravity thinking level requires a model-advertised name of 1–64 lowercase letters, digits, underscores or hyphens, or default".into()),
         "openrouter" => Err("OpenRouter reasoning effort accepts default, none, minimal, low, medium, high, xhigh or max; model and provider support vary".into()),
         _ => Err("reasoning effort requires a supported backend".into()),
     }
