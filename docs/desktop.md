@@ -46,34 +46,27 @@ A peer address locates an already-pinned identity; it grants no new trust.
 
 ## First interactions
 
-- On macOS, Boxen uses the system menu bar. Windows uses a native menu bar in
-  the Boxen window. Linux uses an in-window menu on both X11 and Wayland.
-  **File** contains **New Thread** and **Reconnect Daemon**, which is enabled
-  when the desktop has yet to connect. **View** contains **Show Work** and
-  **Command Palette…**.
-- The thread list contains anonymous conversations only, grouped by canonical
-  Boxen thread ID. An identity attachment in any run excludes the whole thread.
-- Machines appear as collapsible groups inside the Threads pane. The small funnel
-  button beside **Filter threads…** opens machine checkboxes and **All**. Unchecking
-  a machine hides its group; exactly one checked machine displays a plain thread
-  list. No checked machines displays an empty state. Machine visibility is saved
-  across launches and does not close tabs or stop observing open conversations.
-  The text filter searches threads within the visible machines.
-- A single click previews a thread in an italic tab. Another single click replaces
-  that preview, wherever it has been docked. There is at most one preview across
-  all machines, groups and floating surfaces.
-- Double-clicking a list entry or tab keeps it open. Opening from the palette,
-  drafting a message, or dragging a tab also keeps it open. Selecting an already
-  open thread focuses it without creating another copy.
-- Every panel, including the thread list, participates in the same docking tree.
-  Tabs reorder and move between groups; edge drops create nested splits. Split
-  dividers resize. Right-clicking a tab provides explicit split commands and
-  **Eject** for a floating panel. Floating panels currently remain inside the
-  application window, rather than becoming separate OS windows.
-- **⌘/Ctrl + Shift + P**, **⌘/Ctrl + P**, **F1**, or **View → Command Palette…** opens the palette.
-  Typing filters commands and threads; arrows select, Enter opens, Escape closes.
-  **Show thread list** restores a closed list; **Reset docking layout** restores
-  the sidebar while preserving open conversations and drafts.
+- macOS and Windows use native menus. Linux uses the in-window menu.
+  **File** offers **New Thread** and **Reconnect Daemon**. The toolbar opens the
+  finder and tool-approval settings and shows the machines in the network.
+- The Watchlist offers Threads, Agents and Mail. Threads groups anonymous
+  conversations by machine. Identity attachment in any run excludes a
+  conversation from Threads. Machine filters and text search stay local.
+- A single click opens one replaceable peek. Double-click or **Open on grid**
+  places the conversation. Selecting a visible conversation focuses its
+  existing pane. Drafts belong to their conversation.
+- The workspace has two rows and adds columns as width permits. A new pane
+  can take an empty column. When columns are occupied, choosing a snap region
+  splits only the affected pane. Shift with a placement shortcut replaces
+  the selected pane. A pane can change span or move into available space.
+  Closing leaves a hole. **Tidy** previews an explicit arrangement.
+- Narrowing the window parks panes that no longer fit. Widening restores their
+  homes. Placing a parked pane elsewhere replaces its remembered home. Parked
+  panes, placed panes, and attached drafts survive restart. The desktop
+  migrates previously pinned docking tabs into grid homes once. A peek is
+  transient.
+- **⌘/Ctrl + K**, **⌘/Ctrl + Shift + P**, or **F1** opens the finder for threads
+  and commands. The finder also opens project work and new message editors.
 - **New Thread** in Threads, File, or the command palette opens a compact dialog.
   **Start thread** uses this machine, the default Codex model, and a working area
   under the executing daemon's data directory at `threads/<thread-id>`. Expand

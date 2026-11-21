@@ -5,6 +5,7 @@ mod client;
 mod conversation;
 mod correspondence;
 mod field;
+mod grid;
 mod menu;
 mod model;
 mod model_catalogs;
@@ -18,7 +19,7 @@ mod work;
 mod workspace;
 use client::{Bus, Client, Pending, Update, run_key};
 use eframe::egui::{self, RichText};
-use egui_dock::{DockArea, TabViewer};
+use egui_dock::TabViewer;
 use model::{Conversation, Destination, Pane, ThreadKey, Transcript, catalog, terminal};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -163,10 +164,14 @@ impl Desktop {
         origin: String,
         extra: Option<Destination>,
     ) -> Self {
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         cc.egui_ctx.style_mut_of(egui::Theme::Dark, |s| {
-            s.spacing.item_spacing = egui::vec2(8., 8.);
-            s.visuals.selection.bg_fill = egui::Color32::from_rgb(46, 72, 91);
+            s.spacing.item_spacing = egui::vec2(6., 4.);
+            s.visuals.panel_fill = egui::Color32::from_rgb(11, 13, 16);
+            s.visuals.window_fill = egui::Color32::from_rgb(16, 19, 23);
+            s.visuals.selection.bg_fill = egui::Color32::from_rgb(23, 40, 60);
+            s.visuals.selection.stroke.color = egui::Color32::from_rgb(76, 158, 255);
         });
         let state_path = home.join("desktop.json");
         let mut saved: Saved = std::fs::read(&state_path)
@@ -182,7 +187,6 @@ impl Desktop {
             saved.agents_added = true;
         }
         if !saved.work_added {
-            saved.workspace.show_work();
             saved.work_added = true;
         }
         saved
@@ -191,6 +195,7 @@ impl Desktop {
         while let Some(path) = saved.workspace.dock.find_tab(&Pane::LegacyNewConversation) {
             saved.workspace.dock.remove_tab(path);
         }
+        saved.workspace.enable_grid();
         let new_thread_dialog = saved.new_thread_request.is_some();
         let bus = Bus::new(cc.egui_ctx.clone());
         let mut app = Self {
@@ -397,9 +402,9 @@ impl Desktop {
             .data
             .saved
             .workspace
-            .dock
-            .iter_all_tabs()
-            .filter_map(|(_, pane)| {
+            .visible_editors()
+            .into_iter()
+            .filter_map(|pane| {
                 if let Pane::Chat(key) = pane {
                     Some(key.clone())
                 } else {
@@ -712,7 +717,7 @@ impl Desktop {
             return;
         };
         let mut selected = Vec::new();
-        for (_, pane) in self.data.saved.workspace.dock.iter_all_tabs() {
+        for pane in self.data.saved.workspace.visible_editors() {
             match pane {
                 Pane::Thread(key) => {
                     if let Some(thread) = find_thread(&self.data, key) {
@@ -952,7 +957,7 @@ impl Desktop {
         let mut commands: Vec<(String, Option<ThreadKey>)> = vec![
             ("New Thread".into(), None),
             ("Show thread list".into(), None),
-            ("Reset docking layout".into(), None),
+            ("Reset grid layout".into(), None),
             ("Machine connections…".into(), None),
             ("Show mail".into(), None),
             ("New message…".into(), None),
@@ -1025,6 +1030,9 @@ impl Desktop {
             });
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             self.palette = false;
+            if let Some(grid) = &mut self.data.saved.workspace.grid {
+                grid.open_here = None;
+            }
         }
         if entered {
             self.palette = false;
@@ -1036,6 +1044,11 @@ impl Desktop {
             if let Some(key) = commands[index].1.clone() {
                 self.action(Action::Open(key, true))
             } else {
+                if index != 0
+                    && let Some(grid) = &mut self.data.saved.workspace.grid
+                {
+                    grid.open_here = None;
+                }
                 match index {
                     4 => self.data.saved.workspace.show_correspondence(),
                     5 => self.mail_action(correspondence::MailAction::New),
@@ -1044,27 +1057,15 @@ impl Desktop {
                     0 => self.action(Action::NewConversation),
                     1 => self.data.saved.workspace.show_list(),
                     2 => {
-                        let panes: Vec<_> = self
-                            .data
-                            .saved
-                            .workspace
-                            .dock
-                            .iter_all_tabs()
-                            .filter(|(_, p)| {
-                                matches!(
-                                    p,
-                                    Pane::Thread(_)
-                                        | Pane::Chat(_)
-                                        | Pane::Activity(_)
-                                        | Pane::Message(_)
-                                        | Pane::Compose(_)
-                                )
-                            })
-                            .map(|(_, p)| (p.clone(), self.data.saved.workspace.is_preview(p)))
-                            .collect();
-                        self.data.saved.workspace = Workspace::default();
-                        for (pane, preview) in panes {
-                            self.data.saved.workspace.open_editor(pane, !preview);
+                        if let Some(grid) = &mut self.data.saved.workspace.grid {
+                            for (column, slot) in grid.slots.iter_mut().enumerate() {
+                                slot.home = grid::Cell {
+                                    column,
+                                    row: 0,
+                                    width: 1,
+                                    height: 2,
+                                };
+                            }
                         }
                     }
                     3 => self.connection = true,
@@ -1121,7 +1122,9 @@ fn thread_rows(
                 )
             })
             .inner;
-        if response.double_clicked() {
+        if response.double_clicked()
+            || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+        {
             actions.push(Action::Open(thread.key.clone(), true));
         } else if response.clicked() {
             actions.push(Action::Open(thread.key.clone(), false));
@@ -1422,9 +1425,8 @@ impl eframe::App for Desktop {
             .data
             .saved
             .workspace
-            .dock
-            .find_tab(&Pane::Work)
-            .is_some();
+            .visible_editors()
+            .contains(&&Pane::Work);
         if self
             .data
             .work
@@ -1448,6 +1450,7 @@ impl eframe::App for Desktop {
                     egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
                     egui::Key::P,
                 ) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::P)
+                    || i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)
                     || i.consume_key(egui::Modifiers::NONE, egui::Key::F1)
             })
         {
@@ -1477,28 +1480,7 @@ impl eframe::App for Desktop {
             });
         }
         let mut actions = vec![];
-        // Dock state is temporarily moved out so viewer data and layout never alias.
-        let mut dock = std::mem::replace(
-            &mut self.data.saved.workspace.dock,
-            egui_dock::DockState::new(vec![]),
-        );
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                let mut style = egui_dock::Style::from_egui(ui.style().as_ref());
-                style.overlay.overlay_type = egui_dock::OverlayType::HighlightedAreas;
-                DockArea::new(&mut dock)
-                    .id(egui::Id::new("workspace"))
-                    .style(style)
-                    .show_inside(
-                        ui,
-                        &mut Viewer {
-                            data: &mut self.data,
-                            actions: &mut actions,
-                        },
-                    );
-            });
-        self.data.saved.workspace.dock = dock;
+        self.grid_workspace(ui, &mut actions);
         for action in actions {
             self.action(action)
         }
@@ -1609,8 +1591,8 @@ fn main() -> eframe::Result {
         });
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180., 800.])
-            .with_min_inner_size([760., 480.])
+            .with_inner_size([1600., 940.])
+            .with_min_inner_size([760., 720.])
             .with_app_id("dev.boxen.desktop"),
         ..Default::default()
     };

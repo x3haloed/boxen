@@ -1,9 +1,15 @@
-use crate::model::{Pane, ThreadKey};
+use crate::{
+    grid::Grid,
+    model::{Pane, ThreadKey},
+};
 use egui_dock::{DockState, NodeIndex, SurfaceIndex, TabIndex, TabPath};
 use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub struct Workspace {
+    #[serde(default = "empty_dock", skip_serializing_if = "dock_empty")]
     pub dock: DockState<Pane>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<Grid>,
     pub preview: Option<ThreadKey>,
     #[serde(default)]
     pub mail_preview: Option<ThreadKey>,
@@ -12,6 +18,14 @@ pub struct Workspace {
     #[serde(default)]
     pub chat_preview: Option<ThreadKey>,
 }
+fn empty_dock() -> DockState<Pane> {
+    DockState::new(Vec::new())
+}
+
+fn dock_empty(dock: &DockState<Pane>) -> bool {
+    dock.iter_all_tabs().next().is_none()
+}
+
 impl Default for Workspace {
     fn default() -> Self {
         let mut dock = DockState::new(vec![Pane::Welcome]);
@@ -29,6 +43,7 @@ impl Default for Workspace {
         );
         Self {
             dock,
+            grid: None,
             preview: None,
             mail_preview: None,
             activity_preview: None,
@@ -37,6 +52,44 @@ impl Default for Workspace {
     }
 }
 impl Workspace {
+    pub fn enable_grid(&mut self) {
+        if self.grid.is_some() {
+            return;
+        }
+        let mut grid = Grid::default();
+        for (_, pane) in self.dock.iter_all_tabs() {
+            if matches!(
+                pane,
+                Pane::Thread(_)
+                    | Pane::Chat(_)
+                    | Pane::Activity(_)
+                    | Pane::Message(_)
+                    | Pane::Compose(_)
+                    | Pane::Work
+            ) && !self.is_preview(pane)
+            {
+                grid.migrate(pane.clone());
+            }
+        }
+        grid.peek = self.preview_pane();
+        self.set_preview(Pane::Welcome);
+        self.dock = empty_dock();
+        self.grid = Some(grid);
+    }
+
+    pub fn visible_editors(&self) -> Vec<&Pane> {
+        if let Some(grid) = &self.grid {
+            grid.slots
+                .iter()
+                .filter(|slot| slot.home.fits(grid.columns))
+                .map(|slot| &slot.pane)
+                .chain(grid.peek.iter())
+                .collect()
+        } else {
+            self.dock.iter_all_tabs().map(|(_, pane)| pane).collect()
+        }
+    }
+
     pub fn merge_resident_views(&mut self, activity: &mut std::collections::HashSet<ThreadKey>) {
         let legacy: Vec<_> = self
             .dock
@@ -69,6 +122,10 @@ impl Workspace {
         self.activity_preview = None;
     }
     pub fn show_work(&mut self) {
+        if let Some(grid) = &mut self.grid {
+            grid.open(Pane::Work, true);
+            return;
+        }
         if let Some(path) = self.dock.find_tab(&Pane::Work) {
             self.focus(path);
         } else {
@@ -80,6 +137,23 @@ impl Workspace {
     }
     pub fn relocate_thread(&mut self, old: &ThreadKey, new: &ThreadKey) {
         let old_pane = Pane::Thread(old.clone());
+        if let Some(grid) = &mut self.grid {
+            let new_pane = Pane::Thread(new.clone());
+            if grid.slots.iter().any(|slot| slot.pane == new_pane) {
+                grid.close(&old_pane);
+            }
+            for slot in &mut grid.slots {
+                if slot.pane == old_pane {
+                    slot.pane = new_pane.clone();
+                }
+            }
+            for pane in [&mut grid.peek, &mut grid.placing, &mut grid.focus] {
+                if pane.as_ref() == Some(&old_pane) {
+                    *pane = Some(new_pane.clone());
+                }
+            }
+            return;
+        }
         if let Some(path) = self.dock.find_tab(&old_pane) {
             let new_pane = Pane::Thread(new.clone());
             if self.dock.find_tab(&new_pane).is_some() {
@@ -99,6 +173,9 @@ impl Workspace {
         self.open_editor(Pane::Compose(id), true);
     }
     pub fn is_preview(&self, pane: &Pane) -> bool {
+        if let Some(grid) = &self.grid {
+            return grid.peek.as_ref() == Some(pane);
+        }
         match pane {
             Pane::Chat(k) => self.chat_preview.as_ref() == Some(k),
             Pane::Activity(k) => self.activity_preview.as_ref() == Some(k),
@@ -140,6 +217,10 @@ impl Workspace {
         }
     }
     pub fn open_editor(&mut self, pane: Pane, pin: bool) {
+        if let Some(grid) = &mut self.grid {
+            grid.open(pane, pin);
+            return;
+        }
         if let Some(path) = self.dock.find_tab(&pane) {
             self.focus(path);
             if pin {
@@ -215,6 +296,10 @@ impl Workspace {
         }
     }
     pub fn show_correspondence(&mut self) {
+        if let Some(grid) = &mut self.grid {
+            grid.sidebar = Pane::Correspondence;
+            return;
+        }
         if let Some(path) = self.dock.find_tab(&Pane::Correspondence) {
             self.focus(path);
         } else if let Some(path) = self.dock.find_tab(&Pane::Threads) {
@@ -233,6 +318,10 @@ impl Workspace {
         }
     }
     pub fn show_agents(&mut self) {
+        if let Some(grid) = &mut self.grid {
+            grid.sidebar = Pane::Agents;
+            return;
+        }
         if let Some(path) = self.dock.find_tab(&Pane::Agents) {
             self.focus(path);
             return;
@@ -260,6 +349,10 @@ impl Workspace {
         }
     }
     pub fn show_list(&mut self) {
+        if let Some(grid) = &mut self.grid {
+            grid.sidebar = Pane::Threads;
+            return;
+        }
         if let Some(path) = self.dock.find_tab(&Pane::Threads) {
             self.focus(path)
         } else if self.dock.main_surface().is_empty() {
@@ -283,6 +376,30 @@ mod tests {
             id: id.into(),
         }
     }
+    #[test]
+    fn migration_preserves_placed_editors_and_one_transient_peek() {
+        let mut workspace = Workspace::default();
+        let first = ThreadKey {
+            peer: "fixture-peer".into(),
+            id: "first".into(),
+        };
+        let second = ThreadKey {
+            peer: "fixture-peer".into(),
+            id: "second".into(),
+        };
+        workspace.open(first.clone(), true);
+        workspace.open(second.clone(), false);
+        workspace.enable_grid();
+        assert_eq!(
+            workspace.visible_editors(),
+            [&Pane::Thread(first.clone()), &Pane::Thread(second)]
+        );
+        let mut reloaded: Workspace =
+            serde_json::from_slice(&serde_json::to_vec(&workspace).unwrap()).unwrap();
+        reloaded.enable_grid();
+        assert_eq!(reloaded.visible_editors(), [&Pane::Thread(first)]);
+    }
+
     #[test]
     fn moved_thread_keeps_its_docked_preview_slot() {
         let mut workspace = Workspace::default();
