@@ -453,7 +453,7 @@ impl Desktop {
                     Err(e) => (Err(e),false),
                     Ok(()) => (client.operation(&dest,json!({"op":"control","id":steer.run,"action":{"type":"steer","text":steer.text,"attachments":files,"update_id":steer.id}})),true)
                 };
-                publisher.send(Update::Steered(steer.key, result, attempted));
+                publisher.send(Update::Steered(steer.key, steer.id, result, attempted));
             });
         } else {
             if self
@@ -493,18 +493,53 @@ impl Desktop {
             }
         }
     }
-    pub fn steered(&mut self, key: ThreadKey, result: Result<Value, String>, attempted: bool) {
+    fn refresh_steering_run(&self, key: &ThreadKey, run: &str) {
+        if let Some(client) = &self.client {
+            client.refresh_steering_run(
+                view::destination(&self.data, &key.peer),
+                run.into(),
+                self.bus.publisher(),
+            );
+        }
+    }
+
+    pub fn steered(
+        &mut self,
+        key: ThreadKey,
+        update: String,
+        result: Result<Value, String>,
+        attempted: bool,
+    ) {
+        let Some(steering) = self
+            .data
+            .saved
+            .steering
+            .iter()
+            .find(|s| s.id == update && s.key == key)
+        else {
+            return;
+        };
         self.data.active_steering.remove(&key);
         if let Err(error) = result {
             if !attempted || error.starts_with("HTTP 422:") {
-                self.data.saved.steering.retain(|s| s.key != key);
-                self.data
-                    .thread_issues
-                    .insert(key, format!("Update was not sent: {error}"));
+                if attempted && error.trim_end() == "HTTP 422: run is no longer active" {
+                    self.refresh_steering_run(&key, &steering.run);
+                    self.data.thread_issues.insert(
+                        key.clone(),
+                        "The run ended before it could take the update. The draft is still here."
+                            .into(),
+                    );
+                } else {
+                    self.data
+                        .thread_issues
+                        .insert(key.clone(), format!("Update was not sent: {error}"));
+                }
+                self.data.saved.steering.retain(|s| s.id != update);
             } else {
-                self.data
-                    .thread_issues
-                    .insert(key, format!("Update delivery is unconfirmed: {error}"));
+                self.data.thread_issues.insert(
+                    key.clone(),
+                    format!("Update delivery is unconfirmed: {error}"),
+                );
             }
             self.persist();
         }
@@ -525,24 +560,38 @@ impl Desktop {
                     .iter()
                     .any(|r| r.update_id.as_deref() == Some(&s.id))
                 {
-                    Some((s.clone(), true))
-                } else if transcript.rejected_updates.contains(&s.id) {
-                    Some((s.clone(), false))
+                    Some((s.clone(), Ok(())))
                 } else {
-                    None
+                    transcript
+                        .rejected_updates
+                        .get(&s.id)
+                        .map(|reason| (s.clone(), Err(reason.clone())))
                 }
             })
             .collect();
-        for (s, accepted) in &done {
+        for (s, outcome) in &done {
             self.data.saved.steering.retain(|p| p.id != s.id);
             self.data.active_steering.remove(&s.key);
-            if *accepted {
+            if outcome.is_ok() {
                 self.clear_submitted_draft(&s.key, &s.text, &s.files);
                 self.data.thread_issues.remove(&s.key);
-            } else {
+            } else if let Err(reason) = outcome
+                && find_thread(&self.data, &s.key).is_none_or(|thread| {
+                    !thread
+                        .runs
+                        .iter()
+                        .any(|run| run["record"]["spec"]["id"] == s.run && terminal(run))
+                })
+            {
+                self.refresh_steering_run(&s.key, &s.run);
+                let reason = if reason.is_empty() {
+                    "The runtime rejected the update"
+                } else {
+                    reason
+                };
                 self.data.thread_issues.insert(
                     s.key.clone(),
-                    "The runtime rejected the update. The draft is still here.".into(),
+                    format!("{}. The draft is still here.", reason.trim_end_matches('.')),
                 );
             }
         }

@@ -46,7 +46,8 @@ pub enum Update {
     ToolApprovals(String, Result<Value, String>),
     Mail(crate::correspondence::MailUpdate),
     Files(crate::attachments::FileUpdate),
-    Steered(crate::model::ThreadKey, Result<Value, String>, bool),
+    Steered(crate::model::ThreadKey, String, Result<Value, String>, bool),
+    SteeringRun(Destination, Value),
     Moved(crate::model::ThreadKey, Result<Value, String>),
     Discovered(Result<Value, String>),
     Catalog(Destination, Result<Vec<Value>, String>),
@@ -88,6 +89,22 @@ impl Publisher {
     }
 }
 impl Client {
+    pub fn refresh_steering_run(
+        &self,
+        destination: Destination,
+        run: String,
+        publisher: Publisher,
+    ) {
+        let client = self.clone();
+        std::thread::spawn(move || {
+            if let Ok(snapshot) = client.operation(&destination, json!({"op":"get","id":run}))
+                && snapshot["record"]["spec"]["id"] == run
+                && crate::model::terminal(&snapshot)
+            {
+                publisher.send(Update::SteeringRun(destination, snapshot));
+            }
+        });
+    }
     pub fn runtimes(&self, destination: Destination, serial: u64, publisher: Publisher) {
         let client = self.clone();
         std::thread::spawn(move || {
@@ -661,6 +678,24 @@ mod tests {
                 .iter()
                 .any(|r| r.text.contains("Fixture result"))
         );
+        let rejected = client
+            .operation(
+                &dest,
+                json!({"op":"control","id":id,"action":{"type":"steer","text":"late update"}}),
+            )
+            .unwrap_err();
+        assert_eq!(rejected.trim_end(), "HTTP 422: run is no longer active");
+        let refresh = Bus::new(egui::Context::default());
+        client.refresh_steering_run(dest.clone(), id.clone(), refresh.publisher());
+        let Update::SteeringRun(machine, settled) =
+            refresh.rx.recv_timeout(Duration::from_secs(12)).unwrap()
+        else {
+            panic!("Expected the settled run snapshot after rejection")
+        };
+        assert_eq!(machine.key, dest.key);
+        assert_eq!(settled["record"]["spec"]["id"], id);
+        assert_eq!(settled["status"], "completed");
+        assert_eq!(settled["last_seq"], transcript.seq);
         // Same-ID submission is an observation-safe reconciliation, never a second accepted effect.
         client
             .operation(&dest, json!({"op":"start","spec":spec}))

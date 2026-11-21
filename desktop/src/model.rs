@@ -111,7 +111,7 @@ pub struct Transcript {
     pub execution: Option<Value>,
     pub status: Option<Value>,
     pub rows: Vec<Row>,
-    pub rejected_updates: HashSet<String>,
+    pub rejected_updates: BTreeMap<String, String>,
     positions: BTreeMap<String, usize>,
     imported: bool,
 }
@@ -296,7 +296,7 @@ impl Transcript {
             ),
             "control_error" => {
                 if let Some(id) = data["update"]["update_id"].as_str() {
-                    self.rejected_updates.insert(id.into());
+                    self.rejected_updates.insert(id.into(), text("message"));
                 }
                 self.put(format!("event-{seq}"), "Incident", display(data), false);
             }

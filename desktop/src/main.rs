@@ -507,10 +507,10 @@ impl Desktop {
                             w.retry = Instant::now() + Duration::from_secs(2);
                         }
                     }
-                    self.reconcile_steering(&id);
                     if let Some(s) = batch.get("snapshot") {
                         self.replace_snapshot(id.split(':').next().unwrap_or(""), s.clone());
                     }
+                    self.reconcile_steering(&id);
                 }
                 Update::WatchError(id, epoch, error) => {
                     if let Some(w) = self.data.watches.get_mut(&id)
@@ -535,7 +535,15 @@ impl Desktop {
                 }
                 Update::Files(update) => self.file_update(update),
                 Update::Moved(key, result) => self.moved(key, result),
-                Update::Steered(key, result, sent) => self.steered(key, result, sent),
+                Update::Steered(key, update, result, sent) => {
+                    self.steered(key, update, result, sent)
+                }
+                Update::SteeringRun(destination, snapshot) => {
+                    let current = conversation::destination(&self.data, &destination.key);
+                    if current.address == destination.address {
+                        self.replace_snapshot(&destination.key, snapshot);
+                    }
+                }
                 Update::Controlled(id, _dest, _text, result) => {
                     self.data.sending.remove(&id);
                     if let Err(error) = result {
@@ -685,6 +693,9 @@ impl Desktop {
                     .iter_mut()
                     .find(|r| r["record"]["spec"]["id"] == snapshot["record"]["spec"]["id"])
                 {
+                    if snapshot["last_seq"].as_u64() < run["last_seq"].as_u64() {
+                        return;
+                    }
                     for key in ["placement", "machine"] {
                         if let Some(value) = run.get(key) {
                             snapshot[key] = value.clone();

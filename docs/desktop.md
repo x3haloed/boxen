@@ -150,6 +150,9 @@ transmission. Acceptance discovered by response or catalog reconciles that ID;
 an uncertain submission offers an explicit same-ID retry. Restart does not
 resubmit work automatically. Steering/cancellation are sent once and are not
 idempotent retries; uncertain steering retains the draft and an incident notice.
+A rejected steering send refreshes the addressed run. A terminal snapshot puts
+the composer through its usual ended-run transition, with the draft available
+for an explicit follow-up.
 The GUI does not store credentials, copy model keys, or depend on browser storage.
 
 ## Verification
