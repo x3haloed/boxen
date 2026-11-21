@@ -201,13 +201,14 @@ impl Jobs {
                     .ok_or_else(|| "continuation did not accept an activation".into());
             }
             let mut spec: Spec = prior.record.spec;
+            spec.completion_handoff = None;
             spec.reasoning_effort = None;
             if prior.record.automatic_cwd {
                 spec.cwd.clear();
             }
             spec.id = id;
             spec.prompt = directions;
-            self.start_locked(owner, spec, None, None, None)
+            self.start_locked(owner, spec, None, None, None, None)
         })();
         logging::record(
             if result.is_ok() {

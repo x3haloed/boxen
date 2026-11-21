@@ -119,6 +119,7 @@ impl Jobs {
                 imported_at: at,
             };
             let record = Record {
+                delegated_from: None,
                 reasoning_effort: None,
                 execution: None,
                 automatic_cwd: false,
@@ -133,6 +134,7 @@ impl Jobs {
                 recovery: None,
                 mailbox: None,
                 spec: Spec {
+                    completion_handoff: None,
                     required_capabilities: Default::default(),
                     reasoning_effort: None,
                     attachments: vec![],

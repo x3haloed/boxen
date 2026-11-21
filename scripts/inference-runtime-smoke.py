@@ -111,6 +111,11 @@ class Provider(http.server.BaseHTTPRequestHandler):
                         assert value['response']=='CHILD_RESPONSE',value
                         text('BUILT_IN_WORK_COMPLETE')
                     else:call('boxen_work',{'action':'read','request_id':'built-in-child','after':value.get('next_after',0),'wait_ms':20000})
+            elif prompt.startswith('HANDOFF_REQUEST '):
+                if not tools: call('boxen_work', {'action':'handoff','request_id':prompt.split(' ',1)[1],'prompt':'CHILD_REQUEST'})
+                else:
+                    assert json.loads(tools[-1]['content'])['acceptance']=='accepted'
+                    text('TRANSFER_ACCEPTED')
             elif prompt=='CHILD_REQUEST':text('CHILD_RESPONSE')
             elif prompt=='QUIET_HEADERS':text('delayed headers')
             elif prompt=='FOLLOWUP':
@@ -322,6 +327,17 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         _,dispatched=collect(scheduled);assert dispatched['status']=='completed'
         assert dispatched['record']['scheduled']['handoff']==receipt['source']
         print('PASS resident timing handoff and original provenance through OpenRouter')
+        source_id=secrets.token_hex(32);child_id=secrets.token_hex(32)
+        source=api({'op':'start_until_handoff','spec':{'id':source_id,'thread_id':source_id,
+                    'cwd':temp,'model':'fixture','backend':'openrouter','prompt':'HANDOFF_REQUEST '+child_id,
+                    'completion_handoff':{'machine_id':keys[1],'request_id':child_id}}})
+        assert collect(source)[1]['status']=='completed' and result(source)['response']=='TRANSFER_ACCEPTED'
+        child=api({'op':'get','id':child_id})
+        child_events,done=collect(child)
+        assert done['status']=='completed' and done['record']['delegated_from']['run_id']==source_id
+        assert any(e['kind']=='handoff_origin' and e['data']==done['record']['delegated_from'] for e in child_events)
+        print('PASS OpenRouter completion tied to the requested durable child acceptance')
+
 
         r=resident();m1=send(r,'SILENT one');m2=send(r,'REPLY one');m3=send(r,'SILENT two')
         activation=activate(r);assert len(activation['record']['mailbox']['message_ids'])==3

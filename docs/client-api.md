@@ -72,6 +72,30 @@ exact retry identity. Its order is immaterial.
 Resident activation directions and mailbox intake have separate operations.
 Steering capabilities apply to anonymous requests.
 
+## Handoff completion
+
+An anonymous request whose deliverable is a transfer of execution can use
+`start_until_handoff` with
+`spec.completion_handoff = {"machine_id":"DESTINATION","request_id":"CHILD_RUN_ID"}`.
+The CLI selects this operation through `--complete-on-handoff JSON`. The
+destination can be the executing machine or an admitted peer. The exact
+requirement is retained with the request and included in runtime context. Older
+daemons reject this operation before accepting work.
+
+The runtime reports its own outcome, and a successful parent outcome also
+requires a retained receipt for that exact destination and child ID. The
+receipt must link the transfer to the current parent run. An absent transfer
+fails the condition. An attempted transfer with unknown acceptance leaves the
+parent interrupted and its stable request ID available for inspection. A
+confirmed transfer lets the parent finish while the child continues to own its
+execution outcome.
+
+`boxen_work` uses the authenticated `start_handoff` operation for these
+transfers. The destination retains `record.delegated_from` and streams
+`handoff_origin`. The machine identity is the authenticated origin of the
+declaration. The reported identifiers link the source run, conversation, and
+tool call. An exact retry preserves the original source link.
+
 ## Anonymous conversation moves
 
 Send `thread_move` to the current machine with a new 64-character move `id`, the

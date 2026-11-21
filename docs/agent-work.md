@@ -3,7 +3,7 @@
 `boxen_machines`, `boxen_work`, and `boxen_thread_files` expose the existing
 machine network, anonymous conversations, retained run events, controls and
 attachment transport. They are available to built-in inference workloads and
-through a run-scoped MCP connection to managed Codex workloads. These tools do
+through a run-scoped MCP connection to managed Codex and Antigravity workloads. These tools do
 not create residents, send mailbox correspondence, distribute credentials or
 move a native conversation to another host.
 
@@ -22,6 +22,7 @@ credentials. A workload can inspect its actual destination environment.
 | --- | --- |
 | `list` | A bounded page of anonymous requests, optionally filtered by `thread_id`; `next_cursor` continues the catalog. |
 | `request` | An accepted request handle, an explicit rejection, a pre-dispatch failure, or an unknown acceptance outcome. |
+| `handoff` | The same request arguments and outcomes, with durable source provenance retained by the destination. |
 | `read` | Bounded retained events, a replay cursor, current status and an available conventional response. |
 | `steer` | Acceptance of additional input for active work. |
 | `cancel` | Acceptance of an interruption request. |
@@ -86,6 +87,13 @@ Control attempts and their confirmed responses are retained in the coordinating
 run. An exact repeated control with a retained result returns it; an attempt
 without a retained result remains unknown and is not automatically repeated.
 A newly accepted continuation does not replay earlier prompts or tools.
+
+For `handoff`, the destination authenticates the machine that declares the
+origin. Its accepted record retains that machine and the reported source run,
+conversation, and tool call. The source run retains the accepted destination
+handle. The child remains independently observable and continues when the
+coordinating run ends. An anonymous request can require the exact acceptance
+receipt as its completion condition. [Handoff completion](client-api.md#handoff-completion)
 
 ## Files and runtime boundaries
 

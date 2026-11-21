@@ -30,6 +30,15 @@ impl Machine {
 
     fn request(&self, jobs: &Arc<Jobs>, owner: &str, request: Value) -> Result<Value> {
         if self.local {
+            if request["op"] == "start_handoff" {
+                let thread = request["spec"]["thread_id"]
+                    .as_str()
+                    .ok_or("thread ID required")?;
+                let owner = jobs
+                    .thread_owner(thread)?
+                    .unwrap_or_else(|| owner.to_owned());
+                return crate::operator::start_handoff(jobs, jobs.machine_id(), &owner, &request);
+            }
             return crate::operator::operation(jobs, owner, &request);
         }
         let network = self
@@ -212,7 +221,11 @@ fn identifier(value: Option<&str>, run: &Run, call_id: &str) -> Result<String> {
 fn reference(machine: &Machine, snapshot: &Value) -> Value {
     let record = &snapshot["record"];
     let spec = &record["spec"];
-    json!({"machine":machine.key,"request_id":spec["id"],"thread_id":spec["thread_id"],"status":snapshot["status"],"backend":spec["backend"],"model":spec["model"],"cwd":spec["cwd"],"execution":record["execution"],"last_seq":snapshot["last_seq"]})
+    let mut work = json!({"machine":machine.key,"request_id":spec["id"],"thread_id":spec["thread_id"],"status":snapshot["status"],"backend":spec["backend"],"model":spec["model"],"cwd":spec["cwd"],"execution":record["execution"],"last_seq":snapshot["last_seq"]});
+    if let Some(source) = record.get("delegated_from") {
+        work["delegated_from"] = source.clone();
+    }
+    work
 }
 
 fn anonymous(snapshot: &Value) -> Result<()> {
@@ -323,6 +336,7 @@ fn active(run: &Run) -> Result<()> {
 
 fn request(jobs: &Arc<Jobs>, run: &Arc<Run>, call_id: &str, args: &Value) -> Result<Value> {
     let record = run.snapshot().record;
+    let handoff = args["action"] == "handoff";
     let machine = work_machine(jobs, run, args)?;
     let id = identifier(args["request_id"].as_str(), run, call_id)?;
     let prompt = args["prompt"]
@@ -450,6 +464,25 @@ fn request(jobs: &Arc<Jobs>, run: &Arc<Run>, call_id: &str, args: &Value) -> Res
             wire["op"] = json!("start_checked");
             wire["spec"]["required_capabilities"] = json!(requirements);
         }
+        if handoff {
+            let origin = if let Some(old) = &old {
+                let source: crate::jobs::HandoffOrigin =
+                    serde_json::from_value(old["record"]["delegated_from"].clone())
+                        .map_err(|_| "This request has no retained handoff to reconcile")?;
+                if source.machine_id != jobs.machine_id()
+                    || source.thread_id != record.spec.thread_id
+                {
+                    return Err(
+                        "This request was handed off by a different conversation or machine".into(),
+                    );
+                }
+                source
+            } else {
+                crate::jobs::HandoffOrigin::from_run(run, jobs.machine_id(), call_id)?
+            };
+            wire["op"] = json!("start_handoff");
+            wire["source"] = json!(origin);
+        }
         if let Some(old) = &old {
             if !old["record"]["after"].is_null() {
                 wire["after"] = old["record"]["after"].clone();
@@ -460,6 +493,7 @@ fn request(jobs: &Arc<Jobs>, run: &Arc<Run>, call_id: &str, args: &Value) -> Res
         run.append("work_request", json!({"call_id":call_id,"request_id":id,"machine":machine.key,"fingerprint":fingerprint,"request":wire}))?;
         wire
     };
+    let source = wire.get("source").cloned();
     let files: Vec<crate::attachments::Attachment> =
         serde_json::from_value(wire["spec"]["attachments"].clone())?;
     if !machine.local
@@ -468,20 +502,55 @@ fn request(jobs: &Arc<Jobs>, run: &Arc<Run>, call_id: &str, args: &Value) -> Res
             machine.request(jobs, &record.owner, request)
         })
     {
+        let acceptance = if repeated {
+            "unknown"
+        } else {
+            "not_dispatched"
+        };
+        if source.is_some() {
+            run.append(
+                "work_handoff_result",
+                json!({"machine":machine.key,"request_id":id,"acceptance":acceptance}),
+            )?;
+        }
         return Ok(
-            json!({"machine":machine.key,"request_id":id,"thread_id":wire["spec"]["thread_id"],"acceptance":if repeated {"unknown"} else {"not_dispatched"},"dispatch":"not_dispatched","error":error.to_string()}),
+            json!({"machine":machine.key,"request_id":id,"thread_id":wire["spec"]["thread_id"],"acceptance":acceptance,"dispatch":"not_dispatched","error":error.to_string()}),
         );
     }
     active(run)?;
     match machine.request(jobs, &record.owner, wire) {
         Ok(snapshot) => {
             let work = reference(&machine, &snapshot);
+            if let Some(source) = source
+                && work["delegated_from"] != source
+            {
+                run.append(
+                    "work_handoff_result",
+                    json!({"machine":machine.key,"request_id":id,"acceptance":"unknown"}),
+                )?;
+                return Ok(
+                    json!({"machine":machine.key,"request_id":id,"acceptance":"unknown","error":"Destination response did not confirm the requested handoff provenance"}),
+                );
+            }
             run.append("work_accepted", json!({"call_id":call_id,"work":work}))?;
             Ok(json!({"acceptance":"accepted","work":work,"next_after":0}))
         }
-        Err(error) => Ok(
-            json!({"machine":machine.key,"request_id":id,"acceptance":if machine.local || error.is::<crate::protocol::Rejected>() {"rejected"}else{"unknown"},"error":error.to_string(),"retry":"An exact request_id retry reuses the destination's accepted run; a read inspects its current state"}),
-        ),
+        Err(error) => {
+            let acceptance = if machine.local || error.is::<crate::protocol::Rejected>() {
+                "rejected"
+            } else {
+                "unknown"
+            };
+            if source.is_some() {
+                run.append(
+                    "work_handoff_result",
+                    json!({"machine":machine.key,"request_id":id,"acceptance":acceptance}),
+                )?;
+            }
+            Ok(
+                json!({"machine":machine.key,"request_id":id,"acceptance":acceptance,"error":error.to_string(),"retry":"An exact request_id retry reuses the destination's accepted run; a read inspects its current state"}),
+            )
+        }
     }
 }
 
@@ -807,12 +876,13 @@ pub fn call(
                 let machine = work_machine(jobs, run, &args)?;
                 match args["action"].as_str().unwrap_or("") {
                     "list" => catalog(jobs, run, &machine, &args),
-                    "request" => request(jobs, run, call_id, &args),
+                    "request" | "handoff" => request(jobs, run, call_id, &args),
                     "read" => read(jobs, run, &machine, &args),
                     "steer" | "cancel" | "respond" => control(jobs, run, call_id, &machine, &args),
-                    _ => {
-                        Err("Work actions are list, request, read, steer, cancel or respond".into())
-                    }
+                    _ => Err(
+                        "Work actions are list, request, handoff, read, steer, cancel or respond"
+                            .into(),
+                    ),
                 }
             }
             _ => Err("Unknown work tool".into()),
@@ -825,7 +895,7 @@ pub fn call(
 pub fn tools() -> Vec<Value> {
     vec![
         json!({"type":"function","name":"boxen_machines","description":"This tool discovers the current machine and admitted network members, with observed reachability, runtime/backends and execution context. machine accepts an exact name, full id or unambiguous id prefix; omission reads eight members at a time. next_offset retrieves later members. A failed probe reports unavailable without declaring a machine stopped. Runtime declarations do not establish toolchain, application permissions or model credentials.","inputSchema":{"type":"object","properties":{"machine":{"type":"string"},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}}),
-        json!({"type":"function","name":"boxen_work","description":"This tool requests and follows ordinary work across admitted machines. list returns a bounded page of existing anonymous requests, optionally filtered by thread_id; next_cursor retrieves the following page. request starts an anonymous conversation or continues thread_id. after_request_id identifies an exact previous request instead of looking up a thread head; a stale predecessor is rejected by the destination. machine accepts a discovered name/id; omission follows a known request or thread handle in this conversation, otherwise local; new remote work gets an automatic destination workspace. request_id can be omitted or a short stable label; labels remain stable within this coordinating conversation, including reads and controls. Returned ids identify exact retries. Attachments are local file paths retained before transfer. required_capabilities restricts acceptance to a backend that offers all named capabilities. read returns bounded retained progress, next_after, current status and a final response; after replays from that sequence, wait_ms waits up to 20000 for new activity. Large projections are labeled truncated; event_seq retrieves one original event as paged JSON text with offset/next_offset. A long final response has next_response_offset for a response_offset read. steer adds input to active work, cancel requests interruption, and respond answers a retained backend request. Controls can have unknown outcomes and are not automatically repeated. A host/network failure does not establish workload failure. Execution continues independently of this observer. Work requests are distinct from resident mailbox correspondence.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["list","request","read","steer","cancel","respond"]},"machine":{"type":"string"},"request_id":{"type":"string"},"thread_id":{"type":"string"},"after_request_id":{"type":"string"},"cursor":{"type":"object"},"prompt":{"type":"string"},"backend":{"type":"string","enum":crate::runtime::Backend::ALL.map(crate::runtime::Backend::id)},"required_capabilities":{"type":"array","items":{"type":"string","enum":crate::runtime::Capability::ALL}},"cwd":{"type":"string"},"model":{"type":"string"},"attachments":{"type":"array","items":{"type":"string"},"maxItems":8},"after":{"type":"integer","minimum":0},"event_seq":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"response_offset":{"type":"integer","minimum":0},"wait_ms":{"type":"integer","minimum":0,"maximum":20000},"backend_request_id":{},"result":{}},"required":["action"],"additionalProperties":false}}),
+        json!({"type":"function","name":"boxen_work","description":"This tool requests and follows ordinary work across admitted machines. list returns a bounded page of existing anonymous requests, optionally filtered by thread_id; next_cursor retrieves the following page. request starts an anonymous conversation or continues thread_id. handoff accepts the same arguments and records this originating run and tool call at the destination. Handoff acceptance means that the destination owns the new request; later execution still has its own outcome. after_request_id identifies an exact previous request instead of looking up a thread head; a stale predecessor is rejected by the destination. machine accepts a discovered name/id; omission follows a known request or thread handle in this conversation, otherwise local; new remote work gets an automatic destination workspace. request_id can be omitted or a short stable label; labels remain stable within this coordinating conversation, including reads and controls. Returned ids identify exact retries. Attachments are local file paths retained before transfer. required_capabilities restricts acceptance to a backend that offers all named capabilities. read returns bounded retained progress, next_after, current status and a final response; after replays from that sequence, wait_ms waits up to 20000 for new activity. Large projections are labeled truncated; event_seq retrieves one original event as paged JSON text with offset/next_offset. A long final response has next_response_offset for a response_offset read. steer adds input to active work, cancel requests interruption, and respond answers a retained backend request. Controls can have unknown outcomes and are not automatically repeated. A host/network failure does not establish workload failure. Execution continues independently of this observer. Work requests are distinct from resident mailbox correspondence.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["list","request","handoff","read","steer","cancel","respond"]},"machine":{"type":"string"},"request_id":{"type":"string"},"thread_id":{"type":"string"},"after_request_id":{"type":"string"},"cursor":{"type":"object"},"prompt":{"type":"string"},"backend":{"type":"string","enum":crate::runtime::Backend::ALL.map(crate::runtime::Backend::id)},"required_capabilities":{"type":"array","items":{"type":"string","enum":crate::runtime::Capability::ALL}},"cwd":{"type":"string"},"model":{"type":"string"},"attachments":{"type":"array","items":{"type":"string"},"maxItems":8},"after":{"type":"integer","minimum":0},"event_seq":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"response_offset":{"type":"integer","minimum":0},"wait_ms":{"type":"integer","minimum":0,"maximum":20000},"backend_request_id":{},"result":{}},"required":["action"],"additionalProperties":false}}),
         crate::jobs::thread_workspace::tool(),
     ]
 }

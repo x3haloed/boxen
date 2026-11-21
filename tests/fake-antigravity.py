@@ -95,6 +95,13 @@ for line in sys.stdin:
             continue
         if prompt == 'RECONSTRUCT':
             assert 'Historical effects' in additional[0] and 'LATE_WAKE' in additional[0]
+        if prompt.startswith('HANDOFF_REQUEST '):
+            child = prompt.split(' ', 1)[1]
+            result = tool('boxen_work', {'action': 'handoff', 'request_id': child, 'prompt': 'ACP delegated task'}, 5)
+            assert result['acceptance'] == 'accepted' and result['work']['request_id'] == child
+            chunk('ACP transfer accepted.')
+            send(id=ident, result={'stopReason': 'end_turn'})
+            continue
         if prompt.startswith(('Mailbox activation.', 'Message activation.')):
             activation = json.loads(prompt.rsplit('\n', 1)[1])
             incoming = activation['messages']

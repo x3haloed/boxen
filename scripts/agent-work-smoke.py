@@ -52,17 +52,20 @@ with tempfile.TemporaryDirectory(prefix='boxen-agent-work-') as temporary:
         req = urllib.request.Request(f'http://127.0.0.1:{uis[i]}/api/operation', data=json.dumps({'peer': keys[i], 'address': '', 'request': op}).encode(), headers={'Authorization': 'Bearer '+tokens[i], 'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=30) as response: return json.load(response)
     parent_thread = secrets.token_hex(32)
-    def scenario(steps, after=None):
+    def scenario(steps, after=None, completion=None, expected='completed'):
         ident = secrets.token_hex(32)
         packet = {'op':'start', 'spec':{'id':ident, 'thread_id':parent_thread, 'backend':'codex', 'cwd':str(workspace), 'model':'fixture', 'prompt':'WORK_INTERFACE:'+json.dumps(steps)}}
         if after: packet['after'] = after
+        if completion:
+            packet['op'] = 'start_until_handoff'
+            packet['spec']['completion_handoff'] = completion
         api(0, packet)
         deadline = time.monotonic()+90
         while time.monotonic() < deadline:
             state = api(0, {'op':'get', 'id':ident})
             if state['status'] in ('completed','interrupted','failed','cancelled'): break
             time.sleep(.1)
-        assert state['status'] == 'completed', state
+        assert state['status'] == expected, state
         assert api(0, {'op':'thread_result','id':ident})['response'] == 'WORK_INTERFACE_COMPLETE'
         return ident, json.loads((workspace/'work-interface-results.json').read_text())
     try:
@@ -74,8 +77,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-agent-work-') as temporary:
             step('boxen_machines', {}, 'machines', {'total':3}),
             step('boxen_machines', {'machine':keys[1][:12]}, 'target', {'machines.0.reachable':True}),
             step('boxen_machines', {'machine':'Offline'}, 'offline', {'machines.0.reachable':False}),
-            step('boxen_work', work('request', request_id='evidence', prompt='WORK_CHILD', model='fixture', attachments=[str(attachment)], required_capabilities=['live_steering', 'native_session_resume']), 'child', {'acceptance':'accepted'}),
-            step('boxen_work', work('request', request_id='evidence', prompt='changed'), error=True),
+            step('boxen_work', work('handoff', request_id='evidence', prompt='WORK_CHILD', model='fixture', attachments=[str(attachment)], required_capabilities=['live_steering', 'native_session_resume']), 'child', {'acceptance':'accepted'}),
+            step('boxen_work', work('handoff', request_id='evidence', prompt='changed'), error=True),
             step('boxen_work', {'action':'read','request_id':'evidence'}, 'read', {'done':True,'response':'WORK_CHILD_COMPLETE'}, until_done=True),
             step('boxen_thread_files', {'action':'list','machine':'Target','run_id':ref('child.work.request_id')}, 'files'),
             step('boxen_thread_files', {'action':'pull','run_id':ref('child.work.request_id'),'path':'evidence.txt'}, 'pull'),
@@ -106,6 +109,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-agent-work-') as temporary:
         assert child['record']['automatic_cwd']
         assert child['record']['spec']['model']=='fixture'
         assert set(child['record']['spec']['required_capabilities']) == {'live_steering', 'native_session_resume'}
+        origin = child['record']['delegated_from']
+        assert origin['machine_id'] == keys[0] and origin['run_id'] == first and origin['thread_id'] == parent_thread
+        assert results['child']['work']['delegated_from'] == origin
         digest = child['record']['spec']['attachments'][0]['digest']
         assert digest == hashlib.sha256(attachment.read_bytes()).hexdigest()
         assert results['catalog']['requests'][0]['work']['request_id'] == child_id
@@ -126,7 +132,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-agent-work-') as temporary:
         print('PASS native MCP discovery, reachability isolation, labels, immutable transfer, remote stream/read, follow-up, steering, cancellation and file retrieval')
         attachment.unlink(); stop(0); launch(0)
         second, retry = scenario([
-            step('boxen_work', work('request', request_id='evidence', prompt='WORK_CHILD', model='fixture', attachments=[str(attachment)], required_capabilities=['native_session_resume', 'live_steering']), 'retry', {'acceptance':'accepted','work.request_id':child_id}),
+            step('boxen_work', work('handoff', request_id='evidence', prompt='WORK_CHILD', model='fixture', attachments=[str(attachment)], required_capabilities=['native_session_resume', 'live_steering']), 'retry', {'acceptance':'accepted','work.request_id':child_id}),
             step('boxen_work', work('read', request_id='evidence',after=results['read']['next_after']), 'tail', {'done':True,'events':[]}),
             step('boxen_thread_files', {'action':'attachment','machine':'Target','run_id':child_id,'digest':digest}, 'original'),
             step('boxen_work', {'action':'request','request_id':'local','prompt':'WORK_CHILD'}, 'local', {'acceptance':'accepted'}),
@@ -137,12 +143,47 @@ with tempfile.TemporaryDirectory(prefix='boxen-agent-work-') as temporary:
             step('boxen_work', {'action':'read','request_id':'large','response_offset':ref('large_read.next_response_offset')}, 'response_page'),
         ], after=first)
         assert pathlib.Path(retry['original']['path']).read_text() == 'immutable original 🐈'
+        assert retry['retry']['work']['delegated_from'] == origin
         assert retry['large_read']['next_response_offset']==16384
         assert retry['response_page']['response']=='🐈'*4096
         assert retry['response_page']['next_response_offset']==32768
         assert any(e.get('truncated') for e in retry['large_replay']['events'])
         assert len([r for r in api(1,{'op':'list'}) if r['record']['spec']['id']==child_id]) == 1
         print('PASS resumed native conversation, source restart, receipt-backed exact retry after original removal, cursor replay, retained attachment and local work')
+
+        delegated = secrets.token_hex(32)
+        required = {'machine_id':keys[1], 'request_id':delegated}
+        coordinator, _ = scenario([
+            step('boxen_work', work('handoff', request_id=delegated, prompt='ELICITATION_ACCEPT'),
+                 'handoff', {'acceptance':'accepted','work.request_id':delegated}),
+        ], after=second, completion=required)
+        child = api(1, {'op':'get','id':delegated})
+        assert child['status'] in ('starting','running','waiting'), child['status']
+        assert child['record']['delegated_from']['run_id'] == coordinator
+        deadline=time.monotonic()+6
+        while child['status'] != 'waiting':
+            assert time.monotonic() < deadline, child['status']
+            time.sleep(.05)
+            child=api(1, {'op':'get','id':delegated})
+        api(1, {'op':'control','id':delegated,'action':{'type':'respond','request_id':0,
+               'result':{'action':'accept','content':{}}}})
+        while child['status'] != 'completed':
+            assert time.monotonic() < deadline, child['status']
+            time.sleep(.05)
+            child=api(1, {'op':'get','id':delegated})
+        wrong = secrets.token_hex(32)
+        missing, _ = scenario([
+            step('boxen_work', work('handoff', request_id=wrong, prompt='WORK_CHILD'),
+                 'different_child', {'acceptance':'accepted'}),
+        ], after=coordinator, completion={'machine_id':keys[1],'request_id':secrets.token_hex(32)}, expected='failed')
+        forged = secrets.token_hex(32)
+        try:
+            api(1, {'op':'start_handoff','source':origin,'spec':{
+                'id':forged,'thread_id':forged,'backend':'codex','cwd':'','model':'fixture','prompt':'Unexpected work'}})
+            raise AssertionError('Foreign provenance was accepted')
+        except urllib.error.HTTPError as error:
+            assert error.code == 422 and 'authenticated machine' in error.read().decode()
+        print('PASS handoff origin authentication and explicit completion at destination acceptance; missing handoff fails')
 
         # A deliberately slow encrypted link makes transfer cancellation observable.
         # The proxy never sees application plaintext or machine credentials.
@@ -172,7 +213,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-agent-work-') as temporary:
             large=workspace/'transfer-input.txt';large.write_bytes(b'opaque transfer bytes'*419431)
             cancelling=secrets.token_hex(32)
             steps=[step('boxen_work',work('request',request_id='cancelled-transfer',prompt='WORK_CHILD',attachments=[str(large)]),allow_error=True)]
-            api(0,{'op':'start','after':second,'spec':{'id':cancelling,'thread_id':parent_thread,'backend':'codex','cwd':str(workspace),'model':'fixture','prompt':'WORK_INTERFACE:'+json.dumps(steps)}})
+            api(0,{'op':'start','after':missing,'spec':{'id':cancelling,'thread_id':parent_thread,'backend':'codex','cwd':str(workspace),'model':'fixture','prompt':'WORK_INTERFACE:'+json.dumps(steps)}})
             request=urllib.request.Request(f'http://127.0.0.1:{uis[0]}/api/watch',data=json.dumps({'peer':keys[0],'address':'','request':{'id':cancelling,'after':0}}).encode(),headers={'Authorization':'Bearer '+tokens[0],'Content-Type':'application/json'})
             with urllib.request.urlopen(request,timeout=20) as stream:
                 for line in stream:

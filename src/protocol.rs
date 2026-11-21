@@ -417,12 +417,11 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 );
                 Ok(logger.status())
             }
-            "start" | "start_checked" => {
+            "start" | "start_checked" | "start_until_handoff" => {
                 let spec = serde_json::from_value::<Spec>(request["spec"].clone())?;
-                let checked = request["op"] == "start_checked";
-                let has_requirements = !spec.required_capabilities.is_empty();
-                if checked != has_requirements {
-                    return Err("Start with capability requirements uses start_checked and a nonempty required_capabilities set".into());
+                let expected = spec.start_operation();
+                if request["op"] != expected {
+                    return Err(format!("The selected requirements use {expected}").into());
                 }
                 Ok(serde_json::to_value(
                     jobs.start_after(

@@ -3,7 +3,7 @@
 //! continuity provenance rather than being rewritten during network admission.
 use crate::{
     Result,
-    jobs::{Jobs, Run},
+    jobs::{HandoffOrigin, Jobs, Run, Spec},
     logging::{self, Context, Level, Target},
 };
 use serde_json::{Value, json};
@@ -50,7 +50,9 @@ fn namespace(jobs: &Jobs, actor: &str, request: &Value) -> Result<String> {
     }
     let thread = match op {
         "context" => request["thread_id"].as_str(),
-        "start" | "start_checked" => request["spec"]["thread_id"].as_str(),
+        "start" | "start_checked" | "start_until_handoff" | "start_handoff" => {
+            request["spec"]["thread_id"].as_str()
+        }
         "thread_activity" | "thread_reasoning" => request["id"].as_str(),
         "resident_promote" => request["spec"]["thread_id"].as_str(),
         _ => None,
@@ -163,12 +165,44 @@ fn namespace(jobs: &Jobs, actor: &str, request: &Value) -> Result<String> {
     }
     Ok(actor.into())
 }
+/// Claims are attributed to the authenticated originating machine. Remote
+/// source journals need not be reachable for the destination to accept work.
+pub(crate) fn start_handoff(
+    jobs: &Arc<Jobs>,
+    actor: &str,
+    owner: &str,
+    request: &Value,
+) -> Result<Value> {
+    let source: HandoffOrigin = serde_json::from_value(request["source"].clone())?;
+    source.validate()?;
+    if source.machine_id != actor {
+        return Err("Handoff source differs from the authenticated machine".into());
+    }
+    if actor == jobs.machine_id() {
+        let run = jobs.operator_run(&source.run_id)?;
+        if run.snapshot().record.spec.thread_id != source.thread_id {
+            return Err("Local handoff source does not identify the origin conversation".into());
+        }
+    }
+    let spec: Spec = serde_json::from_value(request["spec"].clone())?;
+    let after = request
+        .get("after")
+        .map(|value| value.as_str().ok_or("after must be a run ID"))
+        .transpose()?;
+    Ok(serde_json::to_value(
+        jobs.start_handoff(owner, spec, after, source)?,
+    )?)
+}
+
 pub fn operation(jobs: &Arc<Jobs>, actor: &str, request: &Value) -> Result<Value> {
     let op = request["op"].as_str().unwrap_or("");
     let result = (|| -> Result<Value> {
         match op {
             "tool_approvals" => return jobs.tool_approvals.operation(&request["args"]),
             "infrastructure_history" => return crate::infrastructure::page(request),
+            "start_handoff" => {
+                return start_handoff(jobs, actor, &namespace(jobs, actor, request)?, request);
+            }
             "thread_move" => return jobs.thread_move(request),
             "thread_move_receive" => return jobs.receive_thread_move(actor, request),
             "thread_placement" => return jobs.thread_placement(request),

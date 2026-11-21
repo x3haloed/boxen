@@ -79,7 +79,7 @@ boxen [--data-dir PATH] untrust PUBLIC_KEY\n\
 boxen [--data-dir PATH] peers\n\
 boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--antigravity PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
-boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|antigravity|openrouter] [--require CAPABILITY,...] [--context JSON] [--reasoning-effort LEVEL]\n\
+boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|antigravity|openrouter] [--require CAPABILITY,...] [--complete-on-handoff JSON] [--context JSON] [--reasoning-effort LEVEL]\n\
 boxen [--data-dir PATH] request HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] messages HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] discord-connector --instance ID [--url http://127.0.0.1:PORT]\n\
@@ -545,11 +545,9 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
         }
         "start" => {
             let required_capabilities = take_requirements(&mut args)?;
-            let op = if required_capabilities.is_empty() {
-                "start"
-            } else {
-                "start_checked"
-            };
+            let completion_handoff = take_option(&mut args, "--complete-on-handoff")?
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?;
             let reasoning_effort = take_option(&mut args, "--reasoning-effort")?;
             let context = take_option(&mut args, "--context")?
                 .map(|v| serde_json::from_str(&v))
@@ -561,6 +559,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 return Err("start requires HOST:PORT PUBLIC_KEY CWD MODEL PROMPT".into());
             }
             let spec = jobs::Spec {
+                completion_handoff,
                 required_capabilities,
                 reasoning_effort,
                 attachments: vec![],
@@ -577,6 +576,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 },
                 prompt: args[4].clone(),
             };
+            let op = spec.start_operation();
             println!(
                 "{}",
                 serde_json::to_string_pretty(&protocol::request(

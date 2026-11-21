@@ -219,6 +219,18 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
         assert dispatched['record']['scheduled']['handoff'] == receipt['source']
         print('PASS resident timing handoff and original provenance through Antigravity ACP')
 
+        source_id, child_id = uid(), uid()
+        completion = {'machine_id': keys[1], 'request_id': child_id}
+        result = json.loads(cli(0, 'start', *remote, str(workspaces[0]), 'fixture-model',
+                          'HANDOFF_REQUEST '+child_id, '--backend', 'antigravity',
+                          '--id', source_id, '--complete-on-handoff', json.dumps(completion)))
+        assert result['record']['spec']['completion_handoff'] == completion
+        assert collect(source_id)[1]['status'] == 'completed'
+        child_events, child = collect(child_id)
+        assert child['status'] == 'completed' and child['record']['delegated_from']['run_id'] == source_id
+        assert any(e['kind'] == 'handoff_origin' and e['data'] == child['record']['delegated_from'] for e in child_events)
+        print('PASS Antigravity CLI completion tied to the requested durable child acceptance')
+
     finally:
         for process in processes:
             if process.poll() is None:

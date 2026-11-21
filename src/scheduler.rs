@@ -69,19 +69,10 @@ impl Definition {
         Ok(())
     }
 }
-/// The run and tool call that handed work to the scheduler.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Handoff {
-    pub run_id: String,
-    pub thread_id: String,
-    pub machine_id: String,
-    pub call_id: String,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Origin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handoff: Option<Handoff>,
+    pub handoff: Option<jobs::HandoffOrigin>,
     pub schedule_id: String,
     pub revision: u64,
     pub due_at_ms: u64,
@@ -110,7 +101,7 @@ impl Origin {
 pub struct Job {
     pub definition: Definition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handoff: Option<Handoff>,
+    pub handoff: Option<jobs::HandoffOrigin>,
     pub owner: String,
     pub revision: u64,
     pub enabled: bool,
@@ -435,7 +426,7 @@ impl Schedules {
         &self,
         owner: &str,
         definition: Definition,
-        handoff: Option<Handoff>,
+        handoff: Option<jobs::HandoffOrigin>,
     ) -> Result<Job> {
         definition.validate()?;
         let mut entries = self.entries.lock().unwrap();

@@ -44,6 +44,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn handoff_completion_distinguishes_missing_rejected_and_unknown_acceptance() {
+        let root =
+            std::env::temp_dir().join(format!("boxen-handoff-{}", state::random_hex().unwrap()));
+        let machine = state::random_hex().unwrap();
+        let child = state::random_hex().unwrap();
+        for (acceptance, expected) in [
+            (None, "failed"),
+            (Some("rejected"), "failed"),
+            (Some("unknown"), "interrupted"),
+        ] {
+            let id = state::random_hex().unwrap();
+            let path = root.join(&id);
+            state::private_dir(&path).unwrap();
+            let record = json!({"owner":machine,"created_at":1,
+                "spec":{"id":id,"thread_id":id,"backend":"codex","prompt":"fixture",
+                    "completion_handoff":{"machine_id":machine,"request_id":child}}});
+            state::write_new(
+                &path.join("record.json"),
+                &serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+            state::write_new(&path.join("events.jsonl"), b"").unwrap();
+            let run = load_run(&path, &id).unwrap();
+            if let Some(acceptance) = acceptance {
+                run.append(
+                    "work_request",
+                    json!({"machine":machine,"request_id":child,
+                    "request":{"op":"start_handoff","source":{"run_id":id}}}),
+                )
+                .unwrap();
+                run.append(
+                    "work_handoff_result",
+                    json!({"machine":machine,"request_id":child,"acceptance":acceptance}),
+                )
+                .unwrap();
+            }
+            run.settle(RunOutcome::Completed("The runtime ended".into()))
+                .unwrap();
+            assert_eq!(load_run(&path, &id).unwrap().snapshot().status, expected);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn summary_pages_keep_large_retained_runs_below_the_transport_limit() {
         let root =
             std::env::temp_dir().join(format!("boxen-summaries-{}", state::random_hex().unwrap()));
@@ -117,6 +161,7 @@ mod tests {
         let id = state::random_hex().unwrap();
         state::private_dir(&path.join(&id)).unwrap();
         let record = Record {
+            delegated_from: None,
             reasoning_effort: None,
             execution: None,
             automatic_cwd: false,
@@ -133,6 +178,7 @@ mod tests {
             mailbox: None,
             created_at: now(),
             spec: Spec {
+                completion_handoff: None,
                 required_capabilities: Requirements::new(),
                 reasoning_effort: None,
                 attachments: vec![],
@@ -246,6 +292,8 @@ pub fn valid_id(id: &str) -> Result<()> {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Spec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_handoff: Option<HandoffDestination>,
     #[serde(default, skip_serializing_if = "Requirements::is_empty")]
     pub required_capabilities: Requirements,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,8 +323,70 @@ pub struct Event {
     pub data: Value,
 }
 
+/// An anonymous request explicitly requires this destination to accept its handoff.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffDestination {
+    pub machine_id: String,
+    pub request_id: String,
+}
+
+impl HandoffDestination {
+    fn matches(&self, machine: &Value, request: &Value) -> bool {
+        machine == &self.machine_id && request == &self.request_id
+    }
+}
+
+impl Spec {
+    pub(crate) fn start_operation(&self) -> &'static str {
+        if self.completion_handoff.is_some() {
+            "start_until_handoff"
+        } else if !self.required_capabilities.is_empty() {
+            "start_checked"
+        } else {
+            "start"
+        }
+    }
+}
+
+/// Provenance attached when a run hands work to a separate execution authority.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffOrigin {
+    pub run_id: String,
+    pub thread_id: String,
+    pub machine_id: String,
+    pub call_id: String,
+}
+
+impl HandoffOrigin {
+    pub(crate) fn from_run(run: &Run, machine_id: &str, call_id: &str) -> Result<Self> {
+        let snapshot = run.snapshot();
+        let origin = Self {
+            run_id: snapshot.record.spec.id,
+            thread_id: snapshot.record.spec.thread_id,
+            machine_id: machine_id.to_owned(),
+            call_id: call_id.to_owned(),
+        };
+        origin.validate()?;
+        Ok(origin)
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        valid_id(&self.run_id)?;
+        valid_id(&self.thread_id)?;
+        valid_id(&self.machine_id)?;
+        if self.call_id.is_empty() || self.call_id.len() > 1024 {
+            return Err("Handoff provenance requires a bounded source call ID".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Record {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_from: Option<HandoffOrigin>,
     /// Setting captured at acceptance; separate from the input used for exact-ID retries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -316,6 +426,18 @@ impl Record {
         context.push_str(&self.execution_change.as_ref().map_or_else(String::new, |change| {
             format!("\nBoxen changed this conversation's execution settings between runs. Shell and relative file paths now use the current working directory. Files in an earlier working directory remain at their recorded location. The boxen_thread_files tool, when registered, lists earlier directories and retained request attachments. It retrieves a workspace file as it exists at retrieval time or opens a retained attachment original on the current machine. This metadata is supplied by Boxen. {change}")
         }));
+        if let Some(destination) = &self.spec.completion_handoff {
+            context.push_str(&format!(
+                "\nThis request's completion depends on durable acceptance of the exact transfer described by {}. The boxen_work handoff action records the destination's acceptance for this run; confirmation of transfer is independent of the child workload's eventual outcome.",
+                json!(destination)
+            ));
+        }
+        if let Some(origin) = &self.delegated_from {
+            context.push_str(&format!(
+                "\nThis request was handed off by the originating Boxen machine. The following source link identifies its reported run and tool call; this run has an independent execution outcome. {}",
+                json!(origin)
+            ));
+        }
         context
     }
 
@@ -827,7 +949,7 @@ impl Run {
         Ok(())
     }
 
-    fn record_schedule_handoff(&self, id: &str, source: &crate::scheduler::Handoff) -> Result<()> {
+    fn record_schedule_handoff(&self, id: &str, source: &HandoffOrigin) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         if terminal(&inner.snapshot.status) {
             return Ok(());
@@ -850,20 +972,95 @@ impl Run {
         Ok(())
     }
 
-    fn settle(&self, outcome: RunOutcome) -> Result<()> {
-        let (status, detail) = outcome.status_and_detail();
+    fn check_handoff_completion(inner: &Inner, outcome: RunOutcome) -> Result<RunOutcome> {
+        let spec = &inner.snapshot.record.spec;
+        let Some(required) = &spec.completion_handoff else {
+            return Ok(outcome);
+        };
+        if !matches!(outcome, RunOutcome::Completed(_)) {
+            return Ok(outcome);
+        }
+        for event in inner.journal.read(
+            inner
+                .journal
+                .positions("work_accepted")
+                .iter()
+                .rev()
+                .copied(),
+        ) {
+            let work = &event?.data["work"];
+            if required.matches(&work["machine"], &work["request_id"])
+                && work["delegated_from"]["run_id"] == spec.id
+            {
+                return Ok(RunOutcome::Completed(
+                    "The destination accepted the requested handoff. The child run owns its execution outcome.".into(),
+                ));
+            }
+        }
+        for event in inner.journal.read(
+            inner
+                .journal
+                .positions("work_handoff_result")
+                .iter()
+                .rev()
+                .copied(),
+        ) {
+            let event = event?;
+            if required.matches(&event.data["machine"], &event.data["request_id"]) {
+                if event.data["acceptance"] == "rejected"
+                    || event.data["acceptance"] == "not_dispatched"
+                {
+                    return Ok(RunOutcome::Failed(
+                        "The required handoff was not accepted.".into(),
+                    ));
+                }
+                break;
+            }
+        }
+        for event in inner.journal.read(
+            inner
+                .journal
+                .positions("work_request")
+                .iter()
+                .rev()
+                .copied(),
+        ) {
+            let event = event?;
+            if required.matches(&event.data["machine"], &event.data["request_id"])
+                && event.data["request"]["op"] == "start_handoff"
+                && event.data["request"]["source"]["run_id"] == spec.id
+            {
+                return Ok(RunOutcome::Interrupted(
+                    "Acceptance of the required handoff is uncertain. The retained destination and request ID identify the same work.".into(),
+                ));
+            }
+        }
+        Ok(RunOutcome::Failed(
+            "The runtime ended without the required handoff.".into(),
+        ))
+    }
+
+    fn settle(&self, outcome_input: RunOutcome) -> Result<()> {
+        let outcome;
         {
             let mut inner = self.inner.lock().unwrap();
             if terminal(&inner.snapshot.status) {
                 return Err("run already settled".into());
             }
             inner.control = None;
+            outcome = Self::check_handoff_completion(&inner, outcome_input).unwrap_or_else(|_| {
+                RunOutcome::Interrupted(
+                    "Required handoff evidence could not be read from the run journal.".into(),
+                )
+            });
+            let (status, detail) = outcome.status_and_detail();
             self.append_locked(
                 &mut inner,
                 "status",
                 json!({"status":status,"detail":detail}),
             )?;
         }
+        let (status, detail) = outcome.status_and_detail();
         self.diagnostic(
             Level::Info,
             "execution.settled",
@@ -1194,6 +1391,7 @@ impl Jobs {
             return Err("identity-bearing conversations use resident operations".into());
         }
         let mut spec = last.record.spec.clone();
+        spec.completion_handoff = None;
         spec.reasoning_effort = None;
         if last.record.automatic_cwd {
             spec.cwd.clear();
@@ -1251,15 +1449,7 @@ impl Jobs {
                 "Schedule creation through a runtime requires an active, uncancelled run".into(),
             );
         }
-        if call_id.is_empty() || call_id.len() > 1024 {
-            return Err("Schedule handoff requires a bounded source call ID".into());
-        }
-        let handoff = crate::scheduler::Handoff {
-            run_id: run_id.to_owned(),
-            thread_id: snapshot.record.spec.thread_id,
-            machine_id: self.machine_id().to_owned(),
-            call_id: call_id.to_owned(),
-        };
+        let handoff = HandoffOrigin::from_run(&run, self.machine_id(), call_id)?;
         let result = self.schedule_operation_with_handoff(owner, args, Some(handoff.clone()))?;
         // A retry may recover a schedule created by an earlier run. Its original
         // provenance and acceptance remain the authoritative evidence.
@@ -1282,7 +1472,7 @@ impl Jobs {
         self: &Arc<Self>,
         owner: &str,
         args: Value,
-        handoff: Option<crate::scheduler::Handoff>,
+        handoff: Option<HandoffOrigin>,
     ) -> Result<Value> {
         let _transition = self.transitions.lock().unwrap();
         let action = args["action"].as_str().unwrap_or("list");
@@ -1494,7 +1684,14 @@ impl Jobs {
                         .and_then(|mut spec| {
                             spec.id = run_id.clone();
                             spec.prompt = job.definition.directions.clone();
-                            self.start_locked(&job.owner, spec, None, Some(origin.clone()), None)
+                            self.start_locked(
+                                &job.owner,
+                                spec,
+                                None,
+                                Some(origin.clone()),
+                                None,
+                                None,
+                            )
                         }),
                 };
                 match dispatched {
@@ -1621,7 +1818,7 @@ impl Jobs {
                         let mut spec = self.anonymous_thread_spec(&owner, target)?;
                         spec.id = id;
                         spec.prompt = directions.into();
-                        self.start_locked(&owner, spec, None, None, None)?
+                        self.start_locked(&owner, spec, None, None, None, None)?
                     }
                     _ => return Err("observation target is unavailable".into()),
                 };
@@ -1793,8 +1990,7 @@ impl Jobs {
         });
         let mut info = json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304}});
         info["backends"] = json!(backends);
-        info["checked_requests"] =
-            json!({"start":"start_checked","resident_activate":"resident_activate_checked"});
+        info["checked_requests"] = json!({"start":"start_checked","resident_activate":"resident_activate_checked","completion_handoff":"start_until_handoff"});
         info["platform"] =
             json!({"os":crate::platform::host_os(),"architecture":std::env::consts::ARCH});
         info["agent_work"] = json!({"tools":["boxen_machines","boxen_work","boxen_thread_files"],"transport":"existing_authenticated_peer_operations","native_registration":"per_run_mcp"});
@@ -2333,6 +2529,7 @@ impl Jobs {
         }
         activation.message_ids = batch.iter().map(|m| m.id.clone()).collect();
         let spec = Spec {
+            completion_handoff: None,
             required_capabilities,
             reasoning_effort: None,
             attachments: batch
@@ -2352,7 +2549,7 @@ impl Jobs {
             model: resident.model,
             prompt,
         };
-        let snapshot = self.start_locked(owner, spec, Some(activation), scheduled, None)?;
+        let snapshot = self.start_locked(owner, spec, Some(activation), scheduled, None, None)?;
         logging::record(
             Level::Info,
             Target::Workload,
@@ -2877,8 +3074,20 @@ impl Jobs {
         after: Option<&str>,
     ) -> Result<Snapshot> {
         let _transition = self.transitions.lock().unwrap();
-        self.start_locked(owner, spec, None, None, after)
+        self.start_locked(owner, spec, None, None, after, None)
     }
+
+    pub(crate) fn start_handoff(
+        self: &Arc<Self>,
+        owner: &str,
+        spec: Spec,
+        after: Option<&str>,
+        source: HandoffOrigin,
+    ) -> Result<Snapshot> {
+        let _transition = self.transitions.lock().unwrap();
+        self.start_locked(owner, spec, None, None, after, Some(source))
+    }
+
     fn start_locked(
         self: &Arc<Self>,
         owner: &str,
@@ -2886,6 +3095,7 @@ impl Jobs {
         activation: Option<Activation>,
         scheduled: Option<crate::scheduler::Origin>,
         after: Option<&str>,
+        delegated_from: Option<HandoffOrigin>,
     ) -> Result<Snapshot> {
         logging::record(
             Level::Info,
@@ -2907,6 +3117,7 @@ impl Jobs {
             if snapshot.record.owner == owner
                 && accepted_input == spec
                 && snapshot.record.after.as_deref() == after
+                && snapshot.record.delegated_from == delegated_from
             {
                 logging::record(
                     Level::Info,
@@ -2931,6 +3142,21 @@ impl Jobs {
             && (spec.cwd != r.cwd || spec.model != r.model || spec.backend != r.backend)
         {
             return Err("resident working directory and model are pinned to its definition".into());
+        }
+        if let Some(destination) = &spec.completion_handoff {
+            valid_id(&destination.machine_id)?;
+            valid_id(&destination.request_id)?;
+            if activation.is_some() || destination.request_id == spec.id {
+                return Err("Handoff completion requires an anonymous request and a distinct destination run ID".into());
+            }
+            if destination.machine_id != self.machine_id() {
+                self.network
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .ok_or("Machine network unavailable for the required handoff")?
+                    .require_trust(&destination.machine_id)?;
+            }
         }
         let backend = Backend::parse(&spec.backend)?;
         backend.require(&spec.required_capabilities, resident.is_some()).inspect_err(|error| {
@@ -3103,6 +3329,7 @@ impl Jobs {
         let path = self.directory.join(&spec.id);
         state::private_dir(&path)?;
         let record = Record {
+            delegated_from,
             reasoning_effort,
             execution: Some(execution),
             automatic_cwd,
@@ -3146,6 +3373,9 @@ impl Jobs {
             changed: Condvar::new(),
         });
         run.status("starting", "Accepted by executing machine")?;
+        if let Some(source) = &run.snapshot().record.delegated_from {
+            run.append("handoff_origin", serde_json::to_value(source)?)?;
+        }
         if let Some(change) = &run.snapshot().record.execution_change {
             run.append("execution_settings_changed", change.clone())?;
         }
@@ -3165,7 +3395,7 @@ impl Jobs {
             Target::Workload,
             "submission.accepted",
             Context::run(&spec.id, &spec.thread_id, owner),
-            || json!({"backend":spec.backend,"cwd":spec.cwd,"automatic_cwd":automatic_cwd,"reasoning_effort":snapshot.record.reasoning_effort,"runtime_policy":snapshot.record.runtime_policy,"required_capabilities":snapshot.record.spec.required_capabilities}),
+            || json!({"backend":spec.backend,"cwd":spec.cwd,"automatic_cwd":automatic_cwd,"reasoning_effort":snapshot.record.reasoning_effort,"runtime_policy":snapshot.record.runtime_policy,"required_capabilities":snapshot.record.spec.required_capabilities,"delegated_from":snapshot.record.delegated_from}),
             || Value::Null,
         );
         let binary = self.codex_path.clone();

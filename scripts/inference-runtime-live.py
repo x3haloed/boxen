@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 
 binary=pathlib.Path(sys.argv[1] if len(sys.argv)>1 else 'target/release/boxen').resolve()
@@ -18,14 +19,15 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-live-') as temp:
     root=pathlib.Path(temp);paths=[root/'a',root/'b'];processes=[];tokens=[];peers=[port(),port()];uis=[port(),port()]
     def cli(i,*args):return subprocess.check_output(command+['--data-dir',str(paths[i]),*args],text=True,timeout=10).strip()
     keys=[cli(i,'identity') for i in range(2)]
-    for i in range(2):cli(i,'trust',keys[1-i],'Other')
+    for i in range(2):cli(i,'trust',keys[1-i],'Other','--address',f'127.0.0.1:{peers[1-i]}')
     try:
         for i in range(2):
             p=subprocess.Popen(command+['--data-dir',str(paths[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--openrouter-key-file',str(credential)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
             processes.append(p);lines=[p.stdout.readline() for _ in range(3)];assert 'Local controls:' in lines[-1],lines;tokens.append(lines[-1].strip().split('#')[1])
         target={'peer':keys[1],'address':f'127.0.0.1:{peers[1]}'}
-        def api(op,watch=False):
-            request=urllib.request.Request(f'http://127.0.0.1:{uis[0]}/api/'+('watch' if watch else 'operation'),data=json.dumps({**target,'request':op}).encode(),headers={'Authorization':'Bearer '+tokens[0],'Content-Type':'application/json'})
+        def api(op,watch=False,local=False):
+            destination={'peer':keys[0],'address':''} if local else target
+            request=urllib.request.Request(f'http://127.0.0.1:{uis[0]}/api/'+('watch' if watch else 'operation'),data=json.dumps({**destination,'request':op}).encode(),headers={'Authorization':'Bearer '+tokens[0],'Content-Type':'application/json'})
             response=urllib.request.urlopen(request,timeout=150)
             return response if watch else json.load(response)
         def collect(run):
@@ -54,8 +56,11 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-live-') as temp:
         reply=send(f'Please reply explicitly to this message with body exactly {marker}, using its reply_to address and linking in_reply_to. No other correspondence is requested.')
         activation=api({'op':'resident_activate','id':r['id'],'activation_id':secrets.token_hex(32),'directions':'The protocol test asks for one explicit reply to the message requesting it. Final narration remains private.'})
         events+=collect(activation)
-        inbox=lambda:api({'op':'client_inbox','client_id':client})['messages']
-        delivered=inbox();assert len(delivered)==1 and delivered[0]['body']==marker and delivered[0]['in_reply_to']==reply['id'],delivered
+        inbox=lambda:api({'op':'client_inbox','client_id':client},local=True)['messages']
+        deadline=time.monotonic()+10
+        while not (delivered:=inbox()) and time.monotonic()<deadline:
+            time.sleep(.05)
+        assert len(delivered)==1 and delivered[0]['body']==marker and delivered[0]['in_reply_to']==reply['id'],delivered
         silent=api({'op':'resident_activate','id':r['id'],'activation_id':secrets.token_hex(32),'directions':f'This activation requests no outgoing correspondence. Please finish with a private line containing {marker}.'})
         events+=collect(silent);assert inbox()==delivered
         usage=[e['data']['usage'] for e in events if e['kind']=='inference_exchange_completed']
