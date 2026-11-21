@@ -69,8 +69,19 @@ impl Definition {
         Ok(())
     }
 }
+/// The run and tool call that handed work to the scheduler.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Handoff {
+    pub run_id: String,
+    pub thread_id: String,
+    pub machine_id: String,
+    pub call_id: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Origin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Handoff>,
     pub schedule_id: String,
     pub revision: u64,
     pub due_at_ms: u64,
@@ -98,6 +109,8 @@ impl Origin {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Job {
     pub definition: Definition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Handoff>,
     pub owner: String,
     pub revision: u64,
     pub enabled: bool,
@@ -415,6 +428,15 @@ impl Schedules {
             .ok_or_else(|| "schedule is unavailable or belongs to a different peer".into())
     }
     pub fn create(&self, owner: &str, definition: Definition) -> Result<Job> {
+        self.create_with_handoff(owner, definition, None)
+    }
+
+    pub(crate) fn create_with_handoff(
+        &self,
+        owner: &str,
+        definition: Definition,
+        handoff: Option<Handoff>,
+    ) -> Result<Job> {
         definition.validate()?;
         let mut entries = self.entries.lock().unwrap();
         if let Some(old) = entries.get(&definition.id) {
@@ -444,6 +466,7 @@ impl Schedules {
         }
         let job = Job {
             definition: definition.clone(),
+            handoff,
             owner: owner.into(),
             revision: 1,
             enabled: true,
@@ -534,6 +557,7 @@ impl Schedules {
                 .interval_ms
                 .map_or(0, |i| now.saturating_sub(due) / i);
             j.claimed = Some(Origin {
+                handoff: j.handoff.clone(),
                 schedule_id: j.definition.id.clone(),
                 revision: j.revision,
                 due_at_ms: due,

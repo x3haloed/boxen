@@ -63,7 +63,15 @@ class Provider(http.server.BaseHTTPRequestHandler):
             if prompt.startswith(('Mailbox activation.','Message activation.')):
                 batch=json.loads(prompt.split('\n',1)[1]);direction=batch['directions']
                 reply=next((m for m in batch['messages'] if m['body'].startswith('REPLY')),None)
-                if direction=='BURST' and not tools:
+                if direction=='SCHEDULE_FIXTURE' and not tools:
+                    call('boxen_schedule', {'action':'create','spec':{'id':secrets.token_hex(32),'name':'Inference fixture wake','at_ms':int(time.time()*1000)+900,'directions':'Inference scheduled follow-up'}})
+                elif direction=='SCHEDULE_FIXTURE':
+                    assert json.loads(tools[-1]['content'])['handoff']['run_id']
+                    text('PRIVATE_TIMING_ACCEPTED')
+                elif direction=='Inference scheduled follow-up':
+                    assert batch['schedule']['handoff']['run_id']
+                    text('PRIVATE_SCHEDULED_FOLLOWUP')
+                elif direction=='BURST' and not tools:
                     assert body['provider']=={'only':['fixture-only'],'order':['fixture-only'],'allow_fallbacks':False,'require_parameters':True},body['provider']
                     assert body['max_tokens']==8192
                     address=batch['messages'][0]['reply_to']
@@ -298,6 +306,23 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         steer=start('STEER_ME',require=['queued_steering']);until(steer,'tool_started');api({'op':'control','id':steer['record']['spec']['id'],'action':{'type':'steer','text':'STEERING_TEXT'}})
         assert collect(steer)[1]['status']=='completed';assert result(steer)['response']=='STEERED_RESPONSE'
         print('PASS cancellation during HTTP/tool execution and steering at the next inference boundary')
+        timer_resident=resident()
+        source=api({'op':'resident_activate_checked','id':timer_resident['id'],'activation_id':secrets.token_hex(32),
+                    'directions':'SCHEDULE_FIXTURE','required_capabilities':['scheduled_handoff']})
+        source_events,timer_source=collect(source);assert timer_source['status']=='completed'
+        receipt,=[event['data'] for event in source_events if event['kind']=='schedule_handoff']
+        assert receipt['source']['run_id']==source['record']['spec']['id']
+        deadline=time.monotonic()+8
+        while True:
+            job=api({'op':'schedule','args':{'action':'get','id':receipt['schedule_id']}})
+            if job['last']:break
+            assert time.monotonic()<deadline,job
+            time.sleep(.05)
+        scheduled=api({'op':'get','id':job['last']['run_id']})
+        _,dispatched=collect(scheduled);assert dispatched['status']=='completed'
+        assert dispatched['record']['scheduled']['handoff']==receipt['source']
+        print('PASS resident timing handoff and original provenance through OpenRouter')
+
         r=resident();m1=send(r,'SILENT one');m2=send(r,'REPLY one');m3=send(r,'SILENT two')
         activation=activate(r);assert len(activation['record']['mailbox']['message_ids'])==3
         activation_events, activation_snapshot=collect(activation)

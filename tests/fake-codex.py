@@ -274,8 +274,11 @@ def work(prompt):
                 time.sleep(.05)
             assert result["response"]=="Fixture result"
         if "SCHEDULE_SELF" in activation['directions']:
-            response,job=invoke("boxen_schedule",{"action":"create","spec":{"id":secrets.token_hex(32),"name":"Resident-owned future activation","directions":"Authored by the resident fixture","at_ms":int(time.time()*1000)+86400000}},180)
+            create = {"action":"create","spec":{"id":secrets.token_hex(32),"name":"Resident-owned future activation","directions":"Authored by the resident fixture","at_ms":int(time.time()*1000)+86400000}}
+            response,job=invoke("boxen_schedule",create,180)
             assert response["success"] and job["definition"]["target"]=={"type":"resident","id":resident_context["id"]}
+            response,retried=invoke("boxen_schedule",create,182)
+            assert response["success"] and retried==job
         if activation['directions'].startswith('SCHEDULE_SCOPE:'):
             response,result=invoke("boxen_schedule",{"action":"get","id":activation['directions'].split(':',1)[1]},181)
             assert not response['success'] and 'only the attached resident' in result['error']
@@ -401,6 +404,9 @@ for line in sys.stdin:
             continue
         direction = (json.loads(prompt.split("\n", 1)[1])["directions"]
                      if prompt.startswith("Message activation.") else prompt)
+        if direction == "Authored by the resident fixture":
+            context = params["input"][1]["text"]
+            assert '"handoff"' in context and '"run_id"' in context and '"call_id"' in context
         if direction.startswith("EXPECT_EFFORT:"):
             effort = direction.split(":", 1)[1]
             expected = "medium" if effort == "default" else effort

@@ -199,6 +199,26 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
                 assert result['backend_thread'] == resident_session
                 assert not any(e['kind'] == 'resident_bridge_call' and e['data']['params']['name'] == 'boxen_send_message' for e in events)
         print('PASS resident MCP tools, selective explicit reply, attribution, private narration and no-send completion')
+
+        source = api({'op': 'resident_activate_checked', 'id': resident['id'], 'activation_id': uid(),
+                      'directions': 'SCHEDULE_FIXTURE', 'required_capabilities': ['scheduled_handoff']})
+        source_id = source['record']['spec']['id']
+        events, result = collect(source_id)
+        assert result['status'] == 'completed'
+        receipt, = [e['data'] for e in events if e['kind'] == 'schedule_handoff']
+        assert receipt['source']['run_id'] == source_id
+        deadline = time.monotonic() + 8
+        while True:
+            job = api({'op': 'schedule', 'args': {'action': 'get', 'id': receipt['schedule_id']}})
+            if job['last']:
+                break
+            assert time.monotonic() < deadline, job
+            time.sleep(.05)
+        _, dispatched = collect(job['last']['run_id'])
+        assert dispatched['status'] == 'completed'
+        assert dispatched['record']['scheduled']['handoff'] == receipt['source']
+        print('PASS resident timing handoff and original provenance through Antigravity ACP')
+
     finally:
         for process in processes:
             if process.poll() is None:

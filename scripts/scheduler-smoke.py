@@ -130,11 +130,30 @@ with tempfile.TemporaryDirectory(prefix='boxen-schedules-') as temporary:
         assert api({'op':'client_inbox','client_id':client})['messages']==[]
         independent=accepted(schedule('create',spec=definition(resident['id'],resident=True)))
         _,s=collect(run_for(independent));assert s['record']['mailbox']['message_ids']==[]
-        own=api({'op':'resident_activate','id':resident['id'],'activation_id':secrets.token_hex(32),'directions':'SCHEDULE_SELF'});assert collect(own)[1]['status']=='completed'
+        own=api({'op':'resident_activate_checked','id':resident['id'],'activation_id':secrets.token_hex(32),'directions':'SCHEDULE_SELF','required_capabilities':['scheduled_handoff']})
+        own_events, own_result = collect(own)
+        assert own_result['status'] == 'completed'
+        notice, = [e['data'] for e in own_events if e['kind'] == 'schedule_handoff']
+        assert notice['outcome'] == 'timing_accepted'
+        assert notice['source']['run_id'] == own['record']['spec']['id']
+        assert notice['source']['thread_id'] == resident['id']
+        job = schedule('get', id=notice['schedule_id'])
+        assert job['handoff'] == notice['source']
+        assert job['last'] is None
+        restart()
+        assert schedule('get', id=notice['schedule_id'])['handoff'] == notice['source']
+        # Dispatch the saved transfer through the timing authority and read the new run.
+        job = accepted(schedule('update', id=notice['schedule_id'], patch={
+            'expected_revision': 1, 'at_ms': now() + 250}))
+        dispatched, dispatch_result = collect(run_for(job))
+        assert dispatch_result['record']['scheduled']['handoff'] == notice['source']
+        assert any(e['kind'] == 'scheduled_event' and e['data']['handoff'] == notice['source']
+                   for e in dispatched)
+        assert dispatch_result['status'] == 'completed'
         another=api({'op':'resident_create','spec':{'id':secrets.token_hex(32),'name':'Other identity','cwd':temporary,'auto_activate':False}})
         otherjob=schedule('create',spec=definition(another['id'],at=now()+86400000,resident=True))
         scope=api({'op':'resident_activate','id':resident['id'],'activation_id':secrets.token_hex(32),'directions':'SCHEDULE_SCOPE:'+otherjob['definition']['id']});assert collect(scope)[1]['status']=='completed'
-        print('PASS resident scheduling, queued mail/no-reply and empty activations, self-management and identity scope',flush=True)
+        print('PASS resident scheduling, queued mail/no-reply and empty activations, handoff provenance and identity scope',flush=True)
 
         offline=schedule('create',spec=definition(thread,at=now()+1000));p1.kill();p1.wait(timeout=5);time.sleep(1.1);restart()
         offline=accepted(offline);collect(run_for(offline))

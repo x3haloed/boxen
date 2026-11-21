@@ -19,15 +19,17 @@ pub enum Capability {
     InputResponses,
     NativeSessionResume,
     LateActivity,
+    ScheduledHandoff,
 }
 
 impl Capability {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::LiveSteering,
         Self::QueuedSteering,
         Self::InputResponses,
         Self::NativeSessionResume,
         Self::LateActivity,
+        Self::ScheduledHandoff,
     ];
 }
 
@@ -63,9 +65,13 @@ impl Backend {
                 LateActivity,
             ],
         };
-        capabilities.iter().copied().filter(move |capability| {
-            !resident || !matches!(capability, LiveSteering | QueuedSteering)
-        })
+        capabilities
+            .iter()
+            .copied()
+            .filter(move |capability| {
+                !resident || !matches!(capability, LiveSteering | QueuedSteering)
+            })
+            .chain(resident.then_some(ScheduledHandoff))
     }
 
     pub fn require(self, requested: &Requirements, resident: bool) -> Result<()> {

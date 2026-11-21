@@ -827,6 +827,29 @@ impl Run {
         Ok(())
     }
 
+    fn record_schedule_handoff(&self, id: &str, source: &crate::scheduler::Handoff) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if terminal(&inner.snapshot.status) {
+            return Ok(());
+        }
+        for event in inner
+            .journal
+            .read(inner.journal.positions("schedule_handoff").iter().copied())
+        {
+            if event?.data["schedule_id"] == id {
+                return Ok(());
+            }
+        }
+        self.append_locked(
+            &mut inner,
+            "schedule_handoff",
+            json!({
+                "schedule_id":id,"source":source,"outcome":"timing_accepted",
+            }),
+        )?;
+        Ok(())
+    }
+
     fn settle(&self, outcome: RunOutcome) -> Result<()> {
         let (status, detail) = outcome.status_and_detail();
         {
@@ -1211,6 +1234,56 @@ impl Jobs {
         Ok(false)
     }
     pub fn schedule_operation(self: &Arc<Self>, owner: &str, args: Value) -> Result<Value> {
+        self.schedule_operation_with_handoff(owner, args, None)
+    }
+
+    pub(crate) fn schedule_from_run(
+        self: &Arc<Self>,
+        owner: &str,
+        run_id: &str,
+        call_id: &str,
+        args: Value,
+    ) -> Result<Value> {
+        let run = self.get(owner, run_id)?;
+        let snapshot = run.snapshot();
+        if terminal(&snapshot.status) || run.cancellation_requested() {
+            return Err(
+                "Schedule creation through a runtime requires an active, uncancelled run".into(),
+            );
+        }
+        if call_id.is_empty() || call_id.len() > 1024 {
+            return Err("Schedule handoff requires a bounded source call ID".into());
+        }
+        let handoff = crate::scheduler::Handoff {
+            run_id: run_id.to_owned(),
+            thread_id: snapshot.record.spec.thread_id,
+            machine_id: self.machine_id().to_owned(),
+            call_id: call_id.to_owned(),
+        };
+        let result = self.schedule_operation_with_handoff(owner, args, Some(handoff.clone()))?;
+        // A retry may recover a schedule created by an earlier run. Its original
+        // provenance and acceptance remain the authoritative evidence.
+        if result["handoff"] == json!(handoff) {
+            let id = result["definition"]["id"]
+                .as_str()
+                .ok_or("Accepted schedule is missing its ID")?;
+            run.record_schedule_handoff(id, &handoff)?;
+            run.diagnostic(
+                Level::Info,
+                "schedule.handoff_accepted",
+                || json!({"schedule_id":id,"call_id":call_id,"outcome":"timing_accepted"}),
+                || Value::Null,
+            );
+        }
+        Ok(result)
+    }
+
+    fn schedule_operation_with_handoff(
+        self: &Arc<Self>,
+        owner: &str,
+        args: Value,
+        handoff: Option<crate::scheduler::Handoff>,
+    ) -> Result<Value> {
         let _transition = self.transitions.lock().unwrap();
         let action = args["action"].as_str().unwrap_or("list");
         let result = (|| -> Result<Value> {
@@ -1245,7 +1318,10 @@ impl Jobs {
                                 .into(),
                         ),
                     }
-                    Ok(json!(self.schedules.create(owner, definition)?))
+                    Ok(json!(
+                        self.schedules
+                            .create_with_handoff(owner, definition, handoff)?
+                    ))
                 }
                 "update" => {
                     let id = args["id"].as_str().ok_or("schedule id required")?;

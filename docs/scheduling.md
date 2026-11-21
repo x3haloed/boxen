@@ -96,6 +96,14 @@ attached resident. It cannot inspect or change another resident's jobs or target
 an anonymous thread. Authenticated human/custom clients can manage both handler
 kinds. These controls do not introduce a sandbox or new approval flow.
 
+When a resident tool creates a schedule, its timing journal records the source
+run, conversation, machine, and tool call. The originating run normally
+retains a `schedule_handoff` event with `timing_accepted`, and the later
+occurrence carries the same provenance in `scheduled_event` and its run record.
+The source receipt establishes that the scheduler accepted timing responsibility.
+The dispatched run reports its own execution outcome. Revision changes and exact
+creation retries preserve the original source.
+
 The provisional GUI exposes a simple Schedules section: selecting a thread or
 resident gives creation a target; refresh, edit, pause/resume and deletion use
 the same daemon API. Pending submission retries retain their ID and input.

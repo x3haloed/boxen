@@ -4,6 +4,7 @@ import json
 import pathlib
 import secrets
 import sys
+import time
 import urllib.request
 
 assert sys.argv[1:3] == ['acp', '--process-per-session']
@@ -95,7 +96,16 @@ for line in sys.stdin:
         if prompt == 'RECONSTRUCT':
             assert 'Historical effects' in additional[0] and 'LATE_WAKE' in additional[0]
         if prompt.startswith(('Mailbox activation.', 'Message activation.')):
-            incoming = json.loads(prompt.rsplit('\n', 1)[1])['messages']
+            activation = json.loads(prompt.rsplit('\n', 1)[1])
+            incoming = activation['messages']
+            if activation['directions'] == 'SCHEDULE_FIXTURE':
+                tool('boxen_schedule', {'action': 'create', 'spec': {
+                    'id': secrets.token_hex(32), 'name': 'ACP fixture wake',
+                    'at_ms': int(time.time() * 1000) + 900, 'directions': 'ACP scheduled follow-up',
+                }}, 4)
+            if activation['directions'] == 'ACP scheduled follow-up':
+                assert activation['schedule']['handoff']['run_id']
+                assert '"handoff"' in additional[0]
             inbox = tool('boxen_mailbox', {}, 2)
             for mail in incoming:
                 assert any(item['id'] == mail['id'] and item['delivery'] == 'presented' for item in inbox['messages'])
