@@ -37,6 +37,7 @@ mod reasoning;
 mod resident_bridge;
 mod resident_definitions;
 mod residents;
+mod runtime;
 mod runtime_policy;
 mod scheduler;
 mod state;
@@ -78,7 +79,7 @@ boxen [--data-dir PATH] untrust PUBLIC_KEY\n\
 boxen [--data-dir PATH] peers\n\
 boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--antigravity PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
-boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|antigravity|openrouter] [--context JSON] [--reasoning-effort LEVEL]\n\
+boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|antigravity|openrouter] [--require CAPABILITY,...] [--context JSON] [--reasoning-effort LEVEL]\n\
 boxen [--data-dir PATH] request HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] messages HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] discord-connector --instance ID [--url http://127.0.0.1:PORT]\n\
@@ -111,7 +112,7 @@ boxen mailbox HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
 boxen inbox HOST:PORT PUBLIC_KEY [--client-id ID] [--after SEQUENCE]\n\
 boxen inference-health HOST:PORT PUBLIC_KEY\n\
 boxen inference-resume HOST:PORT PUBLIC_KEY FAILED_RUN_ID [--id NEW_RUN_ID]\n\
-boxen resident-activate HOST:PORT PUBLIC_KEY RESIDENT_ID [--id RUN_ID] [--directions TEXT]\n\
+boxen resident-activate HOST:PORT PUBLIC_KEY RESIDENT_ID [--id RUN_ID] [--directions TEXT] [--require CAPABILITY,...]\n\
 boxen thread-result HOST:PORT PUBLIC_KEY RUN_ID\n\n\
 boxen codex-path [--codex auto|PATH]\n\n\
 boxen platform-check\n\n\
@@ -473,6 +474,12 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
             );
         }
         "resident-activate" => {
+            let required_capabilities = take_requirements(&mut args)?;
+            let op = if required_capabilities.is_empty() {
+                "resident_activate"
+            } else {
+                "resident_activate_checked"
+            };
             let activation = take_option(&mut args, "--id")?.unwrap_or(state::random_hex()?);
             let directions = take_option(&mut args, "--directions")?.unwrap_or_default();
             if args.len() != 3 {
@@ -484,7 +491,11 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"resident_activate","id":args[2],"activation_id":activation,"directions":directions})
+                    if required_capabilities.is_empty() {
+                        serde_json::json!({"op":op,"id":args[2],"activation_id":activation,"directions":directions})
+                    } else {
+                        serde_json::json!({"op":op,"id":args[2],"activation_id":activation,"directions":directions,"required_capabilities":required_capabilities})
+                    }
                 )?
             );
         }
@@ -533,6 +544,12 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
             );
         }
         "start" => {
+            let required_capabilities = take_requirements(&mut args)?;
+            let op = if required_capabilities.is_empty() {
+                "start"
+            } else {
+                "start_checked"
+            };
             let reasoning_effort = take_option(&mut args, "--reasoning-effort")?;
             let context = take_option(&mut args, "--context")?
                 .map(|v| serde_json::from_str(&v))
@@ -544,6 +561,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                 return Err("start requires HOST:PORT PUBLIC_KEY CWD MODEL PROMPT".into());
             }
             let spec = jobs::Spec {
+                required_capabilities,
                 reasoning_effort,
                 attachments: vec![],
                 resident_id: None,
@@ -565,7 +583,7 @@ Workloads use Codex app-server or the OpenRouter built-in runtime with Full acce
                     &state,
                     &args[0],
                     &args[1],
-                    serde_json::json!({"op":"start","spec":spec})
+                    serde_json::json!({"op":op,"spec":spec})
                 )?)?
             );
         }
@@ -813,6 +831,15 @@ fn log_filter(args: &mut Vec<String>) -> Result<logging::Filter> {
         value["payloads"] = serde_json::json!(true);
     }
     Ok(serde_json::from_value(value)?)
+}
+
+fn take_requirements(args: &mut Vec<String>) -> Result<runtime::Requirements> {
+    let Some(names) = take_option(args, "--require")? else {
+        return Ok(runtime::Requirements::new());
+    };
+    runtime::requirements(Some(&serde_json::json!(
+        names.split(',').collect::<Vec<_>>()
+    )))
 }
 
 fn take_option(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {

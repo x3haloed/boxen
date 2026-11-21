@@ -103,12 +103,8 @@ impl Resident {
                 return Err("resident promotion provenance does not match its canonical native conversation".into());
             }
         }
-        if !matches!(
-            self.backend.as_str(),
-            "codex" | "openrouter" | "antigravity"
-        ) {
-            return Err("unsupported resident backend".into());
-        }
+        crate::runtime::Backend::parse(&self.backend)
+            .map_err(|_| "unsupported resident backend")?;
         if let Some(effort) = &self.reasoning_effort {
             crate::reasoning::validate(&self.backend, effort)?;
         }

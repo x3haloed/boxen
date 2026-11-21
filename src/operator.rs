@@ -14,9 +14,11 @@ pub fn run(jobs: &Jobs, id: &str) -> Result<Arc<Run>> {
 fn namespace(jobs: &Jobs, actor: &str, request: &Value) -> Result<String> {
     let op = request["op"].as_str().unwrap_or("");
     let resident = match op {
-        "resident_get" | "resident_update" | "resident_activate" | "resident_inbox" => {
-            request["id"].as_str()
-        }
+        "resident_get"
+        | "resident_update"
+        | "resident_activate"
+        | "resident_activate_checked"
+        | "resident_inbox" => request["id"].as_str(),
         "transcript_import" => request["spec"]["resident_id"].as_str(),
         "resident_create" => request["spec"]["id"]
             .as_str()
@@ -48,7 +50,7 @@ fn namespace(jobs: &Jobs, actor: &str, request: &Value) -> Result<String> {
     }
     let thread = match op {
         "context" => request["thread_id"].as_str(),
-        "start" => request["spec"]["thread_id"].as_str(),
+        "start" | "start_checked" => request["spec"]["thread_id"].as_str(),
         "thread_activity" | "thread_reasoning" => request["id"].as_str(),
         "resident_promote" => request["spec"]["thread_id"].as_str(),
         _ => None,

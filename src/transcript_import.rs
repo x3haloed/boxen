@@ -133,6 +133,7 @@ impl Jobs {
                 recovery: None,
                 mailbox: None,
                 spec: Spec {
+                    required_capabilities: Default::default(),
                     reasoning_effort: None,
                     attachments: vec![],
                     context: Some(resident.context.clone()),

@@ -72,13 +72,23 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
                 assert time.monotonic() < deadline, (kind, events)
         raise AssertionError('The watch closed before the requested observation')
 
-    def start(prompt, thread=None, ident=None, model='fixture-model', effort=None):
+    def start(prompt, thread=None, ident=None, model='fixture-model', effort=None, require=None):
         args = ['start', *remote, str(workspaces[0]), model, prompt, '--backend', 'antigravity', '--id', ident or uid()]
         if thread:
             args += ['--thread', thread]
         if effort:
             args += ['--reasoning-effort', effort]
+        if require:
+            args += ['--require', require]
         return json.loads(cli(0, *args))['record']['spec']
+
+    def rejected(request, expected):
+        try:
+            api(request)
+        except urllib.error.HTTPError as error:
+            assert error.code == 422 and expected in error.read().decode()
+        else:
+            raise AssertionError('The daemon accepted an unsupported request')
 
     try:
         for i in range(2):
@@ -98,8 +108,17 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
         runtime = lambda **kw: next(b for b in api({'op': 'runtime_info'}, **kw)['backends'] if b['id'] == 'antigravity')
         assert runtime()['configured'] and not runtime(local=True)['configured']
         request_id = uid()
-        first = start('LATE_WAKE', ident=request_id, effort='high')
-        assert start('LATE_WAKE', ident=request_id, effort='high') == first
+        assert 'late_activity' in runtime()['request_capabilities']
+        assert 'live_steering' not in runtime()['activation_capabilities']
+        probe = {'id': request_id, 'thread_id': request_id, 'backend': 'openrouter',
+                 'cwd': str(workspaces[0]), 'prompt': 'No execution', 'required_capabilities': ['live_steering']}
+        rejected({'op': 'start_checked', 'spec': probe}, 'live_steering')
+        rejected({'op': 'start', 'spec': probe}, 'start_checked')
+        rejected({'op': 'get', 'id': request_id}, 'not found')
+        first = start('LATE_WAKE', ident=request_id, effort='high', require='late_activity,input_responses')
+        assert set(first['required_capabilities']) == {'late_activity', 'input_responses'}
+        assert start('LATE_WAKE', ident=request_id, effort='high', require='input_responses,late_activity') == first
+        rejected({'op': 'start_checked', 'spec': {**first, 'required_capabilities': ['late_activity']}}, 'different input')
         early, running = collect(first['id'], kind='input_requested')
         assert running['status'] in ('running', 'waiting'), [(event['kind'], event['data'].get('detail')) for event in early]
         assert any(e['kind'] == 'reasoning_delta' for e in early)
@@ -155,8 +174,16 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
                 'id': uid(), 'to': {'type': 'resident', 'id': resident['id']}, 'subject': 'Fixture mail', 'body': body}})
         inbox = lambda: api({'op': 'client_inbox', 'client_id': client}, local=True)['messages']
         for turn in range(2):
-            activation = api({'op': 'resident_activate', 'id': resident['id'], 'activation_id': uid(), 'directions': 'Fixture activation'})
-            events, result = collect(activation['record']['spec']['id'])
+            activation_id = uid()
+            activation = {'op': 'resident_activate_checked', 'id': resident['id'],
+                          'activation_id': activation_id, 'directions': 'Fixture activation'}
+            rejected({**activation, 'required_capabilities': ['live_steering']}, 'live_steering')
+            rejected({'op': 'get', 'id': activation_id}, 'not found')
+            activation = {**activation, 'required_capabilities': ['native_session_resume']}
+            accepted = api(activation)
+            assert api(activation)['record'] == accepted['record']
+            rejected({**activation, 'required_capabilities': ['late_activity']}, 'different input')
+            events, result = collect(accepted['record']['spec']['id'])
             assert result['status'] == 'completed'
             assert any(e['kind'] == 'assistant_message' and e['data']['private'] for e in events)
             deadline = time.monotonic() + 8

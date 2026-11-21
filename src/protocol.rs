@@ -417,16 +417,24 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                 );
                 Ok(logger.status())
             }
-            "start" => Ok(serde_json::to_value(
-                jobs.start_after(
-                    owner,
-                    serde_json::from_value::<Spec>(request["spec"].clone())?,
-                    request
-                        .get("after")
-                        .map(|v| v.as_str().ok_or("after must be a run ID"))
-                        .transpose()?,
-                )?,
-            )?),
+            "start" | "start_checked" => {
+                let spec = serde_json::from_value::<Spec>(request["spec"].clone())?;
+                let checked = request["op"] == "start_checked";
+                let has_requirements = !spec.required_capabilities.is_empty();
+                if checked != has_requirements {
+                    return Err("Start with capability requirements uses start_checked and a nonempty required_capabilities set".into());
+                }
+                Ok(serde_json::to_value(
+                    jobs.start_after(
+                        owner,
+                        spec,
+                        request
+                            .get("after")
+                            .map(|v| v.as_str().ok_or("after must be a run ID"))
+                            .transpose()?,
+                    )?,
+                )?)
+            }
             "thread_reasoning" => jobs.thread_reasoning(
                 owner,
                 request["id"].as_str().ok_or("thread id required")?,
@@ -502,18 +510,28 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                     request["id"].as_str().ok_or("id required")?.into(),
                 )?,
             )?),
-            "resident_activate" => Ok(serde_json::to_value(
-                jobs.activate(
-                    owner,
-                    request["id"].as_str().ok_or("resident id required")?,
-                    request["activation_id"]
-                        .as_str()
-                        .ok_or("activation_id required")?
-                        .into(),
-                    request["directions"].as_str().unwrap_or("").into(),
-                    true,
-                )?,
-            )?),
+            "resident_activate" | "resident_activate_checked" => {
+                let requirements =
+                    crate::runtime::requirements(request.get("required_capabilities"))?;
+                let checked = request["op"] == "resident_activate_checked";
+                let has_requirements = !requirements.is_empty();
+                if checked != has_requirements {
+                    return Err("Activation with capability requirements uses resident_activate_checked and a nonempty required_capabilities set".into());
+                }
+                Ok(serde_json::to_value(
+                    jobs.activate(
+                        owner,
+                        request["id"].as_str().ok_or("resident id required")?,
+                        request["activation_id"]
+                            .as_str()
+                            .ok_or("activation_id required")?
+                            .into(),
+                        request["directions"].as_str().unwrap_or("").into(),
+                        true,
+                        requirements,
+                    )?,
+                )?)
+            }
             "thread_result" => {
                 jobs.thread_result(owner, request["id"].as_str().ok_or("run id required")?)
             }

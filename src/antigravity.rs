@@ -18,12 +18,6 @@ const MAX_LINE: u64 = 4 * 1024 * 1024;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub fn capabilities(configured: bool) -> Value {
-    json!({"id":"antigravity","kind":"managed","protocol":"acp","configured":configured,
-        "input":["text"],"attachment_transport":"retained_file_path","tools":true,"full_access":true,"resident":true,
-        "model_selection":"native_session","controls":["cancel","steer_during_prompt","respond"]})
-}
-
 struct Process {
     child: Child,
     run: Arc<Run>,

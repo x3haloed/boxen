@@ -4,6 +4,7 @@ use crate::{
     Result, codex,
     mailbox::{Address, Mailboxes, Message, Send},
     residents::{Create, Resident, Residents},
+    runtime::{Backend, Requirements},
     state,
 };
 use serde::{Deserialize, Serialize};
@@ -132,6 +133,7 @@ mod tests {
             mailbox: None,
             created_at: now(),
             spec: Spec {
+                required_capabilities: Requirements::new(),
                 reasoning_effort: None,
                 attachments: vec![],
                 context: None,
@@ -244,6 +246,8 @@ pub fn valid_id(id: &str) -> Result<()> {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Spec {
+    #[serde(default, skip_serializing_if = "Requirements::is_empty")]
+    pub required_capabilities: Requirements,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1402,6 +1406,7 @@ impl Jobs {
                             run_id.clone(),
                             job.definition.directions.clone(),
                             ActivationCause::Schedule(origin.clone()),
+                            Requirements::new(),
                         )
                         .and_then(|s| {
                             s.ok_or_else(|| "scheduled activation was not accepted".into())
@@ -1533,6 +1538,7 @@ impl Jobs {
                             id,
                             directions.into(),
                             ActivationCause::Observations,
+                            Requirements::new(),
                         )?
                         .ok_or("observation activation was not accepted")?,
                     crate::scheduler::Handler::Thread { id: ref target } => {
@@ -1702,12 +1708,17 @@ impl Jobs {
         result
     }
     pub fn runtime_info(&self) -> Value {
-        let mut info = json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304},"backends":[{"id":"codex","kind":"managed"},{"id":"openrouter","kind":"built_in","configured":self.inference.ready().is_ok(),"default_model":crate::inference::DEFAULT_MODEL,"input":["text","image","audio","video","file"],"native_read":true,"context_policies":["summary","verbatim"],"default_ephemeral_context":"summary","default_resident_context":"verbatim","history_tool":true,"model_provider_support_required":true,"tools":true,"full_access":true}]});
-        if let Some(backends) = info["backends"].as_array_mut() {
-            backends.push(crate::antigravity::capabilities(
-                self.antigravity_path.is_some(),
-            ));
-        }
+        let backends = Backend::ALL.map(|backend| {
+            backend.describe(match backend {
+                Backend::Codex => true,
+                Backend::OpenRouter => self.inference.ready().is_ok(),
+                Backend::Antigravity => self.antigravity_path.is_some(),
+            })
+        });
+        let mut info = json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304}});
+        info["backends"] = json!(backends);
+        info["checked_requests"] =
+            json!({"start":"start_checked","resident_activate":"resident_activate_checked"});
         info["platform"] =
             json!({"os":crate::platform::host_os(),"architecture":std::env::consts::ARCH});
         info["agent_work"] = json!({"tools":["boxen_machines","boxen_work","boxen_thread_files"],"transport":"existing_authenticated_peer_operations","native_registration":"per_run_mcp"});
@@ -1936,6 +1947,7 @@ impl Jobs {
                         state::random_hex().unwrap_or_default(),
                         String::new(),
                         false,
+                        Requirements::new(),
                     ) {
                         logging::record(
                             Level::Warn,
@@ -2160,6 +2172,7 @@ impl Jobs {
         run_id: String,
         directions: String,
         manual: bool,
+        requirements: Requirements,
     ) -> Result<Option<Snapshot>> {
         let _transition = self.transitions.lock().unwrap();
         self.activate_locked(
@@ -2172,6 +2185,7 @@ impl Jobs {
             } else {
                 ActivationCause::Mail
             },
+            requirements,
         )
     }
     fn activate_locked(
@@ -2181,6 +2195,7 @@ impl Jobs {
         run_id: String,
         directions: String,
         cause: ActivationCause,
+        required_capabilities: Requirements,
     ) -> Result<Option<Snapshot>> {
         let (manual, reason, scheduled) = match cause {
             ActivationCause::Mail => (false, "mail", None),
@@ -2196,6 +2211,7 @@ impl Jobs {
         if let Ok(run) = self.get(owner, &run_id) {
             let snapshot = run.snapshot();
             if snapshot.record.spec.resident_id.as_deref() == Some(id)
+                && snapshot.record.spec.required_capabilities == required_capabilities
                 && snapshot
                     .record
                     .mailbox
@@ -2241,6 +2257,7 @@ impl Jobs {
         }
         activation.message_ids = batch.iter().map(|m| m.id.clone()).collect();
         let spec = Spec {
+            required_capabilities,
             reasoning_effort: None,
             attachments: batch
                 .iter()
@@ -2839,21 +2856,27 @@ impl Jobs {
         {
             return Err("resident working directory and model are pinned to its definition".into());
         }
-        if !matches!(
-            spec.backend.as_str(),
-            "codex" | "openrouter" | "antigravity"
-        ) {
-            return Err("unsupported backend".into());
-        }
-        if spec.backend == "antigravity" && self.antigravity_path.is_none() {
-            return Err("Antigravity is unavailable on the executing machine".into());
-        }
-        if spec.backend == "openrouter" && activation.is_none() {
-            self.inference.ready()?;
+        let backend = Backend::parse(&spec.backend)?;
+        backend.require(&spec.required_capabilities, resident.is_some()).inspect_err(|error| {
+            logging::record(Level::Info, Target::Workload, "submission.capability_rejected",
+                Context::run(&spec.id, &spec.thread_id, owner),
+                || json!({"backend":spec.backend,"required_capabilities":spec.required_capabilities,"detail":error.to_string()}),
+                || Value::Null);
+        })?;
+        match backend {
+            Backend::Antigravity if self.antigravity_path.is_none() => {
+                return Err("Antigravity is unavailable on the executing machine".into());
+            }
+            Backend::OpenRouter
+                if activation.is_none() || !spec.required_capabilities.is_empty() =>
+            {
+                self.inference.ready()?
+            }
+            _ => {}
         }
         if let Some(settings) = &spec.context {
             settings.validate()?;
-            if spec.backend != "openrouter" {
+            if backend != Backend::OpenRouter {
                 return Err("Boxen context policies apply to the built-in runtime; managed runtimes own their native compaction".into());
             }
         }
@@ -3066,7 +3089,7 @@ impl Jobs {
             Target::Workload,
             "submission.accepted",
             Context::run(&spec.id, &spec.thread_id, owner),
-            || json!({"backend":spec.backend,"cwd":spec.cwd,"automatic_cwd":automatic_cwd,"reasoning_effort":snapshot.record.reasoning_effort,"runtime_policy":snapshot.record.runtime_policy}),
+            || json!({"backend":spec.backend,"cwd":spec.cwd,"automatic_cwd":automatic_cwd,"reasoning_effort":snapshot.record.reasoning_effort,"runtime_policy":snapshot.record.runtime_policy,"required_capabilities":snapshot.record.spec.required_capabilities}),
             || Value::Null,
         );
         let binary = self.codex_path.clone();
@@ -3094,10 +3117,15 @@ impl Jobs {
                         ));
                     }
                 }
-                if spec.backend == "openrouter" {
-                    crate::inference::execute(&spec, run.clone(), receiver, jobs.clone(), history)
-                } else if spec.backend == "antigravity" {
-                    crate::antigravity::execute(
+                match backend {
+                    Backend::OpenRouter => crate::inference::execute(
+                        &spec,
+                        run.clone(),
+                        receiver,
+                        jobs.clone(),
+                        history,
+                    ),
+                    Backend::Antigravity => crate::antigravity::execute(
                         antigravity.as_deref().ok_or("Antigravity is unavailable")?,
                         &spec,
                         resume,
@@ -3105,9 +3133,8 @@ impl Jobs {
                         receiver,
                         jobs.clone(),
                         history,
-                    )
-                } else {
-                    codex::execute(
+                    ),
+                    Backend::Codex => codex::execute(
                         &binary,
                         &spec,
                         resume,
@@ -3115,7 +3142,7 @@ impl Jobs {
                         receiver,
                         jobs.clone(),
                         history,
-                    )
+                    ),
                 }
             })();
             let outcome = match result {

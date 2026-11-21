@@ -108,8 +108,9 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert next_snapshot["backend_thread"] == snapshot["backend_thread"]
         print("PASS follow-up resumes backend conversation with a new run ID")
 
-        early_terminal = spec("TERMINAL_BEFORE_START_ACK")
-        request({"op": "start", "spec": early_terminal})
+        early_terminal = {**spec("TERMINAL_BEFORE_START_ACK"), "required_capabilities": ["live_steering"]}
+        accepted = request({"op": "start_checked", "spec": early_terminal})
+        assert accepted["record"]["spec"]["required_capabilities"] == ["live_steering"]
         events, early_snapshot = collect(early_terminal["id"])
         assert early_snapshot["status"] == "completed", early_snapshot
         statuses = [e["data"]["status"] for e in events if e["kind"] == "status"]

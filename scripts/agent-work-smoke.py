@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-agent-work-') as temporary:
             step('boxen_machines', {}, 'machines', {'total':3}),
             step('boxen_machines', {'machine':keys[1][:12]}, 'target', {'machines.0.reachable':True}),
             step('boxen_machines', {'machine':'Offline'}, 'offline', {'machines.0.reachable':False}),
-            step('boxen_work', work('request', request_id='evidence', prompt='WORK_CHILD', model='fixture', attachments=[str(attachment)]), 'child', {'acceptance':'accepted'}),
+            step('boxen_work', work('request', request_id='evidence', prompt='WORK_CHILD', model='fixture', attachments=[str(attachment)], required_capabilities=['live_steering', 'native_session_resume']), 'child', {'acceptance':'accepted'}),
             step('boxen_work', work('request', request_id='evidence', prompt='changed'), error=True),
             step('boxen_work', {'action':'read','request_id':'evidence'}, 'read', {'done':True,'response':'WORK_CHILD_COMPLETE'}, until_done=True),
             step('boxen_thread_files', {'action':'list','machine':'Target','run_id':ref('child.work.request_id')}, 'files'),
@@ -105,6 +105,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-agent-work-') as temporary:
         child = api(1, {'op':'get','id':child_id})
         assert child['record']['automatic_cwd']
         assert child['record']['spec']['model']=='fixture'
+        assert set(child['record']['spec']['required_capabilities']) == {'live_steering', 'native_session_resume'}
         digest = child['record']['spec']['attachments'][0]['digest']
         assert digest == hashlib.sha256(attachment.read_bytes()).hexdigest()
         assert results['catalog']['requests'][0]['work']['request_id'] == child_id
@@ -125,7 +126,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-agent-work-') as temporary:
         print('PASS native MCP discovery, reachability isolation, labels, immutable transfer, remote stream/read, follow-up, steering, cancellation and file retrieval')
         attachment.unlink(); stop(0); launch(0)
         second, retry = scenario([
-            step('boxen_work', work('request', request_id='evidence', prompt='WORK_CHILD', model='fixture', attachments=[str(attachment)]), 'retry', {'acceptance':'accepted','work.request_id':child_id}),
+            step('boxen_work', work('request', request_id='evidence', prompt='WORK_CHILD', model='fixture', attachments=[str(attachment)], required_capabilities=['native_session_resume', 'live_steering']), 'retry', {'acceptance':'accepted','work.request_id':child_id}),
             step('boxen_work', work('read', request_id='evidence',after=results['read']['next_after']), 'tail', {'done':True,'events':[]}),
             step('boxen_thread_files', {'action':'attachment','machine':'Target','run_id':child_id,'digest':digest}, 'original'),
             step('boxen_work', {'action':'request','request_id':'local','prompt':'WORK_CHILD'}, 'local', {'acceptance':'accepted'}),

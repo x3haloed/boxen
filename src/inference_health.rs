@@ -196,6 +196,7 @@ impl Jobs {
                         id,
                         directions,
                         jobs::ActivationCause::Manual,
+                        prior.record.spec.required_capabilities.clone(),
                     )?
                     .ok_or_else(|| "continuation did not accept an activation".into());
             }

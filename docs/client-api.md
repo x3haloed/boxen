@@ -34,7 +34,7 @@ Operations:
 | `{"op":"tool_approvals","args":{"action":"get"}}` | Host-wide `computer_use` and `browser_use` booleans |
 | `{"op":"tool_approvals","args":{"action":"set","computer_use":false}}` | Persisted settings; omitted booleans retain their values |
 
-`start` is for identity-less threads; direct resident starts are rejected. Resident correspondence and independent activation use the [mailbox API](mailboxes.md). `SPEC` contains `id`, `thread_id`, `backend` (`codex` or `openrouter`), `cwd` (an absolute destination-local directory, or omitted/empty for an automatic working area), `model` (omitted/empty for the configured default), and `prompt`. Generate a lowercase 64-character hex run ID before sending, and preserve it with the exact spec until acceptance is known. For a new conversation use that same ID as `thread_id`; follow-ups use the existing thread ID with a new run ID. Repeating the same ID, owner, and exact spec is idempotent. A different spec under that ID is rejected. Catalog discovery by ID can reconcile a response lost after acceptance. A response timeout is not a rejection and must not trigger a new run ID.
+`start` is for identity-less threads; direct resident starts are rejected. Resident correspondence and independent activation use the [mailbox API](mailboxes.md). `SPEC` contains `id`, `thread_id`, `backend` (`codex`, `antigravity`, or `openrouter`), `cwd` (an absolute destination-local directory, or omitted/empty for an automatic working area), `model` (omitted/empty for the configured default), and `prompt`. Generate a lowercase 64-character hex run ID before sending, and preserve it with the exact spec until acceptance is known. For a new conversation use that same ID as `thread_id`; follow-ups use the existing thread ID with a new run ID. Repeating the same ID, owner, and exact spec is idempotent. A different spec under that ID is rejected. Catalog discovery by ID can reconcile a response lost after acceptance. A response timeout is not a rejection and must not trigger a new run ID.
 
 To change an anonymous conversation's working directory or model, send `start` with an `after` field alongside `spec`. Its value is the latest terminal run ID in that conversation. The daemon rejects a stale `after` before starting another run. An exact retry retains the original `after` and returns the already accepted run even after later turns. The accepted run records the change and describes it to the runtime. Codex attempts native session resume with the selected settings. The built-in runtime continues from retained conversation frames. The runtime kind remains fixed for a conversation.
 
@@ -43,6 +43,33 @@ Snapshots contain `record` (`spec`, `owner`, `created_at`), `status`, `backend_t
 For catalog refresh, pass each response's `next_after` back as `summary_page.after` until it is null. Each page contains `summaries` ordered by acceptance timestamp and run ID. Summaries include a bounded title, run and thread identifiers, resident attachment and import indicators, status, and event sequence. Use `get` for the exact run specification and `watch` for retained events. Older daemons may return the legacy snapshot array to the initial request.
 
 Control acceptance means delivery to the runtime control queue, not confirmed execution of the action. Observe retained control outcomes and the terminal status. Steering and backend responses are not idempotent submissions; do not blindly resend after losing their response. An uncertain earlier run remains `interrupted`; a new message can continue the same thread. The new run records `recovery_notice`, and Boxen passes the uncertainty to the runtime without replaying the earlier work or requiring an acknowledgment ceremony.
+
+## Runtime capability requirements
+
+`runtime_info` lists each backend's `request_capabilities` and
+`activation_capabilities`, alongside the host's runtime configuration. These
+describe operations the selected integration supports. Credentials, a concrete
+session, and model access still have their own runtime availability.
+
+A request requiring a capability uses `start_checked` with a nonempty
+`spec.required_capabilities` array. A manual resident activation uses
+`resident_activate_checked` with a nonempty top-level `required_capabilities`
+array. The CLI selects these operations with `--require CAPABILITY,...`. An older
+daemon rejects the checked operation instead of accepting a request with ignored
+requirements. Boxen rejects requirements outside the selected backend and request
+type before creating a run. The accepted capability set is durable and part of
+exact retry identity. Its order is immaterial.
+
+| Capability | What the requirement selects |
+| --- | --- |
+| `live_steering` | Codex and Antigravity can inject input into an active native prompt. |
+| `queued_steering` | OpenRouter can queue input at its next inference boundary. |
+| `input_responses` | Codex and Antigravity accept responses to native input requests. The request specifies the response shape. |
+| `native_session_resume` | Codex and Antigravity attempt to resume a retained native session when one exists. |
+| `late_activity` | Antigravity retains tracked work and replies that continue after the native prompt ends. |
+
+Resident activation directions and mailbox intake have separate operations.
+Steering capabilities apply to anonymous requests.
 
 ## Anonymous conversation moves
 

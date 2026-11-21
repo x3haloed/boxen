@@ -149,9 +149,11 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
             headers={'Authorization':'Bearer '+tokens[0],'Content-Type':'application/json'},data=json.dumps({**({'peer':keys[0],'address':''} if local else target),'request':op}).encode())
         response=urllib.request.urlopen(request,timeout=15)
         return response if watch else json.load(response)
-    def start(prompt,thread=None):
+    def start(prompt,thread=None,require=None):
         ident=secrets.token_hex(32);spec={'id':ident,'thread_id':thread or ident,'cwd':temp,'model':'fixture','backend':'openrouter','prompt':prompt}
-        return api({'op':'start','spec':spec})
+        if require:
+            spec['required_capabilities'] = require
+        return api({'op':'start_checked' if require else 'start','spec':spec})
     def collect(run,after=0):
         events=[]
         with api({'id':run['record']['spec']['id'],'after':after},True) as stream:
@@ -293,7 +295,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
             if prompt=='SLOW_SHELL':
                 recovered=start('RECOVER',run['record']['spec']['thread_id']);recovery_events,done=collect(recovered);assert done['status']=='completed'
                 assert any(e['kind']=='context_projection' and e['data']['unknown_tool_results']==1 for e in recovery_events)
-        steer=start('STEER_ME');until(steer,'tool_started');api({'op':'control','id':steer['record']['spec']['id'],'action':{'type':'steer','text':'STEERING_TEXT'}})
+        steer=start('STEER_ME',require=['queued_steering']);until(steer,'tool_started');api({'op':'control','id':steer['record']['spec']['id'],'action':{'type':'steer','text':'STEERING_TEXT'}})
         assert collect(steer)[1]['status']=='completed';assert result(steer)['response']=='STEERED_RESPONSE'
         print('PASS cancellation during HTTP/tool execution and steering at the next inference boundary')
         r=resident();m1=send(r,'SILENT one');m2=send(r,'REPLY one');m3=send(r,'SILENT two')
