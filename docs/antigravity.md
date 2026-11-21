@@ -10,6 +10,17 @@ The same authenticated execution and watch operations provide ordered replay, ex
 
 A completed native prompt can leave tools or a scheduled wake outstanding. In that case the Boxen run remains active. The journal records prompt completion separately from run completion. A late reply remains part of the originating run, including its tool and input activity. Antigravity reports the end of the reply through its usage update. A missing confirmation after Stop leaves an interrupted run with an uncertain outcome. Tool effects remain attributable to their original run.
 
+An anonymous conversation can accept a fresh prompt on the same ACP connection
+when Antigravity has returned `end_turn`, there are no outstanding questions or
+steering requests, and the only open calls are native `run_command` calls with
+an asynchronous wait budget. A new run owns the new prompt and the bridge calls
+it makes. The old run still owns its command until a terminal update or an
+explicit interrupted outcome. The wait budget establishes the kind of native
+call Boxen can track independently. An accepted handoff requires its own receipt.
+Work that can wake a model, including scheduled input and unresolved requests,
+continues to gate follow-ups. The destination, execution account, working
+directory, model and reasoning effort stay pinned while sharing the connection.
+
 During an active native prompt, `steer` sends a new ACP prompt as live steering. Boxen advertises local ACP elicitation forms. A form arrives as an `input_requested` event with `request_id`, `kind: "form"`, and `requested_schema`. A `respond` result of `{"action":"accept","content":{"shape":"2"}}` submits the declared field and offered value. A result of `{"action":"decline"}` or `{"action":"cancel"}` closes that form. Whole-run cancellation sends the native stop request and cancels pending forms. Unsupported form shapes are declined with a retained event. Boxen accepts bounded flat forms with primitive fields and choice lists. Forms are for non-sensitive information. [ACP elicitation specification](https://agentclientprotocol.com/protocol/v1/elicitation)
 
 Older fixed-choice requests carry `choices` and take `{"option_id":"offered-choice-id"}`. Both response formats use the exact JSON request ID from the journal. An invalid response produces a control error and leaves the request pending. Under Full access the adapter selects a one-time allow option for ordinary tool permission requests while keeping question choices distinct.

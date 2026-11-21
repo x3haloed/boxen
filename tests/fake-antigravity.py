@@ -97,6 +97,25 @@ for line in sys.stdin:
             send(id=prompt_id, result={'stopReason': 'end_turn'})
             prompt_id = None
         chunk('Fixture reasoning.', thought=True)
+        if prompt == 'BACKGROUND_COMMAND':
+            update('tool_call', toolCallId='background-command', name='run_command',
+                   kind='execute', title='Synthetic background command', status='in_progress',
+                   rawInput={'WaitMsBeforeAsync': 500})
+            chunk('Background command started.')
+            send(id=ident, result={'stopReason': 'end_turn'})
+            continue
+        if prompt == 'FOLLOW_BACKGROUND':
+            tool('boxen_work', {'action': 'list'}, 16)
+            update('tool_call_update', toolCallId='background-command', status='completed',
+                   rawOutput={'combinedOutput': 'late original command output', 'exitCode': 0})
+            chunk('A new prompt used the same session.')
+            send(id=ident, result={'stopReason': 'end_turn'})
+            continue
+        if prompt == 'FOLLOW_BACKGROUND_KEEP':
+            tool('boxen_work', {'action': 'list'}, 16)
+            chunk('Same session, original command is still open.')
+            send(id=ident, result={'stopReason': 'end_turn'})
+            continue
         if prompt == 'FORM':
             prompt_id = ident
             update('tool_call', toolCallId='form-tool', kind='other', title='Ask a question', status='in_progress')

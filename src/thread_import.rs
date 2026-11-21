@@ -356,6 +356,7 @@ impl Jobs {
             record,
             status: "starting".into(),
             backend_thread: None,
+            native_prompt: None,
             last_seq: 0,
         };
         let mut bytes = Vec::new();

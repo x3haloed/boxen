@@ -153,6 +153,10 @@ idempotent retries; uncertain steering retains the draft and an incident notice.
 A rejected steering send refreshes the addressed run. A terminal snapshot puts
 the composer through its usual ended-run transition, with the draft available
 for an explicit follow-up.
+When Antigravity reports that its prompt ended and a native background command
+remains open, the composer offers ordinary **Send** as soon as the daemon
+reports that the same session can take a fresh prompt. Late command updates
+remain visible on the run that started the command.
 The GUI does not store credentials, copy model keys, or depend on browser storage.
 
 ## Verification

@@ -206,6 +206,49 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
         assert api({'op': 'runtime_info', 'run_id': model_change['id']})['observed']['session']['model'] == 'fixture-model'
         print('PASS an offered Antigravity model change on a resumed idle thread')
 
+        origin = start('BACKGROUND_COMMAND')
+        opened, ready = collect(origin['id'], kind='antigravity_prompt_state')
+        if ready.get('native_prompt') != 'ready':
+            later, ready = collect(origin['id'], opened[-1]['seq'], kind='antigravity_prompt_state')
+            opened += later
+        assert ready['native_prompt'] == 'ready' and ready['status'] == 'running'
+        assert not api({'op': 'thread_result', 'id': origin['id']})['done']
+        rejected({'op': 'start', 'spec': dict(origin, id=uid(), model='fixture-default'),
+                  'after': origin['id']}, 'thread already has an active run')
+        interim = dict(origin, id=uid(), prompt='FOLLOW_BACKGROUND_KEEP')
+        api({'op': 'start', 'spec': interim, 'after': origin['id']})
+        interim_events, interim_result = collect(interim['id'])
+        assert interim_result['status'] == 'completed'
+        assert interim_result['backend_thread'] == ready['backend_thread']
+        assert any(e['kind'] == 'resident_bridge_call' for e in interim_events)
+        assert not api({'op': 'thread_result', 'id': origin['id']})['done']
+        continuation = dict(origin, id=uid(), prompt='FOLLOW_BACKGROUND')
+        request = {'op': 'start', 'spec': continuation, 'after': interim['id']}
+        api(request)
+        assert api(request)['record']['spec']['id'] == continuation['id']
+        events, continued = collect(continuation['id'])
+        original_events, settled = collect(origin['id'])
+        assert continued['status'] == settled['status'] == 'completed'
+        assert continued['backend_thread'] == ready['backend_thread'] == settled['backend_thread']
+        assert any(e['kind'] == 'tool_result' and e['data'].get('result') == 'late original command output'
+                   for e in original_events)
+        assert not any(e['data'].get('call_id') == 'background-command' for e in events)
+        assert any(e['kind'] == 'resident_bridge_call' for e in events)
+        assert not any(e['kind'] == 'resident_bridge_call' for e in original_events)
+        assert api({'op': 'thread_result', 'id': continuation['id']})['response'] == 'A new prompt used the same session.'
+        print('PASS native follow-up admitted during background work, exact retry, late attribution and MCP scope')
+
+        abandoned = start('BACKGROUND_COMMAND')
+        abandoned_events, awaiting = collect(abandoned['id'], kind='antigravity_prompt_state')
+        if awaiting.get('native_prompt') != 'ready':
+            _, awaiting = collect(abandoned['id'], abandoned_events[-1]['seq'], kind='antigravity_prompt_state')
+        assert awaiting['native_prompt'] == 'ready'
+        dropped = dict(abandoned, id=uid(), prompt='DROP_TRANSPORT')
+        api({'op': 'start', 'spec': dropped, 'after': abandoned['id']})
+        assert collect(dropped['id'])[1]['status'] == 'interrupted'
+        assert collect(abandoned['id'])[1]['status'] == 'interrupted'
+        print('PASS shared native transport loss preserves both runs as uncertain')
+
         for action in ('steer', 'cancel'):
             active = start('WAIT')
             collect(active['id'], kind='reasoning_delta')

@@ -2,7 +2,7 @@
 use crate::{
     Result,
     acp_form::Form,
-    jobs::{Control, History, Jobs, Run, RunOutcome, Spec},
+    jobs::{Control, History, Jobs, Run, RunOutcome},
     logging::{self, Context, Level, Target},
     resident_bridge::Bridge,
     runtime::OutstandingWork,
@@ -13,7 +13,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::Path,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
@@ -423,11 +423,13 @@ impl QuestionKind {
     }
 }
 
-struct Turn<'a> {
-    rpc: &'a mut Rpc,
-    session: &'a str,
-    run: &'a Run,
-    secret: &'a str,
+struct Turn {
+    session: String,
+    run: Arc<Run>,
+    resident: bool,
+    secret: String,
+    controls: mpsc::Receiver<Control>,
+    passive: HashSet<String>,
     tools: OutstandingWork,
     questions: HashMap<String, Question>,
     steering: HashMap<u64, Value>,
@@ -438,12 +440,12 @@ struct Turn<'a> {
     answer: String,
 }
 
-impl Turn<'_> {
+impl Turn {
     fn append_text(&mut self, update: &Value, reasoning: bool) -> Result<()> {
         let Some(text) = update["content"]["text"].as_str() else {
             return Ok(());
         };
-        let text = text.replace(self.secret, "[redacted]");
+        let text = text.replace(&self.secret, "[redacted]");
         if !reasoning {
             if self.answer.len() + text.len() > 3 * 1024 * 1024 {
                 return Err("Antigravity response exceeds Boxen's retained message limit".into());
@@ -472,19 +474,28 @@ impl Turn<'_> {
                 let terminal = matches!(status, Some("completed" | "failed" | "cancelled"));
                 if terminal {
                     self.tools.finish(id);
+                    self.passive.remove(id);
                 } else if kind == "tool_call" || status.is_some() {
                     self.tools.start(id)?;
+                    if kind == "tool_call"
+                        && update["name"] == "run_command"
+                        && update["rawInput"]["WaitMsBeforeAsync"].as_u64().is_some()
+                    {
+                        self.passive.insert(id.into());
+                    }
                 }
                 let output = update["rawOutput"]["combinedOutput"]
                     .as_str()
                     .or_else(|| update["rawOutput"]["combined_output"].as_str())
-                    .map(|text| text.replace(self.secret, "[redacted]"));
+                    .or_else(|| update["rawOutput"]["output"].as_str())
+                    .map(|text| text.replace(&self.secret, "[redacted]"));
                 let title = update["title"]
                     .as_str()
-                    .map(|text| text.replace(self.secret, "[redacted]"));
+                    .map(|text| text.replace(&self.secret, "[redacted]"));
                 let data = json!({"call_id":id,"tool":title,"status":status,"backend":"antigravity",
                     "result":output,"output_kind":output.as_ref().map(|_|"aggregate"),
-                    "exit_code":update["rawOutput"]["exitCode"].as_i64()});
+                    "exit_code":update["rawOutput"]["exitCode"].as_i64()
+                        .or_else(||update["rawOutput"]["exit_code"].as_i64())});
                 self.run.append(
                     if terminal {
                         "tool_result"
@@ -511,7 +522,7 @@ impl Turn<'_> {
         Ok(())
     }
 
-    fn permission(&mut self, message: &Value) -> Result<()> {
+    fn permission(&mut self, rpc: &mut Rpc, message: &Value) -> Result<()> {
         let id = &message["id"];
         let params = &message["params"];
         let options = params["options"]
@@ -534,13 +545,13 @@ impl Turn<'_> {
                 || json!({"outcome":"cancelled"}),
                 |value| json!({"outcome":"selected","optionId":value}),
             );
-            self.rpc.reply(id, json!({"outcome":outcome}))?;
+            rpc.reply(id, json!({"outcome":outcome}))?;
             self.run.append("tool_approval_decision",json!({"request_id":id,"backend":"antigravity","automatic":true,"action":if selected.is_some() {"accept"} else {"cancel"}}))?;
             return Ok(());
         }
         let choices: Vec<_> = options.iter().filter_map(|o| {
             let key = o["optionId"].as_str()?;
-            Some(json!({"id":key,"label":o["name"].as_str().unwrap_or(key).replace(self.secret,"[redacted]")}))
+            Some(json!({"id":key,"label":o["name"].as_str().unwrap_or(key).replace(&self.secret,"[redacted]")}))
         }).collect();
         let values: HashSet<_> = choices
             .iter()
@@ -552,7 +563,7 @@ impl Turn<'_> {
         let title = tool["title"]
             .as_str()
             .unwrap_or("Antigravity is requesting input")
-            .replace(self.secret, "[redacted]");
+            .replace(&self.secret, "[redacted]");
         self.register_question(
             id,
             QuestionKind::Choices(values),
@@ -563,11 +574,11 @@ impl Turn<'_> {
         )
     }
 
-    fn elicitation(&mut self, message: &Value) -> Result<()> {
+    fn elicitation(&mut self, rpc: &mut Rpc, message: &Value) -> Result<()> {
         let id = &message["id"];
         let params = &message["params"];
         if self.cancel_sent.is_some() {
-            self.rpc.reply(id, json!({"action":"cancel"}))?;
+            rpc.reply(id, json!({"action":"cancel"}))?;
             self.run.append(
                 "request_cancelled",
                 json!({"backend":"antigravity","request_id":id}),
@@ -581,11 +592,11 @@ impl Turn<'_> {
             && !title.is_empty()
             && title.len() <= 4096
             && encoded.len() <= 32 * 1024
-            && !encoded.contains(self.secret))
+            && !encoded.contains(&self.secret))
         .then(|| Form::parse(schema))
         .flatten();
         let Some(form) = form else {
-            self.rpc.reply(id, json!({"action":"decline"}))?;
+            rpc.reply(id, json!({"action":"decline"}))?;
             self.run.diagnostic(
                 Level::Warn,
                 "antigravity.form_declined",
@@ -603,7 +614,7 @@ impl Turn<'_> {
             QuestionKind::Form(form),
             json!({
                 "request_id":id,"backend":"antigravity","kind":"form",
-                "question":title.replace(self.secret,"[redacted]"),"requested_schema":schema,
+                "question":title.replace(&self.secret,"[redacted]"),"requested_schema":schema,
                 "call_id":params["toolCallId"]
             }),
         )
@@ -637,7 +648,7 @@ impl Turn<'_> {
         Ok(())
     }
 
-    fn ingest(&mut self, message: Value) -> Result<()> {
+    fn ingest(&mut self, rpc: &mut Rpc, message: Value) -> Result<()> {
         if let Some(method) = message["method"].as_str() {
             if message["params"]["sessionId"] == self.session {
                 if method == "session/update" {
@@ -645,14 +656,14 @@ impl Turn<'_> {
                     return Ok(());
                 }
                 if method == "session/request_permission" && message.get("id").is_some() {
-                    return self.permission(&message);
+                    return self.permission(rpc, &message);
                 }
                 if method == "elicitation/create" && message.get("id").is_some() {
-                    return self.elicitation(&message);
+                    return self.elicitation(rpc, &message);
                 }
             }
             if let Some(id) = message.get("id") {
-                self.rpc.unsupported(id)?;
+                rpc.unsupported(id)?;
             }
             return Ok(());
         }
@@ -685,9 +696,9 @@ impl Turn<'_> {
         Ok(())
     }
 
-    fn controls(&mut self, receiver: &mpsc::Receiver<Control>) -> Result<()> {
+    fn controls(&mut self, rpc: &mut Rpc) -> Result<()> {
         for _ in 0..64 {
-            let Ok(control) = receiver.try_recv() else {
+            let Ok(control) = self.controls.try_recv() else {
                 break;
             };
             match control {
@@ -695,11 +706,10 @@ impl Turn<'_> {
                     if self.cancel_sent.is_none() {
                         self.run
                             .append("control", json!({"type":"cancel_requested"}))?;
-                        self.rpc
-                            .notification("session/cancel", json!({"sessionId":self.session}))?;
+                        rpc.notification("session/cancel", json!({"sessionId":self.session}))?;
                         self.cancel_sent = Some(Instant::now());
                         for (_, question) in self.questions.drain() {
-                            self.rpc.reply(&question.id, question.kind.cancel())?;
+                            rpc.reply(&question.id, question.kind.cancel())?;
                             self.run.append(
                                 "request_cancelled",
                                 json!({"backend":"antigravity","request_id":question.id}),
@@ -719,7 +729,7 @@ impl Turn<'_> {
                     {
                         self.run.append("control_error",json!({"message":"Antigravity steering requires an active prompt and no pending steer or cancellation","update":{"update_id":update_id}}))?;
                     } else {
-                        let id = self.rpc.call("session/prompt", json!({"sessionId":self.session,"prompt":prompt_parts(&text,&file_context)}))?;
+                        let id = rpc.call("session/prompt", json!({"sessionId":self.session,"prompt":prompt_parts(&text,&file_context)}))?;
                         let update = json!({"text":text,"attachments":attachments,"steering":true,"update_id":update_id});
                         self.run.append(
                             "control",
@@ -734,7 +744,7 @@ impl Turn<'_> {
                         && let Some(response) = question.kind.response(&result)
                     {
                         let action = response["action"].as_str().unwrap_or("accept").to_owned();
-                        self.rpc.reply(&question.id, response)?;
+                        rpc.reply(&question.id, response)?;
                         self.questions.remove(&key);
                         self.run.diagnostic(Level::Info, "antigravity.input_answered",
                             || json!({"request_id":request_id,"session_id":self.session,"action":action}), || Value::Null);
@@ -797,16 +807,31 @@ impl Turn<'_> {
     }
 }
 
+pub(crate) struct Continuation {
+    pub run: Arc<Run>,
+    pub controls: mpsc::Receiver<Control>,
+}
+
+#[derive(Default)]
+pub(crate) struct SessionAdmission {
+    pub ready: Option<String>,
+    pub pending: Option<Continuation>,
+}
+
+#[derive(Default)]
+pub(crate) struct SessionSlot(pub Mutex<SessionAdmission>);
+
 pub fn execute(
     binary: &str,
-    spec: &Spec,
     resume: Option<String>,
     run: Arc<Run>,
     controls: mpsc::Receiver<Control>,
     jobs: Arc<Jobs>,
     history: History,
-) -> Result<RunOutcome> {
+    slot: Option<&SessionSlot>,
+) -> Result<Option<RunOutcome>> {
     let record = run.snapshot().record;
+    let spec = &record.spec;
     let resident = record.resident.as_ref();
     let bridge = match resident {
         Some(resident) => Bridge::start(jobs.clone(), run.clone(), resident.clone())?,
@@ -860,11 +885,54 @@ pub fn execute(
     })();
     if run.cancellation_requested() {
         run.append("control", json!({"type":"cancel_requested"}))?;
-        return Ok(RunOutcome::Cancelled(
+        return Ok(Some(RunOutcome::Cancelled(
             "Cancelled before the Antigravity prompt".into(),
-        ));
+        )));
     }
     let (session, options, rebuild) = prepared?;
+    let mut reconstruction = String::new();
+    if let Some(reason) = rebuild {
+        run.append(
+            "backend_session_rebuilt",
+            json!({"backend":"antigravity","previous_backend_thread":resume,"reason":reason}),
+        )?;
+        reconstruction.push_str(&format!("\n{reason} Boxen supplies retained conversation evidence. Hidden state and omitted payloads remain unavailable. Historical effects are retained as evidence and are not replayed.\n{}",history.reconstruction()?));
+    }
+    let current = begin_prompt(
+        &mut rpc,
+        &bridge,
+        &jobs,
+        &session,
+        &options,
+        Continuation { run, controls },
+        &reconstruction,
+    )?;
+    let Some(current) = current else {
+        return Ok(Some(RunOutcome::Cancelled(
+            "Cancelled before the Antigravity prompt".into(),
+        )));
+    };
+    drive_session(&mut rpc, &bridge, &jobs, &session, &options, slot, current);
+    Ok(None)
+}
+
+fn begin_prompt(
+    rpc: &mut Rpc,
+    bridge: &Bridge,
+    jobs: &Jobs,
+    session: &str,
+    options: &Value,
+    next: Continuation,
+    reconstruction: &str,
+) -> Result<Option<Turn>> {
+    let Continuation { run, controls } = next;
+    if run.cancellation_requested() {
+        run.append("control", json!({"type":"cancel_requested"}))?;
+        return Ok(None);
+    }
+    let record = run.snapshot().record;
+    let resident = record.resident.as_ref();
+    let spec = &record.spec;
     let mut context = record.trigger_context()
         + &record.observation_context()
         + &run.runtime_context()?
@@ -873,13 +941,7 @@ pub fn execute(
         run.append("recovery_notice", recovery.clone())?;
         context.push_str(&format!("\nRecovery incident: {recovery}"));
     }
-    if let Some(reason) = rebuild {
-        run.append(
-            "backend_session_rebuilt",
-            json!({"backend":"antigravity","previous_backend_thread":resume,"reason":reason}),
-        )?;
-        context.push_str(&format!("\n{reason} Boxen supplies retained conversation evidence. Hidden state and omitted payloads remain unavailable. Historical effects are retained as evidence and are not replayed.\n{}",history.reconstruction()?));
-    }
+    context.push_str(reconstruction);
     if let Some(resident) = resident {
         context.push_str(&jobs.residents.instructions(resident));
         context.push_str("\nBoxen resident operations are available through the boxen MCP connection. Assistant narration remains private. Explicit messaging tool calls deliver correspondence.");
@@ -896,7 +958,7 @@ pub fn execute(
     let observed: serde_json::Map<String, Value> = ["model", "thought_level", "mode"]
         .into_iter()
         .filter_map(|key| {
-            let selected = config(&options, key)?["currentValue"].as_str()?;
+            let selected = config(options, key)?["currentValue"].as_str()?;
             (selected.len() <= 256 && !selected.contains(&bridge.token))
                 .then(|| (key.to_owned(), json!(selected)))
         })
@@ -914,20 +976,25 @@ pub fn execute(
     );
     if run.cancellation_requested() {
         run.append("control", json!({"type":"cancel_requested"}))?;
-        return Ok(RunOutcome::Cancelled(
-            "Cancelled before the Antigravity prompt".into(),
-        ));
+        return Ok(None);
     }
+    if resident.is_none() {
+        bridge.bind_work(Some(run.clone()));
+    }
+    rpc.scope = Scope::Run(run.clone());
     run.status("running", "Antigravity is executing on this machine")?;
     let prompt = rpc.call("session/prompt", json!({"sessionId":session,"prompt":prompt_parts(
         &spec.prompt,
         &format!("Boxen-authored runtime context, separate from the request author:\n{context}"),
     )}))?;
-    let mut turn = Turn {
-        rpc: &mut rpc,
-        session: &session,
-        run: &run,
-        secret: &bridge.token,
+    run.append("antigravity_prompt_state", json!({"state":"active"}))?;
+    Ok(Some(Turn {
+        session: session.into(),
+        run,
+        resident: resident.is_some(),
+        secret: bridge.token.clone(),
+        controls,
+        passive: HashSet::new(),
         tools: OutstandingWork::default(),
         questions: HashMap::new(),
         steering: HashMap::new(),
@@ -936,17 +1003,227 @@ pub fn execute(
         awaiting_wake: false,
         cancel_sent: None,
         answer: String::new(),
-    };
-    loop {
-        turn.controls(&controls)?;
-        if let Some(message) = turn.rpc.receive()? {
-            turn.ingest(message)?;
-        }
-        if let Some(outcome) = turn.outcome(resident.is_some()) {
-            if matches!(outcome, RunOutcome::Completed(_)) {
-                run.append("assistant_message",json!({"id":"acp-answer","text":turn.answer,"private":resident.is_some(),"backend":"antigravity"}))?;
+    }))
+}
+
+fn finish(jobs: &Jobs, run: &Run, outcome: RunOutcome) {
+    if let Err(error) = run.settle(outcome) {
+        run.diagnostic(
+            Level::Error,
+            "execution.settlement_failed",
+            || json!({"error":error.to_string()}),
+            || Value::Null,
+        );
+    }
+    jobs.notify();
+}
+
+fn finish_turn(jobs: &Jobs, turn: &Turn, mut outcome: RunOutcome) {
+    if matches!(outcome, RunOutcome::Completed(_))
+        && let Err(error) = turn.run.append(
+            "assistant_message",
+            json!({"id":"acp-answer","text":turn.answer,
+            "private":turn.resident,"backend":"antigravity"}),
+        )
+    {
+        outcome = RunOutcome::Interrupted(error.to_string());
+    }
+    finish(jobs, &turn.run, outcome);
+}
+
+fn drive_session(
+    rpc: &mut Rpc,
+    bridge: &Bridge,
+    jobs: &Jobs,
+    session: &str,
+    options: &Value,
+    slot: Option<&SessionSlot>,
+    first: Turn,
+) {
+    let mut current = Some(first);
+    let mut background: Vec<Turn> = Vec::new();
+    let mut retired_calls = HashSet::new();
+    let result = (|| -> Result<()> {
+        loop {
+            if let Some(turn) = &mut current {
+                turn.controls(rpc)?;
             }
-            return Ok(outcome);
+            for turn in &mut background {
+                for _ in 0..64 {
+                    match turn.controls.try_recv() {
+                        Ok(Control::Cancel) => {
+                            turn.run
+                                .append("control", json!({"type":"cancel_requested"}))?;
+                            turn.cancel_sent = Some(Instant::now());
+                            break;
+                        }
+                        Ok(Control::Steer { update_id, .. }) => {
+                            turn.run.append("control_error",json!({
+                                "message":"Antigravity's prompt ended; the native command remains outstanding",
+                                "update":{"update_id":update_id}
+                            }))?;
+                        }
+                        Ok(Control::Respond { request_id, .. }) => {
+                            turn.run.append(
+                                "control_error",
+                                json!({
+                                    "message":"This Antigravity run has no pending input request",
+                                    "request_id":request_id
+                                }),
+                            )?;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            if let Some(message) = rpc.receive()? {
+                let update = &message["params"]["update"];
+                let call = (message["method"] == "session/update"
+                    && message["params"]["sessionId"] == session)
+                    .then(|| update["toolCallId"].as_str())
+                    .flatten();
+                if let Some(owner) = call.and_then(|call| {
+                    background
+                        .iter_mut()
+                        .find(|turn| turn.passive.contains(call))
+                }) {
+                    let call = call.unwrap();
+                    owner.update(update)?;
+                    if !owner.passive.contains(call) {
+                        retired_calls.insert(call.to_owned());
+                    }
+                } else if call.is_none_or(|call| !retired_calls.contains(call)) {
+                    if let Some(turn) = &mut current {
+                        turn.ingest(rpc, message)?;
+                    } else if message.get("method").is_some()
+                        && let Some(id) = message.get("id")
+                    {
+                        rpc.unsupported(id)?;
+                    }
+                }
+            }
+            if retired_calls.len() > 8192 {
+                return Err(
+                    "Antigravity exceeded the session's late call attribution limit".into(),
+                );
+            }
+            let mut index = 0;
+            while index < background.len() {
+                let turn = &background[index];
+                let outcome = if turn.cancel_sent.is_some() {
+                    retired_calls.extend(turn.passive.iter().cloned());
+                    Some(RunOutcome::Interrupted("Tracking stopped after the prompt ended; the outstanding command outcome remains uncertain".into()))
+                } else if turn.tools.is_empty() {
+                    Some(RunOutcome::Completed(
+                        "Antigravity's outstanding commands finished".into(),
+                    ))
+                } else {
+                    None
+                };
+                if let Some(outcome) = outcome {
+                    finish_turn(jobs, &background.remove(index), outcome);
+                } else {
+                    index += 1;
+                }
+            }
+            if let Some(turn) = &current {
+                let outcome = turn.outcome(turn.resident);
+                let can_background = slot.is_some()
+                    && turn.prompt.is_none()
+                    && turn.stop_reason.as_deref() == Some("end_turn")
+                    && !turn.answer.trim().is_empty()
+                    && turn.cancel_sent.is_none()
+                    && turn.steering.is_empty()
+                    && turn.questions.is_empty()
+                    && !turn.tools.is_empty()
+                    && turn.tools.len() == turn.passive.len();
+                if can_background || outcome.is_some() {
+                    if let Some(slot) = slot {
+                        bridge.bind_work(None);
+                        let mut admission = slot.0.lock().unwrap();
+                        if can_background || !background.is_empty() {
+                            turn.run.append(
+                                "antigravity_prompt_state",
+                                json!({"state":"ready",
+                                "outstanding_commands":turn.tools.len()}),
+                            )?;
+                            admission.ready = Some(turn.run.snapshot().record.spec.id);
+                            turn.run.diagnostic(
+                                Level::Info,
+                                "antigravity.followup_ready",
+                                || json!({"outstanding_commands":turn.tools.len()}),
+                                || Value::Null,
+                            );
+                        }
+                    }
+                    let turn = current.take().unwrap();
+                    if can_background {
+                        background.push(turn);
+                    } else if let Some(outcome) = outcome {
+                        finish_turn(jobs, &turn, outcome);
+                    }
+                }
+            }
+            if current.is_none() {
+                let next = slot.and_then(|slot| {
+                    let mut admission = slot.0.lock().unwrap();
+                    if background.is_empty() && admission.pending.is_none() {
+                        admission.ready = None;
+                    }
+                    admission.pending.take()
+                });
+                if let Some(next) = next {
+                    let run = next.run.clone();
+                    match begin_prompt(rpc, bridge, jobs, session, options, next, "") {
+                        Ok(Some(turn)) => current = Some(turn),
+                        Ok(None) => {
+                            finish(
+                                jobs,
+                                &run,
+                                RunOutcome::Cancelled(
+                                    "Cancelled before the Antigravity prompt".into(),
+                                ),
+                            );
+                            if !background.is_empty()
+                                && let Some(slot) = slot
+                            {
+                                slot.0.lock().unwrap().ready = Some(run.snapshot().record.spec.id);
+                            }
+                        }
+                        Err(error) => {
+                            finish(jobs, &run, RunOutcome::Interrupted(error.to_string()));
+                            return Err(error);
+                        }
+                    }
+                } else if background.is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+    })();
+    if let Err(error) = result {
+        if let Some(slot) = slot {
+            let pending = {
+                let mut admission = slot.0.lock().unwrap();
+                admission.ready = None;
+                admission.pending.take()
+            };
+            if let Some(pending) = pending {
+                finish(
+                    jobs,
+                    &pending.run,
+                    RunOutcome::Interrupted(error.to_string()),
+                );
+            }
+        }
+        for turn in current.into_iter().chain(background) {
+            turn.run.diagnostic(
+                Level::Error,
+                "antigravity.session_failed",
+                || json!({"error":error.to_string()}),
+                || Value::Null,
+            );
+            finish(jobs, &turn.run, RunOutcome::Interrupted(error.to_string()));
         }
     }
 }

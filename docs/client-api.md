@@ -181,6 +181,11 @@ reasoning effort. Discovery sends no prompt and starts no Boxen run.
 
 ## Antigravity ACP
 
+Run snapshots and catalog summaries can include `native_prompt`. On an active
+run, `active` permits live steering, `ended` waits for remaining work, and
+`ready` allows a fresh ordinary request in the same conversation while the
+original native command remains attributable to its earlier run.
+
 The `antigravity` backend uses the same submission, observation, control, and
 resident activation operations. The executing daemon exposes its configuration
 through `runtime_info`. Antigravity reports questions as `input_requested`

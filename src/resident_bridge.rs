@@ -12,7 +12,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
@@ -25,6 +25,7 @@ pub struct Bridge {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    bound_run: Arc<Mutex<Option<Arc<Run>>>>,
 }
 impl Bridge {
     pub fn start(jobs: Arc<Jobs>, run: Arc<Run>, resident: Resident) -> Result<Self> {
@@ -46,6 +47,8 @@ impl Bridge {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let secret = token.clone();
+        let bound_run = Arc::new(Mutex::new(Some(run.clone())));
+        let current = bound_run.clone();
         run.diagnostic(
             Level::Info,
             "resident_bridge.started",
@@ -57,7 +60,14 @@ impl Bridge {
                 if stopping.load(Ordering::Acquire) {
                     break;
                 }
-                let result = serve(&mut stream, &secret, &jobs, &run, resident.as_ref());
+                let result = serve(
+                    &mut stream,
+                    &secret,
+                    &jobs,
+                    &run,
+                    &current,
+                    resident.as_ref(),
+                );
                 if let Err(error) = result {
                     run.diagnostic(
                         Level::Warn,
@@ -79,7 +89,11 @@ impl Bridge {
             address,
             stop,
             thread: Some(thread),
+            bound_run,
         })
+    }
+    pub(crate) fn bind_work(&self, run: Option<Arc<Run>>) {
+        *self.bound_run.lock().unwrap() = run;
     }
     pub fn acp_config(&self) -> Value {
         json!({
@@ -149,6 +163,7 @@ fn serve(
     token: &str,
     jobs: &Arc<Jobs>,
     run: &Arc<Run>,
+    bound_run: &Mutex<Option<Arc<Run>>>,
     resident: Option<&Resident>,
 ) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -258,7 +273,13 @@ fn serve(
             }
             Ok(json!({"tools":tools}))
         }
-        "tools/call" => call(jobs, run, resident, id, &request["params"]),
+        "tools/call" => {
+            let bound = bound_run.lock().unwrap().clone();
+            match bound {
+                Some(bound) => call(jobs, &bound, resident, id, &request["params"]),
+                None => Err("No Antigravity prompt currently owns new Boxen tool calls".into()),
+            }
+        }
         _ => Err("bridge method is unavailable".into()),
     };
     let response = match result {

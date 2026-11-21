@@ -490,6 +490,8 @@ pub struct Snapshot {
     pub status: String,
     pub backend_thread: Option<String>,
     pub last_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_prompt: Option<String>,
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -1040,7 +1042,7 @@ impl Run {
         ))
     }
 
-    fn settle(&self, outcome_input: RunOutcome) -> Result<()> {
+    pub(crate) fn settle(&self, outcome_input: RunOutcome) -> Result<()> {
         let outcome;
         {
             let mut inner = self.inner.lock().unwrap();
@@ -1148,6 +1150,10 @@ fn project(snapshot: &mut Snapshot, event: &Event) {
         }
     } else if event.kind == "backend_thread" {
         snapshot.backend_thread = event.data["id"].as_str().map(str::to_owned);
+    } else if event.kind == "antigravity_prompt_state" {
+        snapshot.native_prompt = event.data["state"].as_str().map(str::to_owned);
+    } else if event.kind == "backend_prompt_ended" && event.data["backend"] == "antigravity" {
+        snapshot.native_prompt = Some("ended".into());
     }
 }
 
@@ -1164,6 +1170,7 @@ fn load_run(path: &std::path::Path, id: &str) -> Result<Arc<Run>> {
         record,
         status: "starting".into(),
         backend_thread: None,
+        native_prompt: None,
         last_seq: 0,
     };
     let mut reader = BufReader::new(File::open(&log_path)?);
@@ -1197,7 +1204,7 @@ fn load_run(path: &std::path::Path, id: &str) -> Result<Arc<Run>> {
             "inference_frame" => serde_json::from_str::<InferenceRoute<'_>>(row.data.get())
                 .map(|frame| EventProjection::inference(&frame.event.kind))
                 .unwrap_or_default(),
-            "status" | "backend_thread" => {
+            "status" | "backend_thread" | "backend_prompt_ended" | "antigravity_prompt_state" => {
                 let event = serde_json::from_slice(&line).map_err(|_| "corrupt event log")?;
                 project(&mut snapshot, &event);
                 EventProjection::None
@@ -1347,6 +1354,7 @@ pub struct Jobs {
     codex_path: String,
     codex_catalog: Mutex<()>,
     antigravity_path: Option<String>,
+    antigravity_sessions: Mutex<HashMap<String, Arc<crate::antigravity::SessionSlot>>>,
     antigravity_catalog: Mutex<Option<(crate::execution::Execution, Instant, Value)>>,
     pub inference: crate::inference::Config,
     _lock: File,
@@ -2188,6 +2196,7 @@ impl Jobs {
             codex_path,
             codex_catalog: Mutex::new(()),
             antigravity_path,
+            antigravity_sessions: Mutex::new(HashMap::new()),
             antigravity_catalog: Mutex::new(None),
             inference,
             _lock: lock,
@@ -2871,6 +2880,7 @@ impl Jobs {
                     "machine": self.run_machine(&spec.id).ok(),
                     "placement": self.placement(&spec.thread_id).ok().flatten().map(|p| p.summary()),
                     "status": snapshot.status,
+                    "native_prompt": snapshot.native_prompt,
                     "last_seq": snapshot.last_seq
                 })
             })
@@ -3300,15 +3310,40 @@ impl Jobs {
             .filter(|r| r.record.spec.thread_id == spec.thread_id)
             .collect();
         previous.sort_by_key(|s| (s.record.created_at, s.record.spec.id.clone()));
+        let head = previous.last();
+        let previous_active = previous.iter().any(|prior| !terminal(&prior.status));
+        let continuation = (previous_active
+            && backend == Backend::Antigravity
+            && resident.is_none()
+            && scheduled.is_none())
+        .then(|| {
+            self.antigravity_sessions
+                .lock()
+                .unwrap()
+                .get(&spec.thread_id)
+                .cloned()
+        })
+        .flatten();
+        let mut slot = continuation
+            .as_ref()
+            .map(|session| session.0.lock().unwrap());
+        let reuses_live_session = slot.as_ref().is_some_and(|s| {
+            s.pending.is_none()
+                && head.is_some_and(|head| {
+                    s.ready.as_deref() == Some(&head.record.spec.id)
+                        && after.is_none_or(|id| id == head.record.spec.id)
+                        && head.record.spec.cwd == spec.cwd
+                        && head.record.spec.model == spec.model
+                })
+        });
         for prior in &previous {
             if prior.record.owner != owner {
                 return Err("thread belongs to a different peer".into());
             }
-            if !terminal(&prior.status) {
+            if !terminal(&prior.status) && !reuses_live_session {
                 return Err("thread already has an active run; another request is accepted after it ends, and steering is a separate control operation".into());
             }
         }
-        let head = previous.last();
         if after.is_none()
             && placement
                 .as_ref()
@@ -3352,6 +3387,13 @@ impl Jobs {
             }
             spec.reasoning_effort.clone()
         };
+        if reuses_live_session
+            && head.is_some_and(|head| head.record.reasoning_effort != reasoning_effort)
+        {
+            return Err(
+                "Antigravity can change reasoning effort after outstanding work ends".into(),
+            );
+        }
         let previous_machine = head
             .map(|head| self.run_machine(&head.record.spec.id))
             .transpose()?;
@@ -3401,6 +3443,11 @@ impl Jobs {
         )?;
         let home = self.directory.parent().ok_or("run directory has no home")?;
         let execution = crate::execution::Execution::capture(home)?;
+        if reuses_live_session
+            && head.and_then(|prior| prior.record.execution.as_ref()) != Some(&execution)
+        {
+            return Err("Antigravity can continue after outstanding work ends when the host execution context changes".into());
+        }
         execution.own_managed_path(home)?;
         if automatic_cwd {
             self.resolve_working_directory(&spec.thread_id, &requested_cwd, true)?;
@@ -3448,6 +3495,7 @@ impl Jobs {
                     record,
                     status: "starting".into(),
                     backend_thread: None,
+                    native_prompt: None,
                     last_seq: 0,
                 },
                 journal: Journal::new(path.join("events.jsonl")),
@@ -3481,11 +3529,29 @@ impl Jobs {
             || json!({"backend":spec.backend,"cwd":spec.cwd,"automatic_cwd":automatic_cwd,"reasoning_effort":snapshot.record.reasoning_effort,"runtime_policy":snapshot.record.runtime_policy,"required_capabilities":snapshot.record.spec.required_capabilities,"delegated_from":snapshot.record.delegated_from}),
             || Value::Null,
         );
+        if reuses_live_session {
+            let state = slot.as_mut().unwrap();
+            state.ready = None;
+            state.pending = Some(crate::antigravity::Continuation {
+                run,
+                controls: receiver,
+            });
+            return Ok(snapshot);
+        }
+        let session =
+            (backend == Backend::Antigravity && snapshot.record.resident.is_none()).then(|| {
+                let session = Arc::new(crate::antigravity::SessionSlot::default());
+                self.antigravity_sessions
+                    .lock()
+                    .unwrap()
+                    .insert(spec.thread_id.clone(), session.clone());
+                session
+            });
         let binary = self.codex_path.clone();
         let antigravity = self.antigravity_path.clone();
         let jobs = self.clone();
         std::thread::spawn(move || {
-            let result = (|| -> Result<RunOutcome> {
+            let result = (|| -> Result<Option<RunOutcome>> {
                 if let Some(execution) = &run.snapshot().record.execution {
                     execution.own_managed_path(&jobs.directory)?;
                     for previous in &history.runs {
@@ -3501,9 +3567,9 @@ impl Jobs {
                     run.diagnostic(Level::Info, "execution.storage_prepared",
                         || json!({"account":execution.account,"uid":execution.uid,"prior_runs":history.runs.len(),"automatic_cwd":automatic_cwd}), || Value::Null);
                     if !execution.prepare(&run)? {
-                        return Ok(RunOutcome::Cancelled(
+                        return Ok(Some(RunOutcome::Cancelled(
                             "Cancelled while waiting for the execution session".into(),
-                        ));
+                        )));
                     }
                 }
                 match backend {
@@ -3513,15 +3579,16 @@ impl Jobs {
                         receiver,
                         jobs.clone(),
                         history,
-                    ),
+                    )
+                    .map(Some),
                     Backend::Antigravity => crate::antigravity::execute(
                         antigravity.as_deref().ok_or("Antigravity is unavailable")?,
-                        &spec,
                         resume,
                         run.clone(),
                         receiver,
                         jobs.clone(),
                         history,
+                        session.as_deref(),
                     ),
                     Backend::Codex => codex::execute(
                         &binary,
@@ -3531,11 +3598,22 @@ impl Jobs {
                         receiver,
                         jobs.clone(),
                         history,
-                    ),
+                    )
+                    .map(Some),
                 }
             })();
+            if let Some(session) = session {
+                let mut sessions = jobs.antigravity_sessions.lock().unwrap();
+                if sessions
+                    .get(&spec.thread_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+                {
+                    sessions.remove(&spec.thread_id);
+                }
+            }
             let outcome = match result {
-                Ok(outcome) => outcome,
+                Ok(Some(outcome)) => outcome,
+                Ok(None) => return,
                 Err(error) => {
                     run.diagnostic(
                         Level::Error,

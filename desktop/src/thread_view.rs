@@ -170,6 +170,15 @@ pub fn active(last: Option<&Value>) -> Option<&str> {
     last.filter(|r| !terminal(r))
         .and_then(|r| r["record"]["spec"]["id"].as_str())
 }
+
+fn prompt_ended(run: &Value) -> bool {
+    matches!(run["native_prompt"].as_str(), Some("ended" | "ready"))
+}
+
+fn stale_steering_reason(reason: &str) -> bool {
+    reason.starts_with("Antigravity steering requires an active prompt")
+        || reason.starts_with("Antigravity's prompt ended;")
+}
 pub fn capture(data: &mut Data, key: &ThreadKey, run: Option<&str>) {
     if let Some(run) = run
         && !data.saved.draft_runs.iter().any(|(k, _)| k == key)
@@ -414,6 +423,9 @@ impl Desktop {
         }
         let dest = view::destination(&self.data, &key.peer);
         let running = active(Some(&last));
+        if running.is_some() && last["native_prompt"] == "ended" {
+            return;
+        }
         if let Some((_, intended)) = self.data.saved.draft_runs.iter().find(|(k, _)| k == &key)
             && running != Some(intended)
         {
@@ -424,7 +436,7 @@ impl Desktop {
             return;
         }
         self.data.thread_issues.remove(&key);
-        if let Some(run) = running {
+        if let Some(run) = running.filter(|_| !prompt_ended(&last)) {
             if self.data.active_steering.contains(&key)
                 || self.data.saved.steering.iter().any(|s| s.key == key)
             {
@@ -584,6 +596,17 @@ impl Desktop {
                 })
             {
                 self.refresh_steering_run(&s.key, &s.run);
+                if stale_steering_reason(reason)
+                    && find_thread(&self.data, &s.key).is_some_and(|thread| {
+                        thread
+                            .runs
+                            .iter()
+                            .any(|run| run["record"]["spec"]["id"] == s.run && prompt_ended(run))
+                    })
+                {
+                    self.data.thread_issues.remove(&s.key);
+                    continue;
+                }
                 let reason = if reason.is_empty() {
                     "The runtime rejected the update"
                 } else {
@@ -609,6 +632,8 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         .unwrap_or_default();
     let last = runs.last();
     let running = active(last).map(str::to_owned);
+    let native_ended = running.is_some() && last.is_some_and(prompt_ended);
+    let accepts_followup = last.is_some_and(|run| run["native_prompt"] == "ready");
     let moving = data.saved.moves.iter().any(|m| &m.key == key);
     let pending = data
         .saved
@@ -666,6 +691,12 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         }
         if let Some(error) = data.errors.get(&key.peer) {
             ui.label(format!("Machine unavailable · {error}"));
+        } else if native_ended {
+            ui.label(if accepts_followup {
+                "Background command still open"
+            } else {
+                "Waiting for outstanding work"
+            });
         } else if let Some(last) = last {
             match last["status"].as_str() {
                 Some("starting" | "running") => {
@@ -992,7 +1023,9 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     {
         ui.weak("Preparing follow-up…");
     }
-    if let Some(issue) = data.thread_issues.get(key) {
+    if let Some(issue) = data.thread_issues.get(key)
+        && !(native_ended && stale_steering_reason(issue))
+    {
         ui.label(issue);
     }
     if let Some(steering) = waiting {
@@ -1051,13 +1084,13 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             text: &mut draft,
             files: &mut files,
             target,
-            label: if running.is_some() {
+            label: if running.is_some() && !native_ended {
                 "Send update"
             } else {
                 "Send"
             },
             limit: 256 * 1024,
-            blocked: frozen || stale || last.is_none(),
+            blocked: frozen || stale || last.is_none() || (native_ended && !accepts_followup),
         },
         actions,
     );
@@ -1431,6 +1464,63 @@ mod tests {
             pressed: false,
             modifiers: Modifiers::NONE,
         }])
+    }
+
+    #[test]
+    fn ended_antigravity_prompt_exposes_ordinary_send_for_background_work() {
+        for (state, can_send) in [("ready", true), ("ended", false)] {
+            let ctx = egui::Context::default();
+            let key = ThreadKey {
+                peer: "fixture-peer".into(),
+                id: "fixture-thread".into(),
+            };
+            let mut data = Data::default();
+            data.saved.drafts.push((key.clone(), "A new prompt".into()));
+            data.thread_issues.insert(
+                key.clone(),
+                "Antigravity steering requires an active prompt. The draft is still here.".into(),
+            );
+            view::switch(&mut data, &key, false, None);
+            let runs = [
+                json!({"status":"running","native_prompt":state,"record":{"spec":{
+                    "id":"fixture-run","thread_id":key.id,"backend":"antigravity","prompt":"Fixture"
+                }}}),
+            ];
+            data.catalogs
+                .insert(key.peer.clone(), crate::model::catalog(&key.peer, &runs));
+            let mut frame = |events| {
+                let mut actions = vec![];
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(pos2(0., 0.), vec2(800., 600.))),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| panel(ui, &mut data, &key, &mut actions),
+                );
+                (output, actions)
+            };
+            frame(vec![]);
+            let (output, _) = frame(vec![]);
+            assert!(visible_text(&output, "Running").is_none());
+            assert!(visible_text(&output, "Send update").is_none());
+            assert!(
+                visible_text(
+                    &output,
+                    "Antigravity steering requires an active prompt. The draft is still here."
+                )
+                .is_none()
+            );
+            let send = visible_text(&output, "Send").expect("ordinary send button");
+            let (_, actions) = click(&mut frame, send);
+            assert_eq!(
+                actions
+                    .iter()
+                    .any(|action| matches!(action, Action::Send(target) if *target == key)),
+                can_send
+            );
+            assert_eq!(data.saved.drafts[0].1, "A new prompt");
+        }
     }
 
     #[test]
