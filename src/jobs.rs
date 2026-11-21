@@ -392,6 +392,26 @@ pub enum Control {
     },
 }
 
+/// A runtime reports how its work stopped. The run journal publishes the outcome
+/// after the runtime has released its execution resources.
+pub(crate) enum RunOutcome {
+    Completed(String),
+    Cancelled(String),
+    Failed(String),
+    Interrupted(String),
+}
+
+impl RunOutcome {
+    fn status_and_detail(&self) -> (&'static str, &str) {
+        match self {
+            Self::Completed(detail) => ("completed", detail),
+            Self::Cancelled(detail) => ("cancelled", detail),
+            Self::Failed(detail) => ("failed", detail),
+            Self::Interrupted(detail) => ("interrupted", detail),
+        }
+    }
+}
+
 pub fn terminal(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
 }
@@ -791,9 +811,41 @@ impl Run {
         Ok(())
     }
     pub fn status(&self, status: &str, detail: &str) -> Result<()> {
-        self.append("status", json!({"status":status,"detail":detail}))?;
+        let mut inner = self.inner.lock().unwrap();
+        if terminal(status) || terminal(&inner.snapshot.status) {
+            return Err("run status cannot change through the active-status path".into());
+        }
+        self.append_locked(
+            &mut inner,
+            "status",
+            json!({"status":status,"detail":detail}),
+        )?;
         Ok(())
     }
+
+    fn settle(&self, outcome: RunOutcome) -> Result<()> {
+        let (status, detail) = outcome.status_and_detail();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if terminal(&inner.snapshot.status) {
+                return Err("run already settled".into());
+            }
+            inner.control = None;
+            self.append_locked(
+                &mut inner,
+                "status",
+                json!({"status":status,"detail":detail}),
+            )?;
+        }
+        self.diagnostic(
+            Level::Info,
+            "execution.settled",
+            || json!({"status":status}),
+            || json!({"detail":detail}),
+        );
+        Ok(())
+    }
+
     pub fn batch(&self, after: u64, wait: bool) -> Result<(Vec<Event>, Snapshot)> {
         let mut inner = self.inner.lock().unwrap();
         if after > inner.snapshot.last_seq {
@@ -1789,10 +1841,10 @@ impl Jobs {
                     || json!({"run_id":id}),
                     || Value::Null,
                 );
-                run.status(
-                    "interrupted",
-                    "Daemon restarted. Prior execution outcome is uncertain; it was not retried.",
-                )?;
+                run.settle(RunOutcome::Interrupted(
+                    "Daemon restarted. Prior execution outcome is uncertain; it was not retried."
+                        .into(),
+                ))?;
             }
             let accepted = run.snapshot().record;
             jobs.observations
@@ -3006,7 +3058,7 @@ impl Jobs {
         let binary = self.codex_path.clone();
         let jobs = self.clone();
         std::thread::spawn(move || {
-            let result = (|| -> Result<()> {
+            let result = (|| -> Result<RunOutcome> {
                 if let Some(execution) = &run.snapshot().record.execution {
                     execution.own_managed_path(&jobs.directory)?;
                     for previous in &history.runs {
@@ -3022,7 +3074,9 @@ impl Jobs {
                     run.diagnostic(Level::Info, "execution.storage_prepared",
                         || json!({"account":execution.account,"uid":execution.uid,"prior_runs":history.runs.len(),"automatic_cwd":automatic_cwd}), || Value::Null);
                     if !execution.prepare(&run)? {
-                        return Ok(());
+                        return Ok(RunOutcome::Cancelled(
+                            "Cancelled while waiting for the execution session".into(),
+                        ));
                     }
                 }
                 if spec.backend == "openrouter" {
@@ -3039,21 +3093,30 @@ impl Jobs {
                     )
                 }
             })();
-            if let Err(error) = result {
+            let outcome = match result {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    run.diagnostic(
+                        Level::Error,
+                        "execution.failed",
+                        || json!({"error":error.to_string()}),
+                        || Value::Null,
+                    );
+                    if matches!(run.snapshot().status.as_str(), "running" | "waiting") {
+                        RunOutcome::Interrupted(error.to_string())
+                    } else {
+                        RunOutcome::Failed(error.to_string())
+                    }
+                }
+            };
+            if let Err(error) = run.settle(outcome) {
                 run.diagnostic(
                     Level::Error,
-                    "execution.failed",
+                    "execution.settlement_failed",
                     || json!({"error":error.to_string()}),
                     || Value::Null,
                 );
-                let status = if matches!(run.snapshot().status.as_str(), "running" | "waiting") {
-                    "interrupted"
-                } else {
-                    "failed"
-                };
-                let _ = run.status(status, &error.to_string());
             }
-            run.inner.lock().unwrap().control = None;
             jobs.notify();
         });
         Ok(snapshot)

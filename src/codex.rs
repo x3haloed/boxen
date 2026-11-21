@@ -3,7 +3,7 @@ use crate::logging::Level;
 use crate::{
     Result,
     agent_tools::{resident_tool, resident_tools},
-    jobs::{Control, History, Jobs, Run, Spec},
+    jobs::{Control, History, Jobs, Run, RunOutcome, Spec},
     residents::Resident,
 };
 use serde_json::{Value, json};
@@ -57,7 +57,7 @@ struct Rpc {
     pending: HashSet<String>,
     thread: Option<String>,
     turn: Option<String>,
-    finished: bool,
+    outcome: Option<RunOutcome>,
     cancel_requested: bool,
     cancel_sent_at: Option<Instant>,
     resident: Option<Resident>,
@@ -171,6 +171,12 @@ impl Rpc {
                 return Err(format!("Codex {method} timed out").into());
             }
             self.tick()?;
+            // A terminal turn notification may precede the start acknowledgement.
+            // Once the outcome is observed, an absent acknowledgement cannot change it.
+            if method == "turn/start" && self.outcome.is_some() {
+                self.awaiting.remove(&id);
+                return Ok(Value::Null);
+            }
         }
     }
     fn default_effort(&mut self, cwd: &str, session: &Value) -> Result<String> {
@@ -247,7 +253,7 @@ impl Rpc {
                         self.write(json!({"id":request_id,"result":result}))?;
                         self.run
                             .append("request_answered", json!({"request_id":request_id}))?;
-                        if self.pending.is_empty() && !self.finished {
+                        if self.pending.is_empty() && self.outcome.is_none() {
                             self.run.status("running", "Input sent to backend")?;
                         }
                     }
@@ -264,13 +270,11 @@ impl Rpc {
         if self
             .cancel_sent_at
             .is_some_and(|time| time.elapsed() > Duration::from_secs(15))
-            && !self.finished
+            && self.outcome.is_none()
         {
-            self.run.status(
-                "interrupted",
-                "Backend did not confirm cancellation; prior tool effects may have occurred",
-            )?;
-            self.finished = true;
+            self.outcome = Some(RunOutcome::Interrupted(
+                "Backend did not confirm cancellation; prior tool effects may have occurred".into(),
+            ));
             return Ok(());
         }
         match self.incoming.recv_timeout(Duration::from_millis(20)) {
@@ -432,7 +436,7 @@ impl Rpc {
         if method == "serverRequest/resolved" {
             self.pending
                 .remove(&message["params"]["requestId"].to_string());
-            if self.pending.is_empty() && !self.finished {
+            if self.pending.is_empty() && self.outcome.is_none() {
                 self.run
                     .status("running", "Backend input request resolved")?;
             }
@@ -442,14 +446,13 @@ impl Rpc {
         }
         if method == "turn/completed" {
             let turn = &message["params"]["turn"];
-            let status = match turn["status"].as_str() {
-                Some("completed") => "completed",
-                Some("interrupted") if self.cancel_requested => "cancelled",
-                Some("interrupted") => "interrupted",
-                _ => "failed",
-            };
-            self.run.status(status, &turn["error"].to_string())?;
-            self.finished = true;
+            let detail = turn["error"].to_string();
+            self.outcome = Some(match turn["status"].as_str() {
+                Some("completed") => RunOutcome::Completed(detail),
+                Some("interrupted") if self.cancel_requested => RunOutcome::Cancelled(detail),
+                Some("interrupted") => RunOutcome::Interrupted(detail),
+                _ => RunOutcome::Failed(detail),
+            });
         }
         Ok(())
     }
@@ -463,7 +466,7 @@ pub fn execute(
     controls: mpsc::Receiver<Control>,
     jobs: Arc<Jobs>,
     history: History,
-) -> Result<()> {
+) -> Result<RunOutcome> {
     let residents = jobs.residents.clone();
     let record = run.snapshot().record;
     if let (Some(execution), Some(id)) = (&record.execution, &resume)
@@ -606,7 +609,7 @@ pub fn execute(
         pending: HashSet::new(),
         thread: None,
         turn: None,
-        finished: false,
+        outcome: None,
         cancel_requested: false,
         cancel_sent_at: None,
         resident: resident.clone(),
@@ -807,8 +810,9 @@ pub fn execute(
         json!({"id":thread,"backend":"codex","model":result["model"]}),
     )?;
     if rpc.cancel_requested {
-        run.status("cancelled", "Cancelled before inference started")?;
-        return Ok(());
+        return Ok(RunOutcome::Cancelled(
+            "Cancelled before inference started".into(),
+        ));
     }
     let mut input = Vec::new();
     if !spec.prompt.is_empty() {
@@ -822,8 +826,9 @@ pub fn execute(
         value => value.map(str::to_owned),
     };
     if rpc.cancel_requested {
-        run.status("cancelled", "Cancelled before inference started")?;
-        return Ok(());
+        return Ok(RunOutcome::Cancelled(
+            "Cancelled before inference started".into(),
+        ));
     }
     run.status("running", "Starting Codex turn")?;
     let mut turn = json!({"threadId":thread,"input":input,"summary":"auto"});
@@ -837,12 +842,16 @@ pub fn execute(
         || Value::Null,
     );
     let response = rpc.request("turn/start", turn)?;
-    rpc.turn = response["turn"]["id"].as_str().map(str::to_owned);
-    if !rpc.finished {
+    if let Some(id) = response["turn"]["id"].as_str() {
+        rpc.turn = Some(id.to_owned());
+    }
+    if rpc.outcome.is_none() {
         run.status("running", "Codex is executing on this machine")?;
     }
-    while !rpc.finished {
+    loop {
+        if let Some(outcome) = rpc.outcome.take() {
+            return Ok(outcome);
+        }
         rpc.tick()?;
     }
-    Ok(())
 }

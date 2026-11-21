@@ -108,6 +108,16 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert next_snapshot["backend_thread"] == snapshot["backend_thread"]
         print("PASS follow-up resumes backend conversation with a new run ID")
 
+        early_terminal = spec("TERMINAL_BEFORE_START_ACK")
+        request({"op": "start", "spec": early_terminal})
+        events, early_snapshot = collect(early_terminal["id"])
+        assert early_snapshot["status"] == "completed", early_snapshot
+        statuses = [e["data"]["status"] for e in events if e["kind"] == "status"]
+        assert statuses[-1] == "completed" and statuses.count("completed") == 1, statuses
+        assert events[-1]["kind"] == "status", events
+        assert any(e["data"].get("params", {}).get("delta") == "Early response." for e in events)
+        print("PASS a terminal turn notification settles exactly once without a start acknowledgement")
+
         approval = spec("APPROVAL")
         request({"op": "start", "spec": approval})
         with request({"id": approval["id"], "after": 0}, watch=True) as stream:
@@ -145,7 +155,9 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         _, recovered = collect(interrupted["id"])
         assert recovered["status"] == "interrupted"
         assert collect(run["id"])[1]["status"] == "completed"
-        assert len(request({"op": "list"})) == 5
+        assert {entry["record"]["spec"]["id"] for entry in request({"op": "list"})} == {
+            existing["id"] for existing in (run, followup, early_terminal, approval, cancellation, interrupted)
+        }
         print("PASS daemon restart retains history and marks active outcome uncertain without retry")
 
         local = spec("local execution")

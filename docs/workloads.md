@@ -145,6 +145,11 @@ Watchers request events after a sequence cursor. The daemon replays the backlog 
 
 Closing a viewer or losing the client connection leaves the executing daemon and runtime active. Completed results remain available across daemon restart. On restart, a previously unfinished run becomes `interrupted` with an explicitly uncertain outcome; it is not retried. An incomplete final journal write is discarded; interior corruption is rejected. A follow-up after interrupted execution retains the old uncertain outcome and records a recovery notice. It accepts the new message without requiring manual acknowledgment or retrying the old work. Previously issued tool side effects may have occurred even when a result was not observed.
 
+Codex and built-in inference return their execution outcomes to the daemon.
+The daemon publishes the terminal status in the existing run journal after
+runtime cleanup and closes the control channel in the same transition. Restart
+recovery records uncertainty through that journal transition too.
+
 A confirmed backend `interrupted` turn after a cancellation request becomes `cancelled`. If cancellation is not confirmed within 15 seconds, the run becomes uncertain and the app-server process is stopped. Stopping an app-server is not a general rollback or guarantee that every external side effect can be stopped. Runtime transport failure during execution also produces an uncertain outcome.
 
 The provisional viewer retries initial connection, catalog discovery, and event observation. A 12-second stream silence deadline detects stalled connections; quiet healthy watches send two-second heartbeat batches. It keeps rendered history during disconnection, deduplicates by run/sequence, and disables execution controls until replay catches up. Closing and reopening the page reconstructs the view from the executing machine's journal. A two-second idle catalog refresh discovers follow-up runs made by another client, including in the selected thread; active progress still uses push streaming. Switching machines, threads, or detaching cancels the old observer and suppresses stale asynchronous updates. Detaching disables controls until reattached.

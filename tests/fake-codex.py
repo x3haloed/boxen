@@ -394,6 +394,11 @@ for line in sys.stdin:
     elif method == "turn/start":
         params = request["params"]
         prompt = params["input"][0]["text"]
+        if prompt == "TERMINAL_BEFORE_START_ACK":
+            notification("turn/started", {"turn": {"id": "fixture-turn"}})
+            notification("item/agentMessage/delta", {"itemId": "answer", "delta": "Early response."})
+            notification("turn/completed", {"turn": {"id": "fixture-turn", "status": "completed"}})
+            continue
         direction = (json.loads(prompt.split("\n", 1)[1])["directions"]
                      if prompt.startswith("Message activation.") else prompt)
         if direction.startswith("EXPECT_EFFORT:"):

@@ -241,10 +241,6 @@ impl Execution {
             );
             while !self.available() {
                 if run.cancellation_requested() {
-                    run.status(
-                        "cancelled",
-                        "Cancelled while waiting for the execution session",
-                    )?;
                     return Ok(false);
                 }
                 std::thread::sleep(Duration::from_secs(2));

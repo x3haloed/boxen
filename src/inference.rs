@@ -1,7 +1,7 @@
 //! Built-in multimodal/tool runtime. Jobs owns runs, history, delivery and recovery.
 use crate::{
     Result, agent_tools, chat, context,
-    jobs::{Control, History, Jobs, Run, Spec},
+    jobs::{Control, History, Jobs, Run, RunOutcome, Spec},
     logging::Level,
     media, platform,
 };
@@ -247,6 +247,8 @@ fn frame_records(
     }
 }
 
+const EXCHANGE_CANCELLED: &str = "Inference connection closed on cancellation; upstream computation or billing may already have occurred";
+
 fn exchange(
     run: &Arc<Run>,
     config: &Config,
@@ -346,7 +348,6 @@ fn exchange(
     let mut bytes = 0;
     loop {
         if controls(run, rx, pending)? {
-            run.status("cancelled","Inference connection closed on cancellation; upstream computation or billing may already have occurred")?;
             return Ok(None);
         }
         match events.recv_timeout(Duration::from_millis(50)) {
@@ -577,10 +578,6 @@ fn shell(
     loop {
         if controls(run, rx, pending)? {
             run.append("tool_outcome_unknown",json!({"call_id":call_id,"detail":"Cancellation stopped the shell; file and external effects may already have occurred"}))?;
-            run.status(
-                "cancelled",
-                "Shell stopped; effects remain uncertain and are not automatically repeated",
-            )?;
             return Ok(None);
         }
         if Instant::now() > deadline {
@@ -700,7 +697,7 @@ pub fn execute(
     controls_rx: mpsc::Receiver<Control>,
     jobs: Arc<Jobs>,
     history: History,
-) -> Result<()> {
+) -> Result<RunOutcome> {
     let record = run.snapshot().record;
     let trigger_context = record.trigger_context();
     let observation_context = record.observation_context();
@@ -804,8 +801,9 @@ pub fn execute(
             return Err(format!("activation reached its {step}-exchange budget; completed tool effects remain retained and are not replayed automatically").into());
         }
         if controls(&run, &controls_rx, &mut pending)? {
-            run.status("cancelled", "Cancelled before the next inference exchange")?;
-            return Ok(());
+            return Ok(RunOutcome::Cancelled(
+                "Cancelled before the next inference exchange".into(),
+            ));
         }
         apply_steering(&run, &mut pending, &mut Vec::new())?;
         let context_started = Instant::now();
@@ -869,7 +867,7 @@ pub fn execute(
                     &mut pending,
                     "compaction",
                 ) {
-                    Ok(None) => return Ok(()),
+                    Ok(None) => return Ok(RunOutcome::Cancelled(EXCHANGE_CANCELLED.into())),
                     Ok(Some(p))
                         if p["finish_reason"] == "stop"
                             && p["assistant"]["tool_calls"]
@@ -903,8 +901,9 @@ pub fn execute(
                 }
             }
             if controls(&run, &controls_rx, &mut pending)? {
-                run.status("cancelled", "Cancelled before context installation")?;
-                return Ok(());
+                return Ok(RunOutcome::Cancelled(
+                    "Cancelled before context installation".into(),
+                ));
             }
             view.install(&run, &source, &plan, summary, failure)?;
             if !pending.is_empty() {
@@ -961,7 +960,7 @@ pub fn execute(
             "workload",
         )?
         else {
-            return Ok(());
+            return Ok(RunOutcome::Cancelled(EXCHANGE_CANCELLED.into()));
         };
         let search_boundary = source.entries.len();
         let assistant = projection["assistant"].clone();
@@ -981,8 +980,9 @@ pub fn execute(
                 return Err("provider ended without a normal final response".into());
             }
             if controls(&run, &controls_rx, &mut pending)? {
-                run.status("cancelled", "Cancelled after inference completed")?;
-                return Ok(());
+                return Ok(RunOutcome::Cancelled(
+                    "Cancelled after inference completed".into(),
+                ));
             }
             if !pending.is_empty() {
                 continue;
@@ -995,15 +995,11 @@ pub fn execute(
                 "assistant_message",
                 json!({"id":format!("step-{step}"),"text":text,"private":resident.is_some()}),
             )?;
-            run.status(
-                "completed",
-                if resident.is_some() {
-                    "Activation completed"
-                } else {
-                    "Request completed"
-                },
-            )?;
-            return Ok(());
+            return Ok(RunOutcome::Completed(if resident.is_some() {
+                "Activation completed".into()
+            } else {
+                "Request completed".into()
+            }));
         }
         if projection["finish_reason"] != "tool_calls" {
             return Err(
@@ -1020,11 +1016,9 @@ pub fn execute(
         }
         for call in calls {
             if controls(&run, &controls_rx, &mut pending)? {
-                run.status(
-                    "cancelled",
-                    "Cancelled before tool dispatch; earlier effects remain retained",
-                )?;
-                return Ok(());
+                return Ok(RunOutcome::Cancelled(
+                    "Cancelled before tool dispatch; earlier effects remain retained".into(),
+                ));
             }
             let wire_id = call["id"].as_str().ok_or("tool call has no id")?;
             let id = format!("{step}:{wire_id}");
@@ -1084,7 +1078,10 @@ pub fn execute(
             })();
             let (result, success) = match result {
                 Ok(Some(value)) => (value, true),
-                Ok(None) => return Ok(()),
+                Ok(None) => return Ok(RunOutcome::Cancelled(
+                    "Shell stopped; effects remain uncertain and are not automatically repeated"
+                        .into(),
+                )),
                 Err(error) => (json!({"ok":false,"error":error.to_string()}), false),
             };
             let mut message = json!({"role":"tool","tool_call_id":wire_id,"content":serde_json::to_string(&result)?});
