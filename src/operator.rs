@@ -39,6 +39,7 @@ fn namespace(jobs: &Jobs, actor: &str, request: &Value) -> Result<String> {
     }
     let run_id = match op {
         "get" | "control" | "thread_result" => request["id"].as_str(),
+        "runtime_info" => request["run_id"].as_str(),
         "inference_resume" => request["failed_run_id"].as_str(),
         "thread_import" => request["spec"]["id"]
             .as_str()

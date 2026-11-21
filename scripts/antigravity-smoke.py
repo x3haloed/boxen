@@ -123,6 +123,12 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
         assert running['status'] in ('running', 'waiting'), [(event['kind'], event['data'].get('detail')) for event in early]
         assert any(e['kind'] == 'reasoning_delta' for e in early)
         assert any(e['kind'] == 'backend_prompt_ended' and e['data']['pending_tools'] == 1 for e in early)
+        info = api({'op': 'runtime_info', 'run_id': request_id})
+        assert info['declared']['id'] == 'antigravity' and info['requested']['reasoning_effort'] == 'high'
+        assert info['observed']['session']['settings'] == {'model': 'fixture-model', 'thought_level': 'high'}
+        assert any(e['seq'] == info['observed']['seq'] and e['data'] == info['observed']['session']
+                   for e in early)
+
         assert not api({'op': 'thread_result', 'id': first['id']})['done']
         choose = ['respond', *remote, first['id'], '"wake-question"']
         cli(0, *choose, '{"option_id":"invalid"}')

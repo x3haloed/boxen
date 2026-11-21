@@ -690,10 +690,18 @@ pub fn execute(
         },
         json!({"text":spec.prompt,"attachments":spec.attachments}),
     )?;
-    let model = config(&options, "model").map(|model| &model["currentValue"]);
+    let observed: serde_json::Map<String, Value> = ["model", "thought_level", "mode"]
+        .into_iter()
+        .filter_map(|key| {
+            let selected = config(&options, key)?["currentValue"].as_str()?;
+            (selected.len() <= 256 && !selected.contains(&bridge.token))
+                .then(|| (key.to_owned(), json!(selected)))
+        })
+        .collect();
+    let model = observed.get("model");
     run.append(
         "backend_thread",
-        json!({"id":session,"backend":"antigravity","model":model}),
+        json!({"id":session,"backend":"antigravity","model":model,"settings":observed}),
     )?;
     run.diagnostic(
         Level::Info,

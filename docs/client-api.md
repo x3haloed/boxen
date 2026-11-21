@@ -51,6 +51,15 @@ Control acceptance means delivery to the runtime control queue, not confirmed ex
 describe operations the selected integration supports. Credentials, a concrete
 session, and model access still have their own runtime availability.
 
+`{"op":"runtime_info","run_id":"RUN_ID"}` returns the admitted request's
+model, reasoning effort, required capabilities, and the selected backend's
+current host declaration. The `observed` field points to the journal sequence
+and session data recorded by the adapter. It is null when setup produced no
+session evidence. Antigravity also records the selectors reported by its native
+session. For OpenRouter the session reference is the retained Boxen conversation.
+Historical observations remain readable after the native process exits.
+
+
 A request requiring a capability uses `start_checked` with a nonempty
 `spec.required_capabilities` array. A manual resident activation uses
 `resident_activate_checked` with a nonempty top-level `required_capabilities`

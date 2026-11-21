@@ -311,6 +311,11 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         steer=start('STEER_ME',require=['queued_steering']);until(steer,'tool_started');api({'op':'control','id':steer['record']['spec']['id'],'action':{'type':'steer','text':'STEERING_TEXT'}})
         assert collect(steer)[1]['status']=='completed';assert result(steer)['response']=='STEERED_RESPONSE'
         print('PASS cancellation during HTTP/tool execution and steering at the next inference boundary')
+        info=api({'op':'runtime_info','run_id':steer['record']['spec']['id']})
+        assert info['declared']['id']=='openrouter' and info['requested']['required_capabilities']==['queued_steering']
+        assert info['observed']['session']['model']=='fixture'
+        assert info['observed']['session']['id']==info['thread_id']
+
         timer_resident=resident()
         source=api({'op':'resident_activate_checked','id':timer_resident['id'],'activation_id':secrets.token_hex(32),
                     'directions':'SCHEDULE_FIXTURE','required_capabilities':['scheduled_handoff']})

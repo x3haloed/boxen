@@ -1302,6 +1302,9 @@ impl History {
             let journal = self.directory.join(id).join("events.jsonl");
             for event in inner.journal.read(0..inner.journal.ends.len()) {
                 let event = event?;
+                if event.kind == "backend_other_turn" {
+                    continue;
+                }
                 total += 1;
                 if event.kind == "backend"
                     && !matches!(
@@ -1980,14 +1983,16 @@ impl Jobs {
         );
         result
     }
+    fn describe_backend(&self, backend: Backend) -> Value {
+        backend.describe(match backend {
+            Backend::Codex => true,
+            Backend::OpenRouter => self.inference.ready().is_ok(),
+            Backend::Antigravity => self.antigravity_path.is_some(),
+        })
+    }
+
     pub fn runtime_info(&self) -> Value {
-        let backends = Backend::ALL.map(|backend| {
-            backend.describe(match backend {
-                Backend::Codex => true,
-                Backend::OpenRouter => self.inference.ready().is_ok(),
-                Backend::Antigravity => self.antigravity_path.is_some(),
-            })
-        });
+        let backends = Backend::ALL.map(|backend| self.describe_backend(backend));
         let mut info = json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304}});
         info["backends"] = json!(backends);
         info["checked_requests"] = json!({"start":"start_checked","resident_activate":"resident_activate_checked","completion_handoff":"start_until_handoff"});
@@ -1998,6 +2003,31 @@ impl Jobs {
             info["execution"] = crate::execution::Execution::host_info(home);
         }
         info
+    }
+
+    pub fn run_runtime_info(&self, owner: &str, id: &str) -> Result<Value> {
+        let run = self.get(owner, id)?;
+        let inner = run.inner.lock().unwrap();
+        let record = &inner.snapshot.record;
+        let backend = Backend::parse(&record.spec.backend)?;
+        let observed = inner.journal.latest("backend_thread")?.map(|event| {
+            json!({
+                "seq":event.seq, "session":event.data,
+            })
+        });
+        let mut info = json!({
+            "run_id":id,
+            "thread_id":record.spec.thread_id,
+            "status":inner.snapshot.status,
+            "last_seq":inner.snapshot.last_seq,
+            "resident":record.resident.is_some(),
+            "requested":{"model":record.spec.model,"reasoning_effort":record.reasoning_effort,
+                "required_capabilities":record.spec.required_capabilities},
+            "observed":observed,
+        });
+        drop(inner);
+        info["declared"] = self.describe_backend(backend);
+        Ok(info)
     }
 
     pub(crate) fn artifact_root(&self) -> &std::path::Path {

@@ -449,7 +449,12 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
             ),
             "events" => jobs.event_operation(owner, request["args"].clone()),
             "schedule" => jobs.schedule_operation(owner, request["args"].clone()),
-            "runtime_info" => Ok(jobs.runtime_info()),
+            "runtime_info" => match request.get("run_id") {
+                Some(id) => {
+                    jobs.run_runtime_info(owner, id.as_str().ok_or("run_id must be a run ID")?)
+                }
+                None => Ok(jobs.runtime_info()),
+            },
             "codex_models" => jobs.codex_models(owner),
             "messaging" => crate::messaging::operation(
                 jobs,

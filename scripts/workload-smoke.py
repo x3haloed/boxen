@@ -106,6 +106,11 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         request({"op": "start", "spec": followup})
         _, next_snapshot = collect(followup["id"])
         assert next_snapshot["backend_thread"] == snapshot["backend_thread"]
+        observed = request({"op": "runtime_info", "run_id": followup["id"]})
+        assert observed["declared"]["id"] == "codex" and observed["status"] == "completed"
+        assert observed["observed"]["session"]["id"] == snapshot["backend_thread"]
+        assert observed["observed"]["session"]["model"] == "fixture"
+
         print("PASS follow-up resumes backend conversation with a new run ID")
 
         early_terminal = {**spec("TERMINAL_BEFORE_START_ACK"), "required_capabilities": ["live_steering"]}
