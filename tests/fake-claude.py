@@ -90,6 +90,11 @@ for line in sys.stdin:
     prompt, context = (block['text'] for block in item['message']['content'])
     stored.write_text(session)
     system('init', model=model)
+    if prompt == 'HELD_FOLLOWUP_GATE':
+        deadline = time.monotonic() + 15
+        while not Path('release-held-followup').exists():
+            assert time.monotonic() < deadline, 'fixture gate was not released'
+            time.sleep(.025)
     if prompt == 'INTERRUPT':
         continue
     if prompt == 'BROKEN':

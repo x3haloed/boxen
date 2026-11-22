@@ -423,9 +423,13 @@ impl Desktop {
         }
         let dest = view::destination(&self.data, &key.peer);
         let running = active(Some(&last));
-        if running.is_some()
-            && (last["native_prompt"] == "ended" || last["record"]["spec"]["backend"] == "claude")
+        if let Some(run) = running
+            && last["record"]["spec"]["backend"] == "claude"
         {
+            self.hold_message(key, run.into(), text, files);
+            return;
+        }
+        if running.is_some() && last["native_prompt"] == "ended" {
             return;
         }
         if let Some((_, intended)) = self.data.saved.draft_runs.iter().find(|(k, _)| k == &key)
@@ -1082,7 +1086,21 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             }
         });
     }
+    for run in runs.iter().rev().take(2) {
+        if let Some(after) = run["record"]["spec"]["id"].as_str()
+            && let Some(hold) = data
+                .transcripts
+                .get(&run_key(&key.peer, after))
+                .and_then(|transcript| transcript.hold.as_ref())
+        {
+            crate::hold::panel(ui, data, key, after, hold, actions);
+        }
+    }
+    if claude_running {
+        ui.weak("Message held until this run completes");
+    }
     let frozen = moving
+        || data.hold_pending.contains(key)
         || pending.is_some()
         || data.saved.steering.iter().any(|s| s.key == *key)
         || data
@@ -1102,11 +1120,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                 "Send"
             },
             limit: 256 * 1024,
-            blocked: frozen
-                || stale
-                || last.is_none()
-                || claude_running
-                || (native_ended && !accepts_followup),
+            blocked: frozen || stale || last.is_none() || (native_ended && !accepts_followup),
         },
         actions,
     );

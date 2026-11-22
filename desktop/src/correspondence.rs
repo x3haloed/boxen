@@ -1130,7 +1130,7 @@ fn operator_inbox(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: 
         .iter()
         .map(|message| {
             let from = &message["sender"];
-            let name = if from["type"] == "client" {
+            if from["type"] == "client" {
                 from["machine"]
                     .as_str()
                     .and_then(|id| data.saved.destinations.iter().find(|dest| dest.key == id))
@@ -1146,8 +1146,7 @@ fn operator_inbox(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: 
                 )
             } else {
                 from["type"].as_str().unwrap_or("Sender").into()
-            };
-            name
+            }
         })
         .collect::<Vec<_>>();
     egui::ScrollArea::vertical()

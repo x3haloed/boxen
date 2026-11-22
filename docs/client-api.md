@@ -60,6 +60,23 @@ run that has a write-start record without an outcome leaves that write
 uncertain. A later answer to the same request does not identify an earlier
 attempt unless its record names that attempt ID.
 
+An anonymous Claude Code run can own a held follow-up through
+`{"op":"held_followup","id":"PREDECESSOR_RUN","action":"get"}`.
+`append`, `edit`, and `release` supply an `expected_revision` starting at
+zero. Append and edit carry `contribution` with a stable hex `id`, original
+`text`, and any already retained `attachments`. Release names a
+`contribution_id`. Operators on each authenticated machine edit or release
+their own contributions. A held follow-up combines accepted contributions
+in order and retains machine attribution. An exact accepted append retry
+recovers the hold without adding its contribution again.
+
+The predecessor journal owns the hold and its revision. A completed
+predecessor can admit one fixed follow-up ID through normal exact-`after`
+admission. A conflicting head, cancellation, failure, or interruption
+returns the held input. A retained claim links any accepted run by its
+exact ID through restart. A started receipt establishes acceptance of the
+follow-up, whose own journal owns its execution result.
+
 ## Runtime capability requirements
 
 `runtime_info` lists each backend's `request_capabilities` and

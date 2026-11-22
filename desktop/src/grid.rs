@@ -438,6 +438,9 @@ impl Desktop {
                 }
                 ui.weak(format!("{columns} × 2"));
                 crate::needs::toolbar(ui, &self.data, actions);
+                if ui.small_button("Live pulse").clicked() {
+                    self.grid_mut().open(Pane::LivePulse, true);
+                }
                 if has_holes && !visible.is_empty() {
                     ui.menu_button("Tidy", |ui| {
                         for (name, even) in [("Fill holes", false), ("Even grid", true)] {

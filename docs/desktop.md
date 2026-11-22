@@ -102,6 +102,13 @@ the existing authenticated control path after an explicit response action.
 Replay preserves pending requests. An answered or backend-resolved request loses
 its active controls.
 
+**Needs you** lists pending runtime requests from observed active runs and
+reports coverage against the machine catalogs. A stream counts once it reaches
+the sampled replay frontier. An unreachable machine can still have previously
+observed requests with inactive controls. **Go to context** opens the request
+in Activity. Attributed answers distinguish queueing from the adapter's
+backend write.
+
 The expandable **Execution context** detail shows the latest run's machine,
 account, session, privileges, working directory and observed desktop-session
 availability. Waiting runs display their retained reason, including a missing
@@ -159,6 +166,19 @@ invalidates the earlier gauge until a new sample arrives. Antigravity uses its
 reported session token counts. OpenRouter shows selected bytes against the
 budget available after reservations. Missing samples and incomplete replay show
 an unknown gauge.
+
+The **Live pulse** pane receives a bounded arrival-order projection of live
+run observations. Events read while catching up to a sampled journal frontier
+stay in the run replay. After a connection gap, the pulse records how many
+visible events replay caught up for that run. Watchlist event labels and ages
+use the same observation classification.
+
+While Claude Code owns an active anonymous run, Send can retain a held
+follow-up on that daemon. Each machine can append its own contributions.
+The held row edits or releases an exact contribution at the displayed
+revision. Successful predecessor completion can start one combined follow-up.
+Other terminal outcomes return the retained contribution to the originating
+desktop draft when it reconnects. See [held follow-up API](client-api.md).
 
 ## Verification
 
@@ -357,6 +377,10 @@ Arbitrary client IDs, including automation clients, remain separate. Original
 addresses and journals remain authoritative; the desktop combines their views.
 These reads work with network-capable daemons without a daemon upgrade.
 Existing Mail panels and drafts remain accessible.
+**With you** is the default. **All mail** is an explicit operator view of
+incoming mail to the resident and uses the paginated resident inbox API.
+Switching scope preserves the With you draft.
+
 
 Resident conversations, ordinary threads and Mail share one preview across docking
 groups, floating surfaces and machines. Dragging a conversation tab or choosing

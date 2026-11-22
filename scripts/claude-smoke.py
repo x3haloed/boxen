@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -55,15 +56,15 @@ with tempfile.TemporaryDirectory(prefix='boxen-claude-smoke-') as directory:
         assert 'Local controls:' in line, line
         return process, line.strip().split('#')[1]
 
-    def call(request, *, watch=False, local=False):
+    def call(request, *, watch=False, local=False, actor=0):
         destination = 0 if local else 1
         request = urllib.request.Request(
-            f'http://{controls[0]}/api/' + ('watch' if watch else 'operation'),
+            f'http://{controls[actor]}/api/' + ('watch' if watch else 'operation'),
             data=json.dumps({
-                'peer': keys[destination], 'address': '' if local else addresses[destination],
+                'peer': keys[destination], 'address': '' if destination == actor else addresses[destination],
                 'request': request,
             }).encode(),
-            headers={'Authorization': 'Bearer ' + tokens[0], 'Content-Type': 'application/json'},
+            headers={'Authorization': 'Bearer ' + tokens[actor], 'Content-Type': 'application/json'},
         )
         response = urllib.request.urlopen(request, timeout=15)
         return response if watch else json.load(response)
@@ -85,6 +86,18 @@ with tempfile.TemporaryDirectory(prefix='boxen-claude-smoke-') as directory:
         if thread:
             args += ['--thread', thread]
         return json.loads(cli(0, *args))['record']['spec']
+
+    def held(source, action='get', **kwargs):
+        return call({'op':'held_followup','id':source['id'],'action':action, **kwargs})['hold']
+
+    def held_phase(source, phase):
+        deadline = time.monotonic() + 12
+        while True:
+            current = held(source)
+            if current['phase'] == phase:
+                return current
+            assert time.monotonic() < deadline, current
+            time.sleep(.025)
 
     try:
         for index in range(len(homes)):
@@ -153,6 +166,40 @@ with tempfile.TemporaryDirectory(prefix='boxen-claude-smoke-') as directory:
         assert any(event['kind'] == 'tool_result' and event['data'].get('status') == 'stopped'
                    for event in stopped)
 
+        source = start('HELD_FOLLOWUP_GATE')
+        collect(source['id'], stop_at='backend_thread')
+        first_input = {'id':secrets.token_hex(32),'text':'First fixture contribution'}
+        try:
+            group = held(source, 'append', expected_revision=0, contribution=first_input)
+        except urllib.error.HTTPError as error:
+            raise AssertionError(error.read().decode()) from error
+        assert held(source, 'append', expected_revision=0, contribution=first_input) == group
+        second_input = {'id':secrets.token_hex(32),'text':'Second fixture contribution'}
+        next_group = call({'op':'held_followup','id':source['id'],'action':'append',
+            'expected_revision':group['revision'],'contribution':second_input}, actor=1)['hold']
+        assert next_group['run_id'] == group['run_id']
+        assert [entry['machine'] for entry in next_group['contributions']] == keys
+        try:
+            held(source, 'edit', expected_revision=next_group['revision']-1,
+                 contribution=first_input|{'text':'Stale edit'})
+        except urllib.error.HTTPError as error:
+            assert error.code == 422 and 'revision' in error.read().decode()
+        else:
+            raise AssertionError('A stale hold edit was accepted')
+        (workspace / 'release-held-followup').touch()
+        follow_up = held_phase(source, 'started')
+        _, snapshot = collect(follow_up['run_id'])
+        assert snapshot['record']['after'] == source['id'] and snapshot['status'] == 'completed'
+        assert all(value in snapshot['record']['spec']['prompt'] for value in
+                   (first_input['text'], second_input['text']))
+
+        cancelled_source = start('INTERRUPT')
+        collect(cancelled_source['id'], stop_at='backend_thread')
+        held(cancelled_source, 'append', expected_revision=0,
+             contribution={'id':secrets.token_hex(32),'text':'Returned on cancellation'})
+        cli(0, 'cancel', *remote, cancelled_source['id'])
+        assert held_phase(cancelled_source, 'returned')['reason'] == 'predecessor_cancelled'
+
         broken = start('BROKEN')
         events, snapshot = collect(broken['id'])
         assert snapshot['status'] == 'interrupted'
@@ -165,9 +212,15 @@ with tempfile.TemporaryDirectory(prefix='boxen-claude-smoke-') as directory:
             record['event'] for record in first_runtime
         }
         assert 'Bearer ' not in retained and 'Native wake completed.' not in retained
+        restarted_source = start('INTERRUPT')
+        collect(restarted_source['id'], stop_at='backend_thread')
+        held(restarted_source, 'append', expected_revision=0,
+             contribution={'id':secrets.token_hex(32),'text':'Retained through restart'})
         processes[1].kill()
         processes[1].wait(timeout=5)
         processes[1], tokens[1] = boot(1)
+        assert held_phase(restarted_source, 'returned')['reason'] == 'predecessor_interrupted'
+        print('PASS held Claude follow-up, independent contributors, revision checks, cancellation and restart')
         replay, snapshot = collect(broken['id'])
         assert events == replay and snapshot['status'] == 'interrupted'
         print('PASS Claude model discovery, exact-ID submission, late background wake, native model change and resume, explicit reconstruction, cancellation and interrupted replay')

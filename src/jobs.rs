@@ -25,6 +25,7 @@ pub mod inference_health;
 pub mod promotion;
 #[path = "thread_import.rs"]
 pub mod thread_import;
+mod held_followup;
 #[path = "thread_move.rs"]
 mod thread_move;
 #[path = "thread_workspace.rs"]
@@ -1384,7 +1385,7 @@ impl History {
             let journal = self.directory.join(id).join("events.jsonl");
             for event in inner.journal.read(0..inner.journal.ends.len()) {
                 let event = event?;
-                if event.kind == "backend_other_turn" {
+                if matches!(event.kind.as_str(), "backend_other_turn" | "held_followup") {
                     continue;
                 }
                 total += 1;
@@ -1438,6 +1439,7 @@ pub struct Jobs {
     pub residents: Arc<Residents>,
     pub definitions: crate::resident_definitions::Definitions,
     transitions: Mutex<()>,
+    held_pending: Mutex<std::collections::HashSet<String>>,
     pub mailboxes: Arc<Mailboxes>,
     pub connectors: crate::messaging::Connectors,
     pub schedules: crate::scheduler::Schedules,
@@ -2321,6 +2323,7 @@ impl Jobs {
             mailboxes,
             wake: Arc::new((Mutex::new(Wake::default()), Condvar::new())),
             transitions: Mutex::new(()),
+            held_pending: Mutex::new(std::collections::HashSet::new()),
             directory,
             runs: Mutex::new(HashMap::new()),
             codex_path,
@@ -2390,6 +2393,12 @@ impl Jobs {
                     );
                 }
             }
+            match run.has_pending_hold() {
+                Ok(true) => { jobs.held_pending.lock().unwrap().insert(id.into()); }
+                Ok(false) => {}
+                Err(error) => run.diagnostic(Level::Warn, "followup.hold_recovery_failed",
+                    || json!({"error":error.to_string()}), || Value::Null),
+            }
             jobs.runs.lock().unwrap().insert(id.into(), run);
         }
         Ok(jobs)
@@ -2431,6 +2440,7 @@ impl Jobs {
                         || Value::Null,
                     );
                 }
+                jobs.dispatch_holds();
                 jobs.dispatch_schedules();
                 jobs.dispatch_observations();
                 for resident in jobs.residents.all() {

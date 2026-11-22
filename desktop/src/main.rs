@@ -6,6 +6,7 @@ mod conversation;
 mod correspondence;
 mod field;
 mod grid;
+mod hold;
 mod menu;
 mod model;
 mod model_catalogs;
@@ -13,6 +14,7 @@ mod needs;
 mod new_conversation;
 #[cfg(test)]
 mod performance;
+mod pulse;
 mod runtimes;
 mod thread_view;
 mod tool_approvals;
@@ -54,6 +56,8 @@ struct Saved {
     steering: Vec<thread_view::Steering>,
     pending: Vec<Pending>,
     answers: Vec<AnswerAttempt>,
+    holds: Vec<hold::Contribution>,
+    hold_edits: Vec<hold::Contribution>,
     mail: correspondence::SavedMail,
     correspondence_added: bool,
     agents_added: bool,
@@ -85,6 +89,7 @@ struct Data {
     file_previews: HashMap<String, Option<Result<attachments::Preview, String>>>,
     thread_issues: HashMap<ThreadKey, String>,
     active_steering: HashSet<ThreadKey>,
+    hold_pending: HashSet<ThreadKey>,
     moving: HashSet<ThreadKey>,
     preparing_followups: HashMap<String, ThreadKey>,
     local_key: String,
@@ -101,6 +106,7 @@ struct Data {
     errors: HashMap<String, String>,
     transcripts: HashMap<String, Transcript>,
     watches: HashMap<String, Observing>,
+    pulse: pulse::Pulse,
     selected_thread: Option<ThreadKey>,
     filter: String,
     notice: String,
@@ -124,6 +130,7 @@ enum Action {
     Open(ThreadKey, bool),
     Pin(ThreadKey),
     Send(ThreadKey),
+    HoldChange(hold::Contribution, u64, hold::Mutation),
     Cancel(ThreadKey),
     Retry(usize),
     Split(Pane, egui_dock::Split),
@@ -242,6 +249,7 @@ impl Desktop {
             ready: false,
             extra,
         };
+        app.restore_interrupted_hold_edits();
         app.connect();
         app
     }
@@ -507,12 +515,42 @@ impl Desktop {
                         selected["cwd"] = batch["snapshot"]["record"]["spec"]["cwd"].clone();
                         transcript.execution = Some(selected);
                     }
+                    let replaying = self
+                        .data
+                        .watches
+                        .get(&id)
+                        .and_then(|watch| watch.frontier)
+                        .is_none_or(|frontier| transcript.seq < frontier);
+                    let thread = batch["snapshot"]["record"]["spec"]["thread_id"]
+                        .as_str()
+                        .unwrap_or_default();
                     let mut failed = None;
+                    let mut replayed = 0;
                     for event in batch["events"].as_array().into_iter().flatten() {
+                        let previous = transcript.seq;
                         if let Err(e) = transcript.apply(event) {
                             failed = Some(e);
                             break;
                         }
+                        if previous < transcript.seq
+                            && let Some(event) = &transcript.latest_visible
+                            && event.0 == transcript.seq
+                        {
+                            if replaying {
+                                replayed += 1;
+                            } else {
+                                self.data.pulse.live(&id, thread, event.1.clone());
+                            }
+                        }
+                    }
+                    if replaying && failed.is_none() {
+                        self.data.pulse.replayed(
+                            &id,
+                            replayed,
+                            batch["snapshot"]["last_seq"]
+                                .as_u64()
+                                .is_some_and(|seq| transcript.seq >= seq),
+                        );
                     }
                     if batch["events"]
                         .as_array()
@@ -560,11 +598,13 @@ impl Desktop {
                         self.replace_snapshot(peer, s.clone());
                     }
                     self.reconcile_steering(&id);
+                    self.reconcile_hold(&id);
                 }
                 Update::WatchError(id, epoch, error) => {
                     if let Some(w) = self.data.watches.get_mut(&id)
                         && w.epoch == epoch
                     {
+                        self.data.pulse.gap(&id);
                         w.error = Some(error);
                         w.retry = Instant::now() + Duration::from_secs(2);
                     }
@@ -584,6 +624,7 @@ impl Desktop {
                 }
                 Update::Files(update) => self.file_update(update),
                 Update::Moved(key, result) => self.moved(key, result),
+                Update::Held(reply) => self.hold_reply(reply),
                 Update::Steered(key, update, result, sent) => {
                     self.steered(key, update, result, sent)
                 }
@@ -1047,6 +1088,9 @@ impl Desktop {
             }
             Action::Pin(key) => self.data.saved.workspace.pin(&key),
             Action::Send(key) => self.send(key),
+            Action::HoldChange(entry, revision, mutation) => {
+                self.mutate_hold(entry, Some(revision), mutation)
+            }
             Action::Retry(index) => {
                 if let Some(p) = self.data.saved.pending.get(index).cloned() {
                     self.submit(p)
@@ -1236,13 +1280,84 @@ fn thread_rows(
     {
         matches = true;
         let selected = data.selected_thread.as_ref() == Some(&thread.key);
+        let latest = thread.runs.last();
+        let has_background = thread.runs.iter().rev().skip(1).any(|run| !terminal(run));
+        let state = if data.errors.contains_key(&dest.key) {
+            "unseen"
+        } else {
+            match latest.and_then(|run| run["status"].as_str()) {
+                Some("completed") => "done",
+                Some("running") => "running",
+                Some("waiting") => "input",
+                Some("failed") => "failed",
+                Some("interrupted") => "interrupted",
+                Some("cancelled") => "cancelled",
+                Some("starting") => "starting",
+                Some("cancelling") => "stopping",
+                _ => "unknown",
+            }
+        };
+        let observed = thread
+            .runs
+            .iter()
+            .filter_map(|run| {
+                let id = run["record"]["spec"]["id"].as_str()?;
+                data.transcripts
+                    .get(&run_key(&dest.key, id))?
+                    .latest_visible
+                    .as_ref()
+            })
+            .max_by_key(|(_, event)| event.at);
         let response = ui
             .push_id((&thread.key.peer, &thread.key.id), |ui| {
-                ui.add(
-                    egui::Button::selectable(selected, &thread.title)
-                        .wrap()
-                        .min_size(egui::vec2(ui.available_width(), 32.)),
-                )
+                ui.horizontal(|ui| {
+                    let name_width = (ui.available_width() - 148.).max(36.);
+                    let response = ui.add_sized(
+                        [name_width, 22.],
+                        egui::Button::selectable(selected, &thread.title).truncate(),
+                    );
+                    let status = if has_background && state != "unseen" {
+                        format!("{state} +bg")
+                    } else {
+                        state.into()
+                    };
+                    let color = match state {
+                        "running" | "starting" | "stopping" => {
+                            egui::Color32::from_rgb(76, 158, 255)
+                        }
+                        "input" => egui::Color32::from_rgb(216, 162, 58),
+                        "failed" | "interrupted" => egui::Color32::from_rgb(239, 91, 80),
+                        _ => ui.visuals().weak_text_color(),
+                    };
+                    ui.add_sized(
+                        [58., 20.],
+                        egui::Label::new(RichText::new(status).monospace().size(10.).color(color))
+                            .truncate(),
+                    );
+                    ui.add_sized(
+                        [48., 20.],
+                        egui::Label::new(
+                            RichText::new(observed.map_or("—", |(_, event)| event.label))
+                                .monospace()
+                                .size(10.),
+                        )
+                        .truncate(),
+                    );
+                    ui.add_sized(
+                        [29., 20.],
+                        egui::Label::new(
+                            RichText::new(
+                                observed
+                                    .map_or_else(|| "—".into(), |(_, event)| pulse::age(event.at)),
+                            )
+                            .monospace()
+                            .size(10.),
+                        )
+                        .truncate(),
+                    );
+                    response
+                })
+                .inner
             })
             .inner;
         if response.double_clicked()
@@ -1293,6 +1408,7 @@ impl TabViewer for Viewer<'_> {
             }
             Pane::Agents => "Agents".into(),
             Pane::Work => "Work".into(),
+            Pane::LivePulse => "Live pulse".into(),
             Pane::Correspondence => "Mail".into(),
             Pane::Compose(_) => "New message".into(),
             Pane::Message(k) => {
@@ -1328,6 +1444,7 @@ impl TabViewer for Viewer<'_> {
             Pane::Compose(id) => egui::Id::new(("compose", id)),
             Pane::Agents => egui::Id::new("agents"),
             Pane::Work => egui::Id::new("work"),
+            Pane::LivePulse => egui::Id::new("live-pulse"),
             Pane::Correspondence => egui::Id::new("correspondence"),
             Pane::Threads => egui::Id::new("threads"),
             Pane::Welcome => egui::Id::new("welcome"),
@@ -1383,6 +1500,7 @@ impl TabViewer for Viewer<'_> {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
         match tab {
             Pane::Agents => agents::panel(ui, self.data, self.actions),
+            Pane::LivePulse => pulse::panel(ui, self.data),
             Pane::Work => {
                 if let Some(action) = self.data.work.panel(ui, &mut self.data.saved.work) {
                     self.actions.push(Action::Work(action));
@@ -1505,7 +1623,27 @@ impl TabViewer for Viewer<'_> {
                     .cloned()
                     .collect();
                 let query = self.data.filter.to_lowercase();
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [(ui.available_width() - 148.).max(36.), 20.],
+                        egui::Label::new("NAME"),
+                    );
+                    for (label, width) in [("STATE", 58.), ("LAST", 48.), ("AGE", 29.)] {
+                        ui.add_sized(
+                            [width, 20.],
+                            egui::Label::new(RichText::new(label).monospace().size(10.)),
+                        );
+                    }
+                });
+                let inspector_height = if self.data.selected_thread.is_some() {
+                    110.
+                } else {
+                    0.
+                };
+                let list_height = (ui.available_height() - inspector_height).max(70.);
+
                 egui::ScrollArea::vertical()
+                    .max_height(list_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if destinations.is_empty() {
@@ -1529,6 +1667,28 @@ impl TabViewer for Viewer<'_> {
                             }
                         }
                     });
+                if let Some(key) = &self.data.selected_thread
+                    && let Some(thread) = find_thread(self.data, key)
+                    && let Some(run) = thread.runs.last()
+                {
+                    ui.separator();
+                    ui.strong(&thread.title);
+                    let dest = conversation::destination(self.data, &key.peer);
+                    ui.weak(format!(
+                        "{} · {}",
+                        dest.label,
+                        run["record"]["spec"]["backend"]
+                            .as_str()
+                            .unwrap_or("runtime unknown")
+                    ));
+                    ui.weak(
+                        run["record"]["spec"]["model"]
+                            .as_str()
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or("Default model"),
+                    );
+                    conversation::context_label(ui, self.data, key, run);
+                }
             }
             Pane::Thread(key) => thread_view::panel(ui, self.data, key, self.actions),
         }

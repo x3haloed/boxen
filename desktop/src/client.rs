@@ -57,6 +57,7 @@ pub enum Update {
     Submitted(String, Result<Value, SubmitError>),
     Controlled(String, Destination, String, Result<Value, String>),
     AnswerSubmitted(String, Result<Value, String>),
+    Held(crate::hold::Reply),
 }
 pub struct Bus {
     pub tx: SyncSender<Update>,

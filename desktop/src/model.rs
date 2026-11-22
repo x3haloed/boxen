@@ -10,6 +10,7 @@ pub struct ThreadKey {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pane {
     Work,
+    LivePulse,
     Agents,
     Activity(ThreadKey),
     Chat(ThreadKey),
@@ -211,6 +212,8 @@ pub struct Transcript {
     pub execution: Option<Value>,
     pub status: Option<Value>,
     pub context: Option<ContextMeasure>,
+    pub hold: Option<Value>,
+    pub latest_visible: Option<(u64, crate::pulse::Visible)>,
     pub rows: Vec<Row>,
     pub rejected_updates: BTreeMap<String, String>,
     answer_attempts: BTreeMap<String, AnswerReceipt>,
@@ -240,6 +243,20 @@ impl Transcript {
             row.text = text
         }
     }
+    pub fn see_hold(&mut self, value: &Value) {
+        let Some(revision) = value["revision"].as_u64() else {
+            return;
+        };
+        if self
+            .hold
+            .as_ref()
+            .and_then(|hold| hold["revision"].as_u64())
+            .is_none_or(|previous| previous < revision)
+        {
+            self.hold = Some(value.clone());
+        }
+    }
+
     pub fn decorate_answers(&mut self, mut label: impl FnMut(&mut AnswerReceipt)) {
         for row in &mut self.rows {
             if let Some(answer) = &mut row.answer {
@@ -344,6 +361,7 @@ impl Transcript {
         }
         match kind {
             "backend_thread" => self.context = None,
+            "held_followup" => self.see_hold(data),
             "backend_usage" if data["backend"] == "antigravity" => {
                 self.context = context_amounts(&data["used"], &data["size"])
                     .map(|(tokens, window)| ContextMeasure::Antigravity { tokens, window });
@@ -549,6 +567,9 @@ impl Transcript {
                 self.put(format!("event-{seq}"), "Incident", display(data), false)
             }
             _ => {}
+        }
+        if let Some(observed) = crate::pulse::visible(event) {
+            self.latest_visible = Some((seq, observed));
         }
         self.seq = seq;
         Ok(())

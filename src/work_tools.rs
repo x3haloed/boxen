@@ -687,6 +687,9 @@ fn read(jobs: &Arc<Jobs>, run: &Arc<Run>, machine: &Machine, args: &Value) -> Re
             .and_then(|events| events.first())
             .filter(|event| event["seq"] == seq)
             .ok_or("The selected retained event is unavailable")?;
+        if event["kind"] == "held_followup" {
+            return Err("Pending operator follow-up details are available to network operators".into());
+        }
         let encoded = serde_json::to_string(event)?;
         let (text, next_offset) = text_page(&encoded, args["offset"].as_u64().unwrap_or(0))?;
         return Ok(
@@ -700,6 +703,10 @@ fn read(jobs: &Arc<Jobs>, run: &Arc<Run>, machine: &Machine, args: &Value) -> Re
         .as_array()
         .ok_or("The peer returned an invalid event batch")?
     {
+        if event["kind"] == "held_followup" {
+            next = event["seq"].as_u64().ok_or("The event has no sequence")?;
+            continue;
+        }
         let row = projected(event);
         let size = serde_json::to_vec(&row)?.len();
         if bytes + size > OUTPUT_LIMIT && !rows.is_empty() {

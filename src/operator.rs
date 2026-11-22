@@ -200,6 +200,7 @@ pub fn operation(jobs: &Arc<Jobs>, actor: &str, request: &Value) -> Result<Value
     let result = (|| -> Result<Value> {
         match op {
             "tool_approvals" => return jobs.tool_approvals.operation(&request["args"]),
+            "held_followup" => return jobs.held_followup(actor, request),
             "respond_attempt" => {
                 let id = request["id"].as_str().ok_or("run ID required")?;
                 let attempt_id = request["attempt_id"].as_str().ok_or("response attempt ID required")?;

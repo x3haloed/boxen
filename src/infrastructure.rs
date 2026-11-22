@@ -215,6 +215,9 @@ pub fn operation(request: &Value) -> Option<&'static str> {
     Some(match request["op"].as_str()? {
         "start" => "start",
         "control" | "respond_attempt" => "control",
+        "held_followup" if matches!(request["action"].as_str(), Some("append" | "edit" | "release")) => {
+            "held_followup"
+        }
         "resident_activate" => "resident_activate",
         "inference_resume" => "inference_resume",
         "thread_move" => "thread_move",
@@ -256,7 +259,7 @@ impl Attempt {
             operation(request)?,
             Some(peer),
             request["spec"]["id"].as_str().or_else(|| {
-                matches!(request["op"].as_str(), Some("control" | "respond_attempt"))
+                matches!(request["op"].as_str(), Some("control" | "respond_attempt" | "held_followup"))
                     .then(|| request["id"].as_str())
                     .flatten()
             }),
