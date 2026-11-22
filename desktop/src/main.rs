@@ -56,6 +56,8 @@ struct Saved {
     steering: Vec<thread_view::Steering>,
     pending: Vec<Pending>,
     answers: Vec<AnswerAttempt>,
+    reply_watches: HashMap<String, HashSet<String>>,
+    thread_replies: Vec<needs::ThreadReply>,
     holds: Vec<hold::Contribution>,
     hold_edits: Vec<hold::Contribution>,
     mail: correspondence::SavedMail,
@@ -129,6 +131,7 @@ enum Action {
     File(attachments::FileAction),
     Respond(ThreadKey, String, Value, Value),
     OpenGate(ThreadKey, bool, String),
+    OpenReply(ThreadKey, String),
     OpenActivity(ThreadKey, bool),
     OpenChat(ThreadKey, bool),
     Mail(correspondence::MailAction),
@@ -521,6 +524,9 @@ impl Desktop {
                         selected["cwd"] = batch["snapshot"]["record"]["spec"]["cwd"].clone();
                         transcript.execution = Some(selected);
                     }
+                    if let Some(batch) = batch["snapshot"]["record"]["mailbox"]["message_ids"].as_array() {
+                        transcript.activation_mail_count = Some(batch.len());
+                    }
                     let watch = &self.data.watches[&id];
                     let key = watch.key.clone();
                     let replaying = watch.frontier.is_none_or(|frontier| transcript.seq < frontier);
@@ -599,6 +605,12 @@ impl Desktop {
                     {
                         self.data.mail.note_presentation(peer, s);
                         self.replace_snapshot(peer, s.clone());
+                    }
+                    if batch["done"] == true
+                        && self.data.watches.get(&id).is_some_and(|watch| watch.done)
+                        && needs::settle_reply(&mut self.data, &key, &batch["snapshot"])
+                    {
+                        self.persist();
                     }
                     self.reconcile_steering(&id);
                     self.reconcile_hold(&id);
@@ -780,6 +792,9 @@ impl Desktop {
             peer: p.destination.key.clone(),
             id: p.spec["thread_id"].as_str().unwrap_or("").into(),
         };
+        if let Some(run) = p.spec["id"].as_str() {
+            self.data.saved.reply_watches.entry(p.destination.key.clone()).or_default().insert(run.into());
+        }
         if self.is_new_thread_request(p.spec["id"].as_str().unwrap_or_default()) {
             self.open_queued_thread(key.clone());
         }
@@ -884,6 +899,16 @@ impl Desktop {
                 _ => {}
             }
         }
+        for thread in self.data.catalogs.values().flatten() {
+            for run in &thread.runs {
+                let Some(id) = run["record"]["spec"]["id"].as_str() else { continue };
+                if !terminal(run) {
+                    self.data.saved.reply_watches.entry(thread.key.peer.clone()).or_default().insert(id.into());
+                } else if self.data.saved.reply_watches.get(&thread.key.peer).is_some_and(|runs| runs.contains(id)) {
+                    selected.push((thread.key.clone(), run.clone()));
+                }
+            }
+        }
         for active in needs::active_runs(&self.data) {
             selected.push((active.key, active.run.clone()));
         }
@@ -895,6 +920,7 @@ impl Desktop {
             )
         });
         let mut needed = HashSet::new();
+        let mut replies_changed = false;
         for (key, run) in selected {
             let Some(dest) = self
                 .data
@@ -917,6 +943,7 @@ impl Desktop {
             let seq = self.data.transcripts.get(&tag).map_or(0, |t| t.seq);
             let last = run["last_seq"].as_u64().unwrap_or(0);
             if terminal(&run) && seq >= last {
+                replies_changed |= needs::settle_reply(&mut self.data, &key, &run);
                 continue;
             }
             let retry = match self.data.watches.get(&tag) {
@@ -968,6 +995,9 @@ impl Desktop {
                 true
             }
         });
+        if replies_changed {
+            self.persist();
+        }
     }
     fn submit(&mut self, pending: Pending) {
         let id = pending.spec["id"].as_str().unwrap_or("").to_owned();
@@ -1060,6 +1090,10 @@ impl Desktop {
                             self.bus.publisher());
                     }
                 }
+            }
+            Action::OpenReply(key, anchor) => {
+                conversation::switch(&mut self.data, &key, false, Some(anchor));
+                self.action(Action::Open(key, false));
             }
             Action::OpenGate(key, resident, anchor) => {
                 conversation::switch(&mut self.data, &key, true, Some(anchor));

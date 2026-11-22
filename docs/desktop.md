@@ -115,7 +115,10 @@ reports coverage against the machine catalogs. A stream counts once it reaches
 the sampled replay frontier. An unreachable machine can still have previously
 observed requests with inactive controls. **Go to context** opens the request
 in Activity. Attributed answers distinguish queueing from the adapter's
-backend write.
+backend write. Its separate Replies section shows unread resident mail addressed
+to the local client and final replies from anonymous runs known to this desktop
+while active or accepted by it. The thread reply is read when its row comes
+into view in the selected conversation.
 
 The expandable **Execution context** detail shows the latest run's machine,
 account, session, privileges, working directory and observed desktop-session

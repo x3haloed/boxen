@@ -104,9 +104,11 @@ from bound residents. Subject-free Discord sends do not invent email conventions
 `inbox` reads this resident's shared intake, or an operator-supplied Boxen
 `conversation`, after an optional global `after` cursor. Messages retain native
 account, conversation, message ID, author, timestamp, prepared native metadata,
-and attachment metadata where present. `presentation` and `presented_in` identify
-recorded activation input, not comprehension. `delivery` describes local acceptance
-or the external service outcome. `status` reads one authorized message by ID.
+and attachment metadata where present. `presentation` and `presented_in` report
+the assigned activation. When present, `activation_input.seq` identifies the
+run's retained input record. These fields give no evidence of comprehension.
+`delivery` describes local acceptance or the external service outcome.
+`status` reads one authorized message by ID.
 
 Capabilities are explicit: `send`, `receive`, `replies`, `subjects`,
 `native_metadata`. Unsupported sending/reply/header operations are rejected.

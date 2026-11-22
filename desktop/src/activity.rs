@@ -102,6 +102,22 @@ pub fn run(
                                     && crate::needs::replay_current(data, &tag, run)
                                 {
                                     crate::thread_view::backend_request(ui, row, key, id, actions);
+                                } else if row.label == "Activation input"
+                                    && let Some(count) = t.activation_mail_count
+                                {
+                                    let title = match count {
+                                        0 => "Activation input · no mail presented".into(),
+                                        1 => "Activation input · 1 mail presented".into(),
+                                        n => format!("Activation input · {n} mails presented"),
+                                    };
+                                    egui::CollapsingHeader::new(title).id_salt(&row.id).show(
+                                        ui,
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(&row.text).wrap().selectable(true),
+                                            );
+                                        },
+                                    );
                                 } else {
                                     conversation::activity_row(ui, row);
                                 }

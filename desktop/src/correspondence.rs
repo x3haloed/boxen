@@ -302,6 +302,16 @@ impl Client {
     }
 }
 impl Mailbox {
+    fn remember_outgoing(&mut self, key: ThreadKey, mut message: Value) {
+        if let Some(older) = self.outgoing.get(&key)
+            && older["activation_input"].is_object()
+            && !message["activation_input"]["seq"].is_number()
+        {
+            message["activation_input"] = older["activation_input"].clone();
+        }
+        self.outgoing.insert(key, message);
+    }
+
     pub fn note_presentation(&mut self, peer: &str, snapshot: &Value) {
         let record = &snapshot["record"];
         let Some(run) = record["spec"]["id"].as_str() else {
@@ -316,7 +326,10 @@ impl Mailbox {
                 id: id.into(),
             };
             if let Some(message) = self.outgoing.get_mut(&key) {
-                message["presented_in"] = json!(run);
+                let seq = snapshot["activation_input_seq"].as_u64();
+                if seq.is_some() || !message["activation_input"]["seq"].is_number() {
+                    message["activation_input"] = json!({"run_id":run,"seq":seq});
+                }
             }
         }
     }
@@ -394,7 +407,7 @@ impl Desktop {
                 }
                 for message in messages {
                     if let Some(id) = message["id"].as_str() {
-                        self.data.mail.outgoing.insert(
+                        self.data.mail.remember_outgoing(
                             ThreadKey {
                                 peer: peer.clone(),
                                 id: id.into(),
@@ -475,7 +488,7 @@ impl Desktop {
                     if let Some(message) = &mut d.last_receipt {
                         message["delivery"] = value["delivery"].clone();
                         if let Some(target) = &d.recipient {
-                            self.data.mail.outgoing.insert(
+                            self.data.mail.remember_outgoing(
                                 ThreadKey {
                                     peer: target.peer.clone(),
                                     id,
@@ -502,7 +515,7 @@ impl Desktop {
                     match result {
                         Ok(v) if v["id"] == id => {
                             if let Some(target) = &d.recipient {
-                                self.data.mail.outgoing.insert(ThreadKey { peer: target.peer.clone(), id: id.clone() }, v.clone());
+                                self.data.mail.remember_outgoing(ThreadKey { peer: target.peer.clone(), id: id.clone() }, v.clone());
                             }
                             d.pending = None;
                             d.last_receipt = Some(v);
@@ -1060,19 +1073,62 @@ pub fn details(ui: &mut egui::Ui, pane: &Pane, data: &mut Data, actions: &mut Ve
     }
 }
 
-fn mail_receipt(message: &Value) -> Option<String> {
-    if let Some(run) = message["presented_in"].as_str() {
-        Some(format!(
-            "Presented in activation {}",
-            run.chars().take(8).collect::<String>()
-        ))
-    } else if message["delivery"]["status"] == "queued" {
-        Some("Saved in outbox".into())
-    } else if message["delivery"] == "queued" || message["delivery"]["status"] == "accepted" {
-        Some("Accepted by destination mailbox · queued".into())
-    } else {
-        None
+fn activation_name(data: &Data, key: &ThreadKey, run_id: &str) -> String {
+    let ordinal = data
+        .agents
+        .history(key)
+        .into_iter()
+        .flatten()
+        .filter(|run| {
+            run["record"]["resident_activation"] == true
+                && run["record"]["imported"].is_null()
+                && run["record"]["transcript_import"].is_null()
+        })
+        .position(|run| run["record"]["spec"]["id"] == run_id)
+        .map(|index| index + 1);
+    ordinal.map_or_else(
+        || run_id.chars().take(8).collect(),
+        |number| number.to_string(),
+    )
+}
+
+fn mail_receipt(data: &Data, key: &ThreadKey, message: &Value) -> Option<String> {
+    let run = message["activation_input"]["run_id"]
+        .as_str()
+        .or_else(|| message["presented_in"].as_str());
+    if let Some(run) = run {
+        let name = activation_name(data, key, run);
+        return Some(if message["activation_input"]["seq"].is_u64() {
+            format!("Presented in activation {name}")
+        } else {
+            format!("Assigned to activation {name} · input unconfirmed")
+        });
     }
+    if message["delivery"]["status"] == "queued" {
+        return Some("Saved in outbox".into());
+    }
+    if message["delivery"] != "queued" && message["delivery"]["status"] != "accepted" {
+        return None;
+    }
+    let destination = crate::conversation::destination(data, &key.peer);
+    let active = (!data.errors.contains_key(&key.peer) && data.agents.error(key).is_none())
+        .then(|| {
+            data.agents
+                .history(key)?
+                .iter()
+                .rev()
+                .find(|run| !crate::model::terminal(run))
+        })
+        .flatten();
+    let waiting = active
+        .and_then(|run| run["record"]["spec"]["id"].as_str())
+        .map_or_else(String::new, |id| {
+            format!(" · activation {} active", activation_name(data, key, id))
+        });
+    Some(format!(
+        "Accepted by {} mailbox · queued{waiting}",
+        destination.label
+    ))
 }
 
 fn operator_inbox(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut Vec<Action>) {
@@ -1142,6 +1198,10 @@ fn operator_inbox(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: 
             }
         })
         .collect::<Vec<_>>();
+    let receipts: Vec<_> = messages
+        .iter()
+        .map(|message| mail_receipt(data, key, message))
+        .collect();
     egui::ScrollArea::vertical()
         .id_salt(("operator-inbox", key, inbox.after))
         .show(ui, |ui| {
@@ -1152,7 +1212,7 @@ fn operator_inbox(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: 
                     "No messages on this page"
                 });
             }
-            for (message, name) in messages.iter().zip(names) {
+            for ((message, name), receipt) in messages.iter().zip(names).zip(receipts) {
                 ui.weak(name);
                 if let Some(subject) = message["subject"].as_str() {
                     ui.strong(subject);
@@ -1160,7 +1220,7 @@ fn operator_inbox(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: 
                 if let Some(body) = message["body"].as_str() {
                     ui.add(egui::Label::new(body).wrap().selectable(true));
                 }
-                if let Some(receipt) = mail_receipt(message) {
+                if let Some(receipt) = receipt {
                     ui.weak(receipt);
                 }
                 let mut files = crate::attachments::FileRef::parse(&message["attachments"]);
@@ -1405,7 +1465,7 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
                                 {
                                     switch = Some(id.clone());
                                 }
-                                if *outgoing && let Some(receipt) = mail_receipt(m) {
+                                if *outgoing && let Some(receipt) = mail_receipt(data, key, m) {
                                     ui.small(receipt);
                                 }
                             },

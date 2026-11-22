@@ -120,8 +120,13 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert len(request({"op":"resident_inbox","id":ident},i=1,destination={"peer":keys[1],"address":""})["messages"])==3
         first=activate(ident)
         assert first["record"]["mailbox"]["message_ids"]==[m["id"] for m in messages]
+        assert "activation_input_seq" not in first
         events,final=collect(first["record"]["spec"]["id"])
         assert final["status"]=="completed"
+        first_input=next(e["seq"] for e in events if e["kind"]=="activation_input")
+        assert final["activation_input_seq"]==first_input
+        presented=request({"op":"resident_inbox","id":ident})["messages"]
+        assert all(m["activation_input"]=={"run_id":first["record"]["spec"]["id"],"seq":first_input} for m in presented)
         assert any(e["data"].get("params",{}).get("delta")=="PRIVATE_NARRATION_ONLY" for e in events)
         assert inbox(clients[0])==[]
         replies=inbox(clients[1]);assert len(replies)==1
@@ -182,6 +187,8 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert final["status"]=="completed" and any(e["kind"]=="recovery_notice" for e in events)
         old=next(r for r in runs(aid) if r["record"]["spec"]["id"]==active["record"]["spec"]["id"])
         assert old["status"]=="interrupted"
+        restored={m["id"]:m for m in request({"op":"resident_inbox","id":ident})["messages"]}
+        assert all(restored[m["id"]]["activation_input"]=={"run_id":first["record"]["spec"]["id"],"seq":first_input} for m in messages)
         all_ids=[m for r in runs(aid) for m in r["record"]["mailbox"]["message_ids"]]
         assert all_ids.count(interrupted_message["id"])==1 and all_ids.count(pending["id"])==1
         assert len(inbox(clients[1]))==1

@@ -763,6 +763,9 @@ pub fn operation(
                         let mut p = project(jobs, &m);
                         p["presented_in"] = v["presented_in"].clone();
                         p["presentation"] = v["delivery"].clone();
+                        if let Some(input) = v.get("activation_input") {
+                            p["activation_input"] = input.clone();
+                        }
                         p
                     })
                     .collect::<Vec<_>>();

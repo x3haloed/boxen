@@ -379,12 +379,31 @@ impl Desktop {
                 .filter_map(|run| run["record"]["spec"]["id"].as_str().map(str::to_owned))
                 .collect();
             for run in runs {
+                if self
+                    .data
+                    .saved
+                    .reply_watches
+                    .get_mut(&key.peer)
+                    .is_some_and(|ids| ids.remove(&run))
+                {
+                    self.data
+                        .saved
+                        .reply_watches
+                        .entry(next.peer.clone())
+                        .or_default()
+                        .insert(run.clone());
+                }
                 if let Some(transcript) = self.data.transcripts.remove(&run_key(&key.peer, &run)) {
                     self.data
                         .transcripts
                         .entry(run_key(machine, &run))
                         .or_insert(transcript);
                 }
+            }
+        }
+        for reply in &mut self.data.saved.thread_replies {
+            if &reply.key == key {
+                reply.key = next.clone();
             }
         }
         for (draft, _) in &mut self.data.saved.drafts {
@@ -1052,6 +1071,13 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                                 })
                                 .inner;
                             view::record(ui, &mut data.views, key, &anchor, response.rect);
+                            if data.selected_thread.as_ref() == Some(key)
+                                && ui.is_rect_visible(response.rect)
+                            {
+                                data.saved.thread_replies.retain(|reply| {
+                                    &reply.key != key || reply.run != id || reply.row != row.id
+                                });
+                            }
                             if !activity {
                                 response.context_menu(|ui| {
                                     if ui.button("Show in Activity").clicked() {

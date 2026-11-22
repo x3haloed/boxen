@@ -239,6 +239,9 @@ pub struct Transcript {
     pub context_change: Option<(ContextChange, u64)>,
     pub backend_model: Option<String>,
     pub backend_session: Option<String>,
+    pub activation_mail_count: Option<usize>,
+    pub final_reply: Option<String>,
+    pub completed_at: Option<u64>,
     pub hold: Option<Value>,
     pub latest_visible: Option<(u64, crate::pulse::Visible)>,
     pub rows: Vec<Row>,
@@ -395,6 +398,24 @@ impl Transcript {
         }
         if kind == "status" {
             self.status = Some(data.clone());
+            if data["status"] == "completed" {
+                self.completed_at = self.event_at;
+            }
+        }
+        // Same final-answer boundary as the daemon's thread_result projection.
+        let final_reply = if kind == "assistant_message" {
+            data["text"].as_str().and_then(|text| (!text.trim().is_empty()).then_some(&data["id"]))
+        } else if kind == "backend" && data["method"] == "item/completed" {
+            let item = &data["params"]["item"];
+            (item["type"] == "agentMessage"
+                && (item["phase"].is_null() || item["phase"] == "final_answer")
+                && item["text"].as_str().is_some_and(|text| !text.trim().is_empty()))
+                .then_some(&item["id"])
+        } else {
+            None
+        };
+        if let Some(id) = final_reply.and_then(Value::as_str) {
+            self.final_reply = Some(id.to_owned());
         }
         let text = |key: &str| data[key].as_str().unwrap_or("").to_owned();
         if matches!(

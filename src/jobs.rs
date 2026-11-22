@@ -492,6 +492,8 @@ pub struct Snapshot {
     pub backend_thread: Option<String>,
     pub last_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_input_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_prompt: Option<String>,
 }
 
@@ -826,7 +828,19 @@ impl Run {
     }
     pub fn append(&self, kind: &str, data: Value) -> Result<Event> {
         let mut inner = self.inner.lock().unwrap();
-        self.append_locked(&mut inner, kind, data)
+        let event = self.append_locked(&mut inner, kind, data)?;
+        if kind == "activation_input" {
+            let record = &inner.snapshot.record;
+            logging::record(
+                Level::Info,
+                Target::Workload,
+                "mailbox.activation_input_recorded",
+                Context::run(&record.spec.id, &record.spec.thread_id, &record.owner),
+                || json!({"seq":event.seq,"messages":record.mailbox.as_ref().map(|batch| batch.message_ids.len())}),
+                || Value::Null,
+            );
+        }
+        Ok(event)
     }
     fn encode_event(event: &Event, bytes: &mut Vec<u8>) -> Result<usize> {
         let start = bytes.len();
@@ -1213,6 +1227,8 @@ fn project(snapshot: &mut Snapshot, event: &Event) {
         if let Some(status) = event.data["status"].as_str() {
             snapshot.status = status.into();
         }
+    } else if event.kind == "activation_input" {
+        snapshot.activation_input_seq.get_or_insert(event.seq);
     } else if event.kind == "backend_thread" {
         snapshot.backend_thread = event.data["id"].as_str().map(str::to_owned);
     } else if event.kind == "antigravity_prompt_state" {
@@ -1243,6 +1259,7 @@ fn load_run(path: &std::path::Path, id: &str) -> Result<Arc<Run>> {
         status: "starting".into(),
         backend_thread: None,
         native_prompt: None,
+        activation_input_seq: None,
         last_seq: 0,
     };
     let mut reader = BufReader::new(File::open(&log_path)?);
@@ -1276,6 +1293,10 @@ fn load_run(path: &std::path::Path, id: &str) -> Result<Arc<Run>> {
             "inference_frame" => serde_json::from_str::<InferenceRoute<'_>>(row.data.get())
                 .map(|frame| EventProjection::inference(&frame.event.kind))
                 .unwrap_or_default(),
+            "activation_input" => {
+                snapshot.activation_input_seq.get_or_insert(row.seq);
+                EventProjection::None
+            }
             "status"
             | "backend_thread"
             | "backend_prompt_started"
@@ -2631,27 +2652,29 @@ impl Jobs {
     pub fn messaging_notify(&self) {
         self.notify();
     }
-    fn presented(&self, owner: &str, resident: &str) -> HashMap<String, String> {
+    fn assigned_mail(&self, owner: &str, resident: &str) -> HashMap<String, (String, Option<u64>)> {
         self.runs
             .lock()
             .unwrap()
             .values()
-            .filter_map(|r| {
-                let s = r.snapshot();
-                if s.record.owner != owner || s.record.spec.resident_id.as_deref() != Some(resident)
-                {
+            .filter_map(|run| {
+                let inner = run.inner.lock().unwrap();
+                let snapshot = &inner.snapshot;
+                let record = &snapshot.record;
+                if record.owner != owner || record.spec.resident_id.as_deref() != Some(resident) {
                     return None;
                 }
-                s.record.mailbox.map(|a| (s.record.spec.id, a.message_ids))
+                let batch = record.mailbox.as_ref()?;
+                Some((record.spec.id.clone(), snapshot.activation_input_seq, batch.message_ids.clone()))
             })
-            .flat_map(|(run, ids)| ids.into_iter().map(move |id| (id, run.clone())))
+            .flat_map(|(run, input, ids)| ids.into_iter().map(move |id| (id, (run.clone(), input))))
             .collect()
     }
     pub fn inbox(&self, owner: &str, address: Address, after: u64) -> Result<Value> {
         self.mailboxes.check()?;
         self.validate_address(owner, &address)?;
-        let presented = match &address {
-            Address::Resident { id } => self.presented(owner, id),
+        let assigned = match &address {
+            Address::Resident { id } => self.assigned_mail(owner, id),
             _ => HashMap::new(),
         };
         let messages = self.mailboxes.messages(owner, &address, after);
@@ -2660,12 +2683,13 @@ impl Jobs {
             .iter()
             .map(|m| {
                 let mut v = serde_json::to_value(m).unwrap();
-                v["presented_in"] = json!(presented.get(&m.id));
-                v["delivery"] = json!(if presented.contains_key(&m.id) {
-                    "presented"
-                } else {
-                    "queued"
-                });
+                let assignment = assigned.get(&m.id);
+                // Preserve the historical assignment fields for existing mailbox clients.
+                v["presented_in"] = json!(assignment.map(|(run, _)| run));
+                v["delivery"] = json!(if assignment.is_some() { "presented" } else { "queued" });
+                if let Some((run, input)) = assignment {
+                    v["activation_input"] = json!({"run_id":run,"seq":input});
+                }
                 v
             })
             .collect();
@@ -2740,7 +2764,7 @@ impl Jobs {
                 Ok(None)
             };
         }
-        let presented = self.presented(owner, id).into_keys().collect();
+        let presented = self.assigned_mail(owner, id).into_keys().collect();
         let mut batch = self.mailboxes.pending(owner, id, &presented);
         if batch.is_empty() && !manual {
             return Ok(None);
@@ -3671,6 +3695,7 @@ impl Jobs {
                     status: "starting".into(),
                     backend_thread: None,
                     native_prompt: None,
+                    activation_input_seq: None,
                     last_seq: 0,
                 },
                 journal: Journal::new(path.join("events.jsonl")),

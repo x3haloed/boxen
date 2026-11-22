@@ -248,6 +248,16 @@ Older fixed-choice events provide a `choices` list and take a result with an
 offered `option_id`. An invalid response leaves the request pending. The
 [Antigravity runtime guide](antigravity.md) describes setup and native session behavior.
 
+## Mail activation input receipts
+
+A resident inbox message's `activation_input` carries the assigned run ID.
+Its `seq` identifies the retained `activation_input` event when one exists.
+A null sequence means Boxen has recorded the assignment and has yet to record
+input. A run snapshot carries the same sequence as `activation_input_seq`.
+The legacy `presented_in` and `delivery` fields continue to describe assignment.
+The receipt describes recorded input preparation. It makes no claim about
+reading, comprehension or replies.
+
 ## Context observations
 
 Claude Code's main-session input reading appears as `backend_usage` with

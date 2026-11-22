@@ -358,6 +358,7 @@ impl Jobs {
             backend_thread: None,
             native_prompt: None,
             last_seq: 0,
+            activation_input_seq: None,
         };
         let mut bytes = Vec::new();
         for event in events {
