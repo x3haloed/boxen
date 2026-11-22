@@ -37,6 +37,7 @@ pub struct SubmitError {
 
 pub enum Update {
     Runtimes(Destination, u64, Result<crate::runtimes::Catalog, String>),
+    RepoObserved(crate::model::ThreadKey, String, Result<Value, String>),
     ModelCatalog(
         crate::model_catalogs::Runtime,
         Destination,

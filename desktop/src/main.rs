@@ -21,6 +21,7 @@ mod tool_approvals;
 mod work;
 mod watchlist;
 mod workspace;
+mod workspace_observation;
 use client::{Bus, Client, Pending, Update, run_key};
 use eframe::egui::{self, RichText};
 use egui_dock::TabViewer;
@@ -92,6 +93,7 @@ struct Data {
     file_previews: HashMap<String, Option<Result<attachments::Preview, String>>>,
     thread_issues: HashMap<ThreadKey, String>,
     active_steering: HashSet<ThreadKey>,
+    answer_rechecks: HashSet<String>,
     fresh_steering: HashSet<String>,
     fallback_inflight: HashSet<String>,
     send_checking: HashSet<ThreadKey>,
@@ -115,6 +117,7 @@ struct Data {
     watches: HashMap<String, Observing>,
     pulse: pulse::Pulse,
     selected_thread: Option<ThreadKey>,
+    repo_observations: HashMap<ThreadKey, watchlist::RepoObservation>,
     filter: String,
     notice: String,
     sending: HashSet<String>,
@@ -132,6 +135,7 @@ enum Action {
     Respond(ThreadKey, String, Value, Value),
     OpenGate(ThreadKey, bool, String),
     OpenReply(ThreadKey, String),
+    ProbeRepo(ThreadKey, String),
     OpenActivity(ThreadKey, bool),
     OpenChat(ThreadKey, bool),
     Mail(correspondence::MailAction),
@@ -467,6 +471,13 @@ impl Desktop {
                     .data
                     .model_catalogs
                     .received(runtime, destination, serial, result),
+                Update::RepoObserved(key, id, result) => {
+                    if let Some(observation) = self.data.repo_observations.get_mut(&key)
+                        && observation.run == id
+                    {
+                        observation.result = Some(result);
+                    }
+                }
                 Update::ToolApprovals(machine, result) => {
                     self.data.tool_approvals.received(machine, result)
                 }
@@ -588,13 +599,19 @@ impl Desktop {
                                 .unwrap_or_else(|| "machine unavailable".into());
                         });
                     }
+                    let frontier = batch["snapshot"]["last_seq"].as_u64();
+                    if failed.is_none() && frontier.is_some_and(|frontier| transcript.seq >= frontier)
+                        && self.data.answer_rechecks.remove(&id)
+                    {
+                        transcript.confirm_pending_answers();
+                    }
                     if let Some(w) = self.data.watches.get_mut(&id) {
                         if failed.is_some() {
                             self.data.pulse.gap(&id, &key);
                         }
                         w.error = failed;
                         w.done = batch["done"] == true && w.error.is_none();
-                        w.frontier = batch["snapshot"]["last_seq"].as_u64();
+                        w.frontier = frontier;
                         if w.error.is_some() {
                             w.stop.store(true, Ordering::Relaxed);
                             w.retry = Instant::now() + Duration::from_secs(2);
@@ -674,7 +691,7 @@ impl Desktop {
                         } else {
                             model::AnswerState::Unconfirmed
                         };
-                        transcript.answer_locally(
+                        if transcript.answer_locally(
                             &attempt.request,
                             model::AnswerReceipt {
                                 attempt_id: id,
@@ -683,8 +700,14 @@ impl Desktop {
                                 state,
                                 yours: true,
                                 machine_label: String::new(),
+                                at: None,
                             },
-                        );
+                        ) {
+                            self.data.answer_rechecks.insert(attempt.run_tag.clone());
+                            if let Some(watch) = self.data.watches.remove(&attempt.run_tag) {
+                                watch.stop.store(true, Ordering::Relaxed);
+                            }
+                        }
                         if state == model::AnswerState::Refused {
                             self.data.notice = error;
                         }
@@ -1082,6 +1105,7 @@ impl Desktop {
                                     state: model::AnswerState::Sending,
                                     yours: true,
                                     machine_label: String::new(),
+                                    at: None,
                                 },
                             );
                         }
@@ -1089,6 +1113,20 @@ impl Desktop {
                             json!({"op":"respond_attempt","id":id,"request_id":request_id,"attempt_id":attempt,"result":result}),
                             self.bus.publisher());
                     }
+                }
+            }
+            Action::ProbeRepo(key, id) => {
+                if let Some(client) = self.client.clone() {
+                    let dest = conversation::destination(&self.data, &key.peer);
+                    let publisher = self.bus.publisher();
+                    self.data.repo_observations.insert(key.clone(), watchlist::RepoObservation {
+                        run: id.clone(),
+                        result: None,
+                    });
+                    std::thread::spawn(move || {
+                        let result = client.operation(&dest, json!({"op":"repo_probe","id":id}));
+                        publisher.send(Update::RepoObserved(key, id, result));
+                    });
                 }
             }
             Action::OpenReply(key, anchor) => {
@@ -1651,7 +1689,7 @@ impl TabViewer for Viewer<'_> {
                 let query = self.data.filter.to_lowercase();
                 watchlist::header(ui);
                 let inspector_height = if self.data.selected_thread.is_some() {
-                    205.
+                    310.
                 } else {
                     0.
                 };
@@ -1685,7 +1723,10 @@ impl TabViewer for Viewer<'_> {
                         agents::watchlist(ui, self.data, &destinations, &query, self.actions);
                     });
                 if let Some(key) = &self.data.selected_thread {
-                    watchlist::inspector(ui, self.data, key, self.actions);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("inspector", key))
+                        .max_height(ui.available_height())
+                        .show(ui, |ui| watchlist::inspector(ui, self.data, key, self.actions));
                 }
             }
             Pane::Thread(key) => thread_view::panel(ui, self.data, key, self.actions),

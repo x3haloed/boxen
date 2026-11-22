@@ -108,14 +108,20 @@ under shared columns. Thread state follows the current input owner, with
 activation and definitions aggregate independent instances on each machine.
 Event age comes only from replayed or live visible events. A thread or resident
 row peeks on a single click and opens on the grid with Enter or a double-click.
-The inspector follows the selected conversation.
+The inspector follows the selected conversation. Its repository probe runs on
+the recorded execution machine and shows the sample time and directory.
+Test counts come from recognized summaries of observed completed commands.
+Missing measurements appear as unknown.
 
 **Needs you** lists pending runtime requests from observed active runs and
 reports coverage against the machine catalogs. A stream counts once it reaches
 the sampled replay frontier. An unreachable machine can still have previously
 observed requests with inactive controls. **Go to context** opens the request
 in Activity. Attributed answers distinguish queueing from the adapter's
-backend write. Its separate Replies section shows unread resident mail addressed
+backend write. If an acknowledgment is lost, the desktop samples a fresh replay
+frontier before offering any controls for the exact pending request. The timeline
+groups the written decision and any refused local attempt on that request.
+Its separate Replies section shows unread resident mail addressed
 to the local client and final replies from anonymous runs known to this desktop
 while active or accepted by it. The thread reply is read when its row comes
 into view in the selected conversation.

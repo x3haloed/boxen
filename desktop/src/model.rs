@@ -1,3 +1,4 @@
+use crate::workspace_observation::{ExchangeUsage, TestResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -98,6 +99,7 @@ pub enum AnswerState {
     Written,
     Refused,
     Unconfirmed,
+    ReplayedPending,
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +110,7 @@ pub struct AnswerReceipt {
     pub state: AnswerState,
     pub yours: bool,
     pub machine_label: String,
+    pub at: Option<u64>,
 }
 impl AnswerReceipt {
     pub fn waiting(&self) -> bool {
@@ -130,13 +133,16 @@ impl AnswerReceipt {
             AnswerState::Written if self.yours => "✓ your answer written".into(),
             AnswerState::Written => {
                 format!(
-                    "Answered by another client · {} · {}",
-                    self.decision, self.machine_label
+                    "Answered by another client · {}{} · {}",
+                    self.decision,
+                    self.at.map_or_else(String::new, |at| format!(" · {} UTC", crate::conversation::utc_minute(at))),
+                    self.machine_label
                 )
             }
             AnswerState::Refused if self.yours => "Your answer was refused before writing".into(),
             AnswerState::Refused => "Answer was refused before writing".into(),
             AnswerState::Unconfirmed => "? write uncertain".into(),
+            AnswerState::ReplayedPending => "? previous write uncertain · request still pending".into(),
         }
     }
 }
@@ -150,6 +156,7 @@ pub struct Row {
     pub attachments: Vec<crate::attachments::FileRef>,
     pub request: Option<Value>,
     pub answer: Option<AnswerReceipt>,
+    pub refused_answers: Vec<AnswerReceipt>,
     pub update_id: Option<String>,
     pub tool: Option<ToolDetail>,
 }
@@ -236,6 +243,8 @@ pub struct Transcript {
     pub status: Option<Value>,
     pub context: Option<ContextMeasure>,
     pub context_at: Option<u64>,
+    pub exchange_usage: Option<ExchangeUsage>,
+    pub observed_tests: Option<TestResult>,
     pub context_change: Option<(ContextChange, u64)>,
     pub backend_model: Option<String>,
     pub backend_session: Option<String>,
@@ -247,7 +256,8 @@ pub struct Transcript {
     pub rows: Vec<Row>,
     pub rejected_updates: BTreeMap<String, (String, bool)>,
     pub queued_updates: HashSet<String>,
-    answer_attempts: BTreeMap<String, AnswerReceipt>,
+    answer_attempts: BTreeMap<String, (AnswerReceipt, Option<usize>)>,
+    request_rows: BTreeMap<String, usize>,
     positions: BTreeMap<String, usize>,
     imported: bool,
     event_at: Option<u64>,
@@ -256,6 +266,13 @@ impl Transcript {
     fn measure_context(&mut self, measure: Option<ContextMeasure>) {
         self.context = measure;
         self.context_at = measure.and(self.event_at);
+    }
+
+    fn see_usage(&mut self, runtime: &'static str, input: &Value, output: &Value) {
+        let input = input.as_u64();
+        let output = output.as_u64();
+        self.exchange_usage = self.event_at.filter(|_| input.is_some() || output.is_some())
+            .map(|at| ExchangeUsage { input, output, at, runtime });
     }
 
     fn context_changed(&mut self, seq: u64, change: ContextChange, description: String) {
@@ -276,6 +293,7 @@ impl Transcript {
                 attachments: vec![],
                 request: None,
                 answer: None,
+                refused_answers: Vec::new(),
                 update_id: None,
                 tool: None,
             });
@@ -308,18 +326,43 @@ impl Transcript {
             if let Some(answer) = &mut row.answer {
                 label(answer);
             }
+            for attempt in &mut row.refused_answers {
+                label(attempt);
+            }
         }
     }
 
-    pub fn answer_locally(&mut self, request: &Value, attempt: AnswerReceipt) {
+    pub fn confirm_pending_answers(&mut self) {
+        for row in &mut self.rows {
+            if row.request.is_some() && let Some(answer) = &mut row.answer
+                && answer.state == AnswerState::Unconfirmed
+            {
+                answer.state = AnswerState::ReplayedPending;
+            }
+        }
+    }
+
+    pub fn answer_locally(&mut self, request: &Value, attempt: AnswerReceipt) -> bool {
         if let Some(row) = self.pending_request_mut(request)
             && row.answer.as_ref().is_none_or(|known| {
-                known.attempt_id == attempt.attempt_id
-                    && matches!(known.state, AnswerState::Sending | AnswerState::Unconfirmed)
+                (attempt.state == AnswerState::Sending && !known.waiting())
+                    || (known.attempt_id == attempt.attempt_id
+                        && matches!(known.state, AnswerState::Sending | AnswerState::Unconfirmed))
             })
         {
             row.answer = Some(attempt);
+            true
+        } else {
+            false
         }
+    }
+
+    fn add_request(&mut self, seq: u64, text: String, request: Value) {
+        let id = format!("event-{seq}");
+        self.put(id.clone(), "Backend input requested", text, false);
+        let index = self.positions[&id];
+        self.request_rows.insert(request["id"].to_string(), index);
+        self.rows[index].request = Some(request);
     }
 
     fn pending_request_mut(&mut self, request: &Value) -> Option<&mut Row> {
@@ -335,22 +378,27 @@ impl Transcript {
             return;
         };
         if kind == "response_attempt" {
+            let index = self.request_rows.get(&data["request_id"].to_string()).copied();
             self.answer_attempts.insert(
                 id.into(),
-                AnswerReceipt {
+                (AnswerReceipt {
                     attempt_id: id.into(),
                     machine: data["machine_id"].as_str().unwrap_or_default().into(),
-                    decision: data["decision"]
-                        .as_str()
-                        .unwrap_or("submit")
-                        .replace('_', " "),
+                    decision: match data["decision"].as_str().unwrap_or("submit") {
+                        "accept" => "Approve once".into(),
+                        "accept_for_session" => "Approve for session".into(),
+                        "decline" => "Decline".into(),
+                        "cancel" => "Cancel".into(),
+                        other => other.replace('_', " "),
+                    },
                     state: AnswerState::Queued,
                     yours: false,
                     machine_label: String::new(),
-                },
+                    at: self.event_at,
+                }, index),
             );
         }
-        let Some(attempt) = self.answer_attempts.get_mut(id) else {
+        let Some((attempt, index)) = self.answer_attempts.get_mut(id) else {
             return;
         };
         attempt.state = match kind {
@@ -359,8 +407,14 @@ impl Transcript {
             "request_answered" => AnswerState::Written,
             _ => AnswerState::Queued,
         };
+        attempt.at = self.event_at;
         let attempt = attempt.clone();
-        if let Some(row) = self.pending_request_mut(&data["request_id"]) {
+        let Some(index) = *index else { return };
+        let row = &mut self.rows[index];
+        if kind == "response_refused" {
+            row.refused_answers.push(attempt.clone());
+        }
+        if row.request.is_some() {
             let replace = row.answer.as_ref().is_none_or(|known| {
                 known.attempt_id == id
                     || matches!(
@@ -372,10 +426,18 @@ impl Transcript {
             if replace {
                 row.answer = Some(attempt);
             }
-        } else if kind == "response_refused" {
-            let row = format!("answer-{id}");
-            self.put(row.clone(), "Response attempt", String::new(), false);
-            self.rows[self.positions[&row]].answer = Some(attempt);
+        }
+    }
+
+    fn resolve_request(row: &mut Row) {
+        row.request = None;
+        row.label = "Resolved by runtime · no answer recorded".into();
+        if let Some(answer) = &mut row.answer {
+            if matches!(answer.state, AnswerState::Writing | AnswerState::Unconfirmed | AnswerState::ReplayedPending) {
+                answer.state = AnswerState::Unconfirmed;
+            } else {
+                row.answer = None;
+            }
         }
     }
 
@@ -428,6 +490,7 @@ impl Transcript {
             "backend_thread" => {
                 self.measure_context(None);
                 self.context_change = None;
+                self.exchange_usage = None;
                 self.backend_model = data["model"].as_str().map(str::to_owned);
                 self.backend_session = data["id"].as_str().map(str::to_owned);
             }
@@ -437,6 +500,7 @@ impl Transcript {
                     .map(|(tokens, window)| ContextMeasure::Antigravity { tokens, window }));
             }
             "backend_usage" if data["backend"] == "claude" => {
+                self.see_usage("Claude Code", &data["input_tokens"], &Value::Null);
                 self.measure_context(data["input_tokens"].as_u64()
                     .map(|input_tokens| ContextMeasure::Claude { input_tokens }));
             }
@@ -445,6 +509,10 @@ impl Transcript {
                 let trigger = data["trigger"].as_str().map_or_else(String::new, |value| format!(" · {value}"));
                 let size = data["pre_tokens"].as_u64().map_or_else(String::new, |value| format!(" · {value} tok before"));
                 self.context_changed(seq, ContextChange::Compaction, format!("Claude Code compacted{trigger}{size}"));
+            }
+            "inference_exchange_completed" if data["purpose"] == "workload" => {
+                let usage = &data["usage"];
+                self.see_usage("OpenRouter", &usage["prompt_tokens"], &usage["completion_tokens"]);
             }
             "context_budget" => {
                 self.measure_context(context_amounts(&data["selected_bytes"], &data["selection_available_bytes"])
@@ -524,6 +592,7 @@ impl Transcript {
                 let p = &data["params"];
                 if method == "thread/tokenUsage/updated" {
                     let usage = &p["tokenUsage"];
+                    self.see_usage("Codex", &usage["last"]["inputTokens"], &usage["last"]["outputTokens"]);
                     self.measure_context(context_amounts(&usage["last"]["totalTokens"], &usage["modelContextWindow"])
                         .map(|(tokens, window)| ContextMeasure::Codex { tokens, window }));
                 } else if matches!(method, "item/started" | "item/completed")
@@ -562,6 +631,12 @@ impl Transcript {
                             let id = item["id"].as_str().unwrap_or(ty).to_owned();
                             self.put(id.clone(),label,body,false);
                             if ty == "commandExecution" && method == "item/completed" {
+                                if let (Some(at), Some(command), Some(output), Some(_)) = (
+                                    self.event_at, item["command"].as_str(), item["aggregatedOutput"].as_str(), item["exitCode"].as_i64(),
+                                ) && let Some(test) = TestResult::observe(command, output, at)
+                                {
+                                    self.observed_tests = Some(test);
+                                }
                                 self.rows[self.positions[&id]].tool = Some(ToolDetail {
                                     result:item["exitCode"].as_i64().map(|n| format!("Exit code {n}")),
                                     failed:matches!(item["status"].as_str(),Some("failed"|"declined")) || item["exitCode"].as_i64().is_some_and(|n|n!=0),
@@ -585,18 +660,12 @@ impl Transcript {
                         true,
                     );
                 } else if !data["id"].is_null() {
-                    self.put(
-                        format!("event-{seq}"),
-                        "Backend input requested",
-                        display(data),
-                        false,
-                    );
-                    self.rows[self.positions[&format!("event-{seq}")]].request = Some(data.clone());
+                    let summary = p["command"].as_str().map(str::to_owned).unwrap_or_else(|| display(data));
+                    self.add_request(seq, summary, data.clone());
                 } else if method == "serverRequest/resolved" {
                     for row in &mut self.rows {
                         if row.request.as_ref().is_some_and(|r| r["id"] == p["requestId"]) {
-                            row.request = None;
-                            row.label = "Backend input resolved".into();
+                            Self::resolve_request(row);
                         }
                     }
                 } else if matches!(method, "turn/plan/updated" | "turn/diff/updated" | "error") {
@@ -604,16 +673,13 @@ impl Transcript {
                 }
             }
             "input_requested" if data["backend"] == "antigravity" => {
-                let id = format!("event-{seq}");
-                self.put(id.clone(), "Backend input requested", text("question"), false);
-                self.rows[self.positions[&id]].request = Some(serde_json::json!({
+                self.add_request(seq, text("question"), serde_json::json!({
                     "id":data["request_id"],"method":"antigravity/input","params":data
                 }));
             }
             "request_cancelled" => {
                 if let Some(row) = self.pending_request_mut(&data["request_id"]) {
-                    row.request = None;
-                    row.label = "Backend input cancelled".into();
+                    Self::resolve_request(row);
                 }
             }
             "request_answered" => {
@@ -630,7 +696,7 @@ impl Transcript {
                     row.request = None;
                     row.label = "Closed · no answer recorded".into();
                     if let Some(answer) = &mut row.answer {
-                        if matches!(answer.state, AnswerState::Writing | AnswerState::Unconfirmed) {
+                        if matches!(answer.state, AnswerState::Writing | AnswerState::Unconfirmed | AnswerState::ReplayedPending) {
                             answer.state = AnswerState::Unconfirmed;
                         } else {
                             row.answer = None;
@@ -746,13 +812,39 @@ mod tests {
         assert_eq!(written.attempt_id, "winner");
         assert_eq!(written.state, AnswerState::Written);
         assert!(transcript.rows[0].request.is_none());
-        let refused = transcript.rows[1].answer.as_ref().unwrap();
+        let refused = &transcript.rows[0].refused_answers[0];
         assert_eq!(refused.attempt_id, "local");
         assert_eq!(refused.state, AnswerState::Refused);
-        let later = transcript.rows[2].answer.as_ref().unwrap();
+        let later = transcript.rows[1].answer.as_ref().unwrap();
         assert_eq!(later.attempt_id, "later");
         assert_eq!(later.state, AnswerState::Unconfirmed);
-        assert!(transcript.rows[2].request.is_none());
+        assert!(transcript.rows[1].request.is_none());
+    }
+
+    #[test]
+    fn transport_uncertainty_unlocks_only_after_replay_of_a_pending_request() {
+        let mut transcript = Transcript::default();
+        transcript.apply(&json!({"seq":1,"kind":"backend","data":{"id":1,"method":"item/commandExecution/requestApproval"}})).unwrap();
+        let attempt = AnswerReceipt {
+            attempt_id: "first-attempt".into(),
+            machine: String::new(),
+            decision: String::new(),
+            state: AnswerState::Unconfirmed,
+            yours: true,
+            machine_label: String::new(),
+            at: None,
+        };
+        assert!(transcript.answer_locally(&json!(1), attempt.clone()));
+        assert!(transcript.rows[0].answer.as_ref().unwrap().waiting());
+        transcript.confirm_pending_answers();
+        let replayed = transcript.rows[0].answer.as_ref().unwrap();
+        assert_eq!(replayed.state, AnswerState::ReplayedPending);
+        assert!(!replayed.waiting());
+        assert!(transcript.answer_locally(&json!(1), AnswerReceipt {
+            attempt_id: "second-attempt".into(),
+            state: AnswerState::Sending,
+            ..attempt
+        }));
     }
 
     #[test]
@@ -835,7 +927,7 @@ mod tests {
             assert!(transcript.rows[0].request.is_some());
             transcript.apply(&json!({"seq":3,"kind":"backend","data":{"method":"serverRequest/resolved","params":{"requestId":0}}})).unwrap();
             assert!(transcript.rows[0].request.is_none());
-            assert_eq!(transcript.rows[0].label, "Backend input resolved");
+            assert_eq!(transcript.rows[0].label, "Resolved by runtime · no answer recorded");
             let mut answered = Transcript::default();
             answered.apply(&request).unwrap();
             answered

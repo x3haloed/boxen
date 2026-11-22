@@ -146,6 +146,98 @@ pub fn event_age(event: Option<&Visible>) -> String {
     event.map_or_else(|| "—".into(), |event| pulse::age(event.at))
 }
 
+pub struct RepoObservation {
+    pub run: String,
+    pub result: Option<Result<Value, String>>,
+}
+
+fn repo_fields(
+    ui: &mut egui::Ui,
+    data: &Data,
+    key: &ThreadKey,
+    id: Option<&str>,
+    actions: &mut Vec<Action>,
+) {
+    let sample = data
+        .repo_observations
+        .get(key)
+        .filter(|value| Some(value.run.as_str()) == id);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("REPO").monospace().small().weak());
+        if let Some(Some(Ok(facts))) = sample.map(|value| &value.result) {
+            let at = facts["at"]
+                .as_u64()
+                .map(conversation::utc_minute)
+                .unwrap_or_default();
+            let path = facts["cwd"].as_str().unwrap_or("Unknown directory");
+            ui.weak(format!("probed {at} UTC")).on_hover_text(path);
+        }
+        if let Some(id) = id {
+            let ready = !data.errors.contains_key(&key.peer)
+                && sample.is_none_or(|sample| sample.result.is_some());
+            let button = if sample.is_some() { "Refresh" } else { "Probe" };
+            if ui
+                .add_enabled(ready, egui::Button::new(button).small())
+                .clicked()
+            {
+                actions.push(Action::ProbeRepo(key.clone(), id.into()));
+            }
+        }
+    });
+    match sample.map(|value| &value.result) {
+        Some(Some(Ok(facts))) => {
+            let tree = if facts["dirty"] == true {
+                "dirty"
+            } else {
+                "clean"
+            };
+            let mut tree = tree.to_owned();
+            if let Some(ahead) = facts["ahead"].as_u64().filter(|ahead| *ahead > 0) {
+                tree.push_str(&format!(" · ahead {ahead}"));
+            }
+            if let Some(behind) = facts["behind"].as_u64().filter(|behind| *behind > 0) {
+                tree.push_str(&format!(" · behind {behind}"));
+            }
+            ui.columns(2, |columns| {
+                field(
+                    &mut columns[0],
+                    "BRANCH",
+                    facts["branch"].as_str().unwrap_or("Unknown"),
+                    None,
+                );
+                let head = facts["head"].as_str();
+                let short_head = head.map(|head| head.chars().take(8).collect::<String>());
+                field(
+                    &mut columns[1],
+                    "HEAD",
+                    short_head.as_deref().unwrap_or("Unknown"),
+                    None,
+                );
+            });
+            field(ui, "TREE", &tree, facts["scope"].as_str());
+        }
+        Some(Some(Err(error))) => {
+            ui.weak("Repository unavailable").on_hover_text(error);
+        }
+        Some(None) => {
+            ui.weak("Probing repository…");
+        }
+        None => {
+            ui.weak("Repository unknown");
+        }
+    }
+}
+
+fn field(ui: &mut egui::Ui, title: &str, detail: &str, source: Option<&str>) {
+    ui.label(RichText::new(title).monospace().small().weak());
+    ui.add(egui::Label::new(detail).truncate())
+        .on_hover_text(detail);
+    if let Some(source) = source {
+        ui.add(egui::Label::new(RichText::new(source).monospace().small().weak()).truncate())
+            .on_hover_text(source);
+    }
+}
+
 pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut Vec<Action>) {
     let thread = crate::find_thread(data, key);
     let resident = data.agents.resident(key);
@@ -196,14 +288,6 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
         }
     });
     ui.columns(2, |columns| {
-        let field = |ui: &mut egui::Ui, title: &str, detail: &str, source: Option<&str>| {
-            ui.label(RichText::new(title).monospace().small().weak());
-            ui.add(egui::Label::new(detail).truncate())
-                .on_hover_text(detail);
-            if let Some(source) = source {
-                ui.label(RichText::new(source).monospace().small().weak());
-            }
-        };
         field(
             &mut columns[0],
             "RUNTIME",
@@ -232,7 +316,17 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
             }),
         );
     });
-    ui.horizontal_wrapped(|ui| conversation::context_label(ui, data, key, runs));
+    ui.columns(2, |columns| {
+        columns[0].label(RichText::new("CONTEXT").monospace().small().weak());
+        columns[0].horizontal_wrapped(|ui| conversation::context_label(ui, data, key, runs));
+        if let Some(usage) = transcript.and_then(|transcript| transcript.exchange_usage) {
+            let summary = usage.label();
+            let source = usage.source();
+            field(&mut columns[1], "LAST EXCHANGE", &summary, Some(&source));
+        } else {
+            field(&mut columns[1], "LAST EXCHANGE", "Unknown", None);
+        }
+    });
     if let Some(cwd) = transcript
         .and_then(|transcript| transcript.execution.as_ref())
         .and_then(|execution| execution["cwd"].as_str())
@@ -241,6 +335,35 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
         ui.add(egui::Label::new(cwd).truncate()).on_hover_text(cwd);
     }
 
+    repo_fields(
+        ui,
+        data,
+        key,
+        run.and_then(|run| run["record"]["spec"]["id"].as_str()),
+        actions,
+    );
+    let tests = runs
+        .iter()
+        .rev()
+        .filter_map(|run| {
+            let id = run["record"]["spec"]["id"].as_str()?;
+            data.transcripts
+                .get(&run_key(&key.peer, id))?
+                .observed_tests
+                .as_ref()
+        })
+        .max_by_key(|tests| tests.at);
+    if let Some(tests) = tests {
+        let summary = format!("{}/{}", tests.passed, tests.total);
+        let source = format!(
+            "{} · {} UTC",
+            tests.command,
+            conversation::utc_minute(tests.at)
+        );
+        field(ui, "TESTS", &summary, Some(&source));
+    } else {
+        field(ui, "TESTS", "Unknown", None);
+    }
     ui.horizontal_wrapped(|ui| {
         if ui.small_button("Open on grid").clicked() {
             actions.push(if resident.is_some() {

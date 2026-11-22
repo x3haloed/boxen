@@ -137,6 +137,28 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
             assert time.monotonic()<deadline;time.sleep(.05)
         host_operation({'op':'mailbox_send','client_id':secrets.token_hex(32),'message':{'id':secrets.token_hex(32),'to':{'type':'resident','id':historical},'subject':'Automation message','body':'AUTOMATION_NOT_HUMAN'}})
         env=os.environ|{'BOXEN_GUI_TEST_HOME':str(homes[0]),'BOXEN_GUI_TEST_URL':f'http://127.0.0.1:{controls[0]}','BOXEN_GUI_TEST_DEST':json.dumps(destination),'BOXEN_GUI_TEST_HISTORY_AGENT':historical,'BOXEN_GUI_TEST_HISTORY_MAIL':historical_mail['id'],'BOXEN_GUI_TEST_CLASS':definition,'BOXEN_GUI_TEST_ACTIVE_AGENT':instances[2]}
+        repository = directory / 'fixture-repository'
+        repository.mkdir()
+        def git(*parts):
+            return subprocess.check_output(['git', '-C', str(repository), *parts], text=True)
+        git('init', '--quiet')
+        git('symbolic-ref', 'HEAD', 'refs/heads/fixture-main')
+        (repository / 'fixture.txt').write_text('Fixture content\n')
+        git('add', 'fixture.txt')
+        git('-c', 'user.name=Fixture account', '-c', 'user.email=fixture@example.invalid',
+            'commit', '--quiet', '-m', 'Fixture commit')
+        inspector_run = secrets.token_hex(32)
+        operation({'op': 'start', 'spec': {'id': inspector_run, 'thread_id': inspector_run,
+                  'backend': 'codex', 'cwd': str(repository), 'model': 'fixture',
+                  'prompt': 'GRID_INSPECTOR_RECEIPT'}})
+        query = {'op': 'repo_probe', 'id': inspector_run}
+        clean = operation(query)
+        assert clean['branch'] == 'fixture-main' and clean['head'] == git('rev-parse', 'HEAD').strip()
+        assert clean['dirty'] is False and clean['run_id'] == inspector_run and clean['at'] > 0
+        (repository / 'untracked.txt').write_text('Untracked fixture\n')
+        assert operation(query)['dirty'] is True
+        env['BOXEN_GUI_TEST_INSPECTOR_RUN'] = inspector_run
+        env['BOXEN_GUI_TEST_RESPONSE_RACE'] = json.dumps({'run': gate_run, 'local_attempt': contender})
         subprocess.run(['cargo','test','--locked','--manifest-path',str(ROOT/'desktop/Cargo.toml'),'real_daemon_boundary','--','--ignored','--nocapture'],env=env,check=True)
         if args.interactive:
             # Seed the human inbox through real resident tools, never fabricated journal rows.
@@ -152,6 +174,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
                     if status in ('completed','failed','interrupted','cancelled'):assert status=='completed';break
                     assert time.monotonic()<end;time.sleep(.05)
             metadata={'home':str(homes[0]),'url':env['BOXEN_GUI_TEST_URL'],'peer':keys[1],'address':destination['address'],'remote_home':str(homes[1])}
+            metadata['response_race']={'id':contender,'run_tag':f'{keys[1]}:{gate_run}','request':0}
             (ROOT/'work/desktop-fixture.json').write_text(json.dumps(metadata))
             print('Interactive fixture ready: work/desktop-fixture.json (no capability). Ctrl-C cleans up.',flush=True)
             while True:

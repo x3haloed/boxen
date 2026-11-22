@@ -718,6 +718,7 @@ pub fn incident(row: &Row) -> bool {
         || row.label == "Incident"
         || row.label == "Context"
         || row.answer.is_some()
+        || row.label == "Resolved by runtime · no answer recorded"
         || row.label == "Closed · no answer recorded"
         || row.label == "Backend input requested"
         || row.label == "Status"
@@ -752,8 +753,42 @@ pub fn activity_rows(ui: &mut egui::Ui, rows: &[Row]) {
 }
 pub fn activity_row(ui: &mut egui::Ui, row: &Row) {
     ui.push_id(&row.id, |ui| {
-        if let Some(answer) = &row.answer {
-            ui.weak(answer.label());
+        if row.answer.is_some()
+            || matches!(
+                row.label.as_str(),
+                "Resolved by runtime · no answer recorded" | "Closed · no answer recorded"
+            )
+        {
+            ui.horizontal_top(|ui| {
+                journal_time(ui, row.at);
+                ui.vertical(|ui| {
+                    if !row.text.is_empty() {
+                        let first = row.text.lines().next().unwrap_or_default();
+                        let preview: String = first.chars().take(160).collect();
+                        ui.add(egui::Label::new(RichText::new(preview).monospace()).wrap())
+                            .on_hover_text(&row.text);
+                    }
+                    if let Some(answer) = &row.answer {
+                        ui.weak(answer.label());
+                        if answer.state == crate::model::AnswerState::Written
+                            && !answer.yours
+                            && let Some(refused) = row
+                                .refused_answers
+                                .iter()
+                                .rev()
+                                .find(|attempt| attempt.yours)
+                        {
+                            ui.weak(format!(
+                                "Your {} was refused before writing",
+                                refused.decision
+                            ));
+                        }
+                    } else {
+                        ui.weak(&row.label);
+                    }
+                });
+            });
+            return;
         }
         if row.label == "Context" {
             ui.horizontal_wrapped(|ui| {

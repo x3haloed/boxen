@@ -100,6 +100,13 @@ def work(prompt):
             "last": {"totalTokens": 88}, "total": {"totalTokens": 880},
             "modelContextWindow": 100}})
     notification("item/commandExecution/outputDelta", {"itemId": "command", "delta": "first output\n"})
+    if prompt == "GRID_INSPECTOR_RECEIPT":
+        notification("thread/tokenUsage/updated", {"tokenUsage": {
+            "last": {"totalTokens": 61400, "inputTokens": 61000, "outputTokens": 400},
+            "total": {"totalTokens": 61400}, "modelContextWindow": 100000}})
+        notification("item/completed", {"item": {"id": "tests", "type": "commandExecution",
+                     "command": "dotnet test", "status": "failed", "exitCode": 1,
+                     "aggregatedOutput": "Failed! - Failed: 2, Passed: 244, Skipped: 0, Total: 246"}})
     if prompt == "NO_CONVENTIONAL_RESPONSE":
         notification("item/completed", {"item": {"id": "command", "type": "commandExecution",
                      "command": "fixture command", "status": "completed", "aggregatedOutput": "fixture output"}})

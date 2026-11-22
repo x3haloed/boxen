@@ -2009,5 +2009,91 @@ mod tests {
                 "completed"
             );
         }
+
+        let race: Value =
+            serde_json::from_str(&std::env::var("BOXEN_GUI_TEST_RESPONSE_RACE").unwrap()).unwrap();
+        let ctx = egui::Context::default();
+        let bus = Bus::new(ctx.clone());
+        client.watch(
+            destination,
+            race["run"].as_str().unwrap().to_owned(),
+            0,
+            0,
+            bus.publisher(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut transcript = Transcript::default();
+        loop {
+            match bus.rx.recv_timeout(Duration::from_secs(15)).unwrap() {
+                Update::Batch(_, _, batch) => {
+                    for event in batch["events"].as_array().unwrap() {
+                        transcript.apply(event).unwrap();
+                    }
+                    if batch["done"] == true {
+                        break;
+                    }
+                }
+                Update::WatchError(_, _, error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        transcript.decorate_answers(|answer| {
+            answer.yours = race["local_attempt"] == answer.attempt_id;
+            answer.machine_label = "Other fixture desktop".into();
+        });
+        let gate = transcript
+            .rows
+            .iter()
+            .find(|row| !row.refused_answers.is_empty())
+            .unwrap();
+        let winner = gate.answer.as_ref().unwrap();
+        assert_eq!(winner.state, crate::model::AnswerState::Written);
+        assert!(!winner.yours);
+        assert_eq!(winner.decision, "Decline");
+        assert!(winner.at.is_some());
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0., 0.), vec2(760., 340.))),
+                ..Default::default()
+            },
+            |ui| view::activity_row(ui, gate),
+        );
+        assert!(visible_text(&output, &winner.label()).is_some());
+        assert!(visible_text(&output, "Your Approve once was refused before writing").is_some());
+
+        let run = std::env::var("BOXEN_GUI_TEST_INSPECTOR_RUN").unwrap();
+        let bus = Bus::new(egui::Context::default());
+        let destination: Destination =
+            serde_json::from_str(&std::env::var("BOXEN_GUI_TEST_DEST").unwrap()).unwrap();
+        client.watch(
+            destination,
+            run,
+            0,
+            0,
+            bus.publisher(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut transcript = Transcript::default();
+        loop {
+            match bus.rx.recv_timeout(Duration::from_secs(15)).unwrap() {
+                Update::Batch(_, _, batch) => {
+                    for event in batch["events"].as_array().unwrap() {
+                        transcript.apply(event).unwrap();
+                    }
+                    if batch["done"] == true {
+                        break;
+                    }
+                }
+                Update::WatchError(_, _, error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        let tests = transcript.observed_tests.unwrap();
+        assert_eq!(
+            (tests.passed, tests.total, tests.command),
+            (244, 246, "dotnet test")
+        );
+        let exchange = transcript.exchange_usage.unwrap();
+        assert_eq!((exchange.input, exchange.output), (Some(61000), Some(400)));
     }
 }
