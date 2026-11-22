@@ -789,16 +789,11 @@ impl Desktop {
             p.spec["prompt"].as_str().unwrap_or(""),
             &attachments::FileRef::parse(&p.spec["attachments"]),
         );
-        if p.after.is_some() {
-            let id = p.spec["id"].as_str().unwrap_or("");
-            let label = if self.data.followup_after_refusal.remove(&key).as_deref() == Some(id) {
-                "Refused → started run"
-            } else {
-                "✓ started run"
-            };
+        let id = p.spec["id"].as_str().unwrap_or("");
+        if p.after.is_some() && self.data.followup_after_refusal.remove(&key).as_deref() == Some(id) {
             self.data.thread_issues.insert(
                 key.clone(),
-                format!("{label} {}", id.chars().take(8).collect::<String>()),
+                format!("Refused → started run {}", id.chars().take(8).collect::<String>()),
             );
         } else {
             self.data.thread_issues.remove(&key);

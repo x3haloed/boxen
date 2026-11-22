@@ -1213,6 +1213,7 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
         }
     }
     let local = view::local(data);
+    let resident_name = agent_name(data, key);
     if !data.mail.errors.contains_key(&key.peer)
         && let Some(run) = data.agents.history(key).and_then(|runs| runs.last())
         && !crate::model::terminal(run)
@@ -1375,9 +1376,11 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
                 };
                 let response = ui
                     .push_id(id, |ui| {
-                        view::bubble(
+                        let author = if *outgoing { "You" } else { &resident_name };
+                        view::message_row(
                             ui,
-                            *outgoing,
+                            m["accepted_at"].as_u64(),
+                            author,
                             m["body"].as_str().unwrap_or(""),
                             false,
                             |ui| {

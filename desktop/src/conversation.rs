@@ -7,6 +7,7 @@ use crate::{
     model::{Destination, Row, ThreadKey},
 };
 use eframe::egui::{self, RichText};
+use serde_json::Value;
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -438,53 +439,54 @@ pub fn destination(data: &Data, key: &str) -> Destination {
             address: String::new(),
         })
 }
-pub fn bubble(
+pub fn journal_time(ui: &mut egui::Ui, at: Option<u64>) {
+    let label = at.map_or_else(
+        || "—".into(),
+        |at| {
+            let minute = at / 60_000;
+            format!("{:02}:{:02}", (minute / 60) % 24, minute % 60)
+        },
+    );
+    ui.add_sized(
+        [40., 18.],
+        egui::Label::new(RichText::new(label).monospace().small().weak()).halign(egui::Align::Min),
+    )
+    .on_hover_text("Journal time (UTC)");
+}
+
+pub fn message_row(
     ui: &mut egui::Ui,
-    outgoing: bool,
+    at: Option<u64>,
+    author: &str,
     text: &str,
     rich: bool,
     body: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
-    let width = ui.available_width();
-    let max = (width * 0.82).clamp(28., 520.);
-    let font = egui::TextStyle::Body.resolve(ui.style());
-    let text_width = ui.fonts_mut(|f| {
-        text.lines()
-            .map(|line| {
-                f.layout_no_wrap(line.into(), font.clone(), egui::Color32::WHITE)
-                    .size()
-                    .x
-            })
-            .fold(0., f32::max)
-    });
-    // Lay out the message at its measured width first, then place that block
-    // on its sender's side. Its contents always flow from the left edge.
-    let bubble_width = (text_width + 20.).max(100.0_f32.min(max)).min(max);
-    ui.horizontal(|ui| {
-        if outgoing {
-            ui.add_space((width - bubble_width - ui.spacing().item_spacing.x).max(0.));
-        }
-        ui.allocate_ui_with_layout(
-            egui::vec2(bubble_width, 0.),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_width(bubble_width);
-                egui::Frame::group(ui.style())
-                    .show(ui, |ui| {
-                        ui.set_min_width((bubble_width - 12.).max(0.));
-                        if rich {
-                            markdown(ui, text);
-                        } else if !text.is_empty() {
-                            ui.add(egui::Label::new(text).wrap().selectable(true));
-                        }
-                        body(ui);
-                    })
-                    .response
-            },
-        )
-        .inner
+    ui.horizontal_top(|ui| {
+        journal_time(ui, at);
+        ui.vertical(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new(author).monospace().small().strong());
+            if rich {
+                markdown(ui, text);
+            } else if !text.is_empty() {
+                ui.add(egui::Label::new(text).wrap().selectable(true));
+            }
+            body(ui);
+        });
     })
-    .inner
+    .response
+}
+
+pub fn run_divider(ui: &mut egui::Ui, run: &Value, label: &str) {
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        journal_time(ui, run["record"]["created_at"].as_u64());
+        ui.label(RichText::new(label).monospace().small().strong());
+        if let Some(status) = run["status"].as_str() {
+            ui.label(RichText::new(status).monospace().small().weak());
+        }
+    });
 }
 
 fn markdown(ui: &mut egui::Ui, text: &str) {
@@ -618,7 +620,10 @@ pub fn activity_row(ui: &mut egui::Ui, row: &Row) {
             ui.weak(answer.label());
         }
         if row.label == "Context" {
-            ui.weak(format!("◐ {}", row.text));
+            ui.horizontal_wrapped(|ui| {
+                journal_time(ui, row.at);
+                ui.weak(format!("◐ {}", row.text));
+            });
             return;
         }
         let label = if row.label == "Agent" {

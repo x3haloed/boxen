@@ -143,6 +143,7 @@ impl AnswerReceipt {
 
 #[derive(Clone, Debug)]
 pub struct Row {
+    pub at: Option<u64>,
     pub id: String,
     pub label: String,
     pub text: String,
@@ -220,11 +221,14 @@ pub struct Transcript {
     answer_attempts: BTreeMap<String, AnswerReceipt>,
     positions: BTreeMap<String, usize>,
     imported: bool,
+    event_at: Option<u64>,
 }
 impl Transcript {
     fn put(&mut self, id: String, label: &str, text: String, append: bool) {
+        let at = self.event_at;
         let index = *self.positions.entry(id.clone()).or_insert_with(|| {
             self.rows.push(Row {
+                at,
                 id,
                 label: label.into(),
                 text: String::new(),
@@ -345,6 +349,7 @@ impl Transcript {
                 self.seq + 1
             ));
         }
+        self.event_at = event["at"].as_u64();
         let data = &event["data"];
         let kind = event["kind"].as_str().unwrap_or("");
         if kind == "execution_context" {

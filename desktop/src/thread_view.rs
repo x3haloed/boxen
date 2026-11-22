@@ -867,13 +867,6 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     if let Some(error) = data.watches.get(&live_tag).and_then(|w| w.error.as_ref()) {
         ui.label(format!("Reconnecting to activity · {error}"));
     }
-    if !activity && let Some(t) = data.transcripts.get(&live_tag) {
-        for row in &t.rows {
-            if row.request.is_some() && !data.errors.contains_key(&key.peer) {
-                backend_request(ui, row, key, live_id, actions);
-            }
-        }
-    }
     let latest_reply = runs.iter().rev().find_map(|run| {
         let id = run["record"]["spec"]["id"].as_str()?;
         data.transcripts
@@ -918,7 +911,25 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     if let Some(source) = file_anchor {
         view::switch(data, key, activity, Some(source));
     }
+    // A split pane may have room for a decision and the composer, with the
+    // journal itself below the fold. Keep the current decision reachable.
+    let compact = ui.available_height() < 170.;
+    if compact
+        && !data.errors.contains_key(&key.peer)
+        && data
+            .watches
+            .get(&live_tag)
+            .is_some_and(|watch| watch.error.is_none())
+        && let Some(transcript) = data.transcripts.get(&live_tag)
+    {
+        for row in transcript.rows.iter().filter(|row| row.request.is_some()) {
+            backend_request(ui, row, key, live_id, actions);
+        }
+    }
     let extra = errors
+        + usize::from(last.is_some())
+        + usize::from(data.send_checking.contains(key))
+        + usize::from(moving)
         + usize::from(waiting.is_some())
         + usize::from(pending.is_some())
         + usize::from(data.thread_issues.contains_key(key))
@@ -937,7 +948,8 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             if runs.is_empty() && pending.is_none() {
                 ui.weak("No retained messages yet.");
             }
-            for run in &runs {
+            for (index, run) in runs.iter().enumerate() {
+                let number = index + 1;
                 let id = run["record"]["spec"]["id"].as_str().unwrap_or("");
                 let tag = run_key(&key.peer, id);
                 // Completed Messages blocks are static once replay reaches the terminal
@@ -964,6 +976,14 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                 }
                 let origin = ui.next_widget_position();
                 let response = ui.push_id(&tag, |ui| {
+                    view::run_divider(ui, run, &format!("Run {number}"));
+                    let live = !compact
+                        && !terminal(run)
+                        && !data.errors.contains_key(&key.peer)
+                        && data
+                            .watches
+                            .get(&tag)
+                            .is_some_and(|watch| watch.error.is_none());
                     if activity
                         && let Some(machine) = run["machine"].as_str().filter(|m| *m != key.peer)
                     {
@@ -986,49 +1006,56 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                     let mut group_start = 0;
                     for (i, row) in rows.iter().enumerate() {
                         if view::is_message(row) {
-                            if activity {
-                                render_rows(
-                                    ui,
-                                    &rows[group_start..i],
-                                    key,
-                                    id,
-                                    !terminal(run) && !data.errors.contains_key(&key.peer),
-                                    &mut data.views,
-                                    actions,
-                                );
-                            }
+                            render_rows(
+                                ui,
+                                &rows[group_start..i],
+                                key,
+                                id,
+                                live,
+                                &mut data.views,
+                                actions,
+                            );
                             let anchor = format!("{id}:{}", row.id);
                             let mut attached = row.attachments.clone();
                             let outgoing = row.label.starts_with("You");
                             let response = ui
                                 .push_id(&anchor, |ui| {
-                                    view::bubble(ui, outgoing, &row.text, !outgoing, |ui| {
-                                        view::chips(
-                                            ui,
-                                            &mut attached,
-                                            &dest,
-                                            false,
-                                            &mut data.file_previews,
-                                            actions,
-                                        );
-                                        if let Some(update) = &row.update_id {
-                                            let was_queued = data
-                                                .transcripts
-                                                .get(&tag)
-                                                .is_some_and(|t| t.queued_updates.contains(update));
-                                            ui.weak(if was_queued {
-                                                "✓ incorporated into run"
-                                            } else {
-                                                "✓ steered into run"
-                                            });
-                                        }
-                                        if !activity
-                                            && latest_reply.as_ref() == Some(&anchor)
-                                            && ui.small_button("Show in Activity").clicked()
-                                        {
-                                            switched = Some(anchor.clone());
-                                        }
-                                    })
+                                    view::message_row(
+                                        ui,
+                                        row.at,
+                                        if outgoing { "You" } else { &row.label },
+                                        &row.text,
+                                        !outgoing,
+                                        |ui| {
+                                            view::chips(
+                                                ui,
+                                                &mut attached,
+                                                &dest,
+                                                false,
+                                                &mut data.file_previews,
+                                                actions,
+                                            );
+                                            if let Some(update) = &row.update_id {
+                                                let was_queued =
+                                                    data.transcripts.get(&tag).is_some_and(|t| {
+                                                        t.queued_updates.contains(update)
+                                                    });
+                                                ui.weak(if was_queued {
+                                                    format!("✓ incorporated into run {number}")
+                                                } else {
+                                                    format!("✓ steered into run {number}")
+                                                });
+                                            } else if outgoing && number > 1 {
+                                                ui.weak(format!("✓ started run {number}"));
+                                            }
+                                            if !activity
+                                                && latest_reply.as_ref() == Some(&anchor)
+                                                && ui.small_button("Show in Activity").clicked()
+                                            {
+                                                switched = Some(anchor.clone());
+                                            }
+                                        },
+                                    )
                                 })
                                 .inner;
                             view::record(ui, &mut data.views, key, &anchor, response.rect);
@@ -1044,17 +1071,15 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                             group_start = i + 1;
                         }
                     }
-                    if activity {
-                        render_rows(
-                            ui,
-                            &rows[group_start..],
-                            key,
-                            id,
-                            !terminal(run) && !data.errors.contains_key(&key.peer),
-                            &mut data.views,
-                            actions,
-                        );
-                    }
+                    render_rows(
+                        ui,
+                        &rows[group_start..],
+                        key,
+                        id,
+                        live,
+                        &mut data.views,
+                        actions,
+                    );
                     if rows.is_empty() {
                         let spec = &run["record"]["spec"];
                         let mut files = FileRef::parse(&spec["attachments"]);
@@ -1062,9 +1087,10 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                             && (!spec["prompt"].as_str().unwrap_or("").is_empty()
                                 || !files.is_empty())
                         {
-                            view::bubble(
+                            view::message_row(
                                 ui,
-                                true,
+                                run["record"]["created_at"].as_u64(),
+                                "You",
                                 spec["prompt"].as_str().unwrap_or(""),
                                 false,
                                 |ui| {
@@ -1808,6 +1834,17 @@ mod tests {
                 .or_default()
                 .apply(&request)
                 .unwrap();
+            data.watches.insert(
+                tag.clone(),
+                crate::Observing {
+                    epoch: 1,
+                    stop: Default::default(),
+                    retry: std::time::Instant::now(),
+                    error: None,
+                    done: false,
+                    frontier: Some(1),
+                },
+            );
             let frame = |data: &mut Data, events| {
                 let mut actions = vec![];
                 let output = ctx.run_ui(
@@ -1820,6 +1857,7 @@ mod tests {
                 );
                 (output, actions)
             };
+            frame(&mut data, vec![]);
             let (output, actions) = frame(&mut data, vec![]);
             assert!(actions.is_empty());
             assert!(visible_text(&output, "Decline").is_none());
