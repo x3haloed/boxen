@@ -133,6 +133,21 @@ pub fn settle_reply(data: &mut Data, key: &ThreadKey, run: &Value) -> bool {
     true
 }
 
+const REPLY_LIMIT: usize = 5;
+
+fn unread_mail<'a>(data: &'a Data) -> impl Iterator<Item = (&'a ThreadKey, &'a Value)> + 'a {
+    data.mail.messages.iter().filter(|(key, message)| {
+        message["to"]["type"] == "client"
+            && message["to"]["id"] == data.local_key
+            && message["sender"]["type"] == "resident"
+            && !data.saved.mail.read.contains(*key)
+    })
+}
+
+fn unread_replies(data: &Data) -> usize {
+    unread_mail(data).count() + data.saved.thread_replies.len()
+}
+
 fn replies(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
     enum Reply<'a> {
         Mail(&'a ThreadKey, &'a Value),
@@ -162,10 +177,17 @@ fn replies(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
         )
         .collect();
     replies.sort_unstable_by_key(|(at, _)| std::cmp::Reverse(*at));
-    ui.label(egui::RichText::new("REPLIES").monospace().size(10.5).weak());
+    ui.label(
+        egui::RichText::new("REPLIES · NOT BLOCKING")
+            .monospace()
+            .size(10.5)
+            .weak(),
+    );
     if replies.is_empty() {
         ui.weak("No unread replies observed");
     }
+    let older = replies.len().saturating_sub(REPLY_LIMIT);
+    replies.truncate(REPLY_LIMIT);
     for (at, reply) in replies {
         let action = ui
             .horizontal_wrapped(|ui| {
@@ -213,6 +235,9 @@ fn replies(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
             actions.push(action);
             ui.close();
         }
+    }
+    if older > 0 {
+        ui.weak(format!("{older} older unread · in Mail"));
     }
 }
 
@@ -330,7 +355,29 @@ pub fn toolbar(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
     });
     let counted = gates.iter().filter(|gate| gate.current).count();
     let selection_id = ui.make_persistent_id("needs-gate-selection");
-    let menu = ui.menu_button(format!("Needs you · {counted}"), |ui| {
+    let unread = unread_replies(data);
+    if counted == 0 && unread == 0 && gates.is_empty() {
+        return;
+    }
+    let button = if counted > 0 {
+        egui::Button::new(
+            egui::RichText::new(format!("! {counted} need you"))
+                .monospace()
+                .size(10.5)
+                .color(crate::console_style::WARN),
+        )
+        .fill(egui::Color32::from_rgb(34, 27, 14))
+        .stroke(egui::Stroke::new(1., egui::Color32::from_rgb(90, 67, 24)))
+    } else {
+        egui::Button::new(
+            egui::RichText::new(format!("{unread} unread"))
+                .monospace()
+                .size(10.5)
+                .weak(),
+        )
+        .frame(false)
+    };
+    let menu = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
         ui.set_width(420.);
         ui.horizontal_wrapped(|ui| {
             ui.weak(format!("From {observed} of {total} active runs"));
@@ -466,7 +513,7 @@ pub fn toolbar(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
                 replies(ui, data, actions);
             });
     });
-    if menu.inner.is_none() || gates.is_empty() {
+    if menu.1.is_none() || gates.is_empty() {
         ui.data_mut(|state| state.remove::<SelectedGate>(selection_id));
     }
 }
@@ -607,8 +654,7 @@ mod tests {
                 let egui::Shape::Text(text) = &shape.shape else {
                     return None;
                 };
-                (text.galley.job.text == "Needs you · 2")
-                    .then(|| text.pos + text.galley.size() / 2.)
+                (text.galley.job.text == "! 2 need you").then(|| text.pos + text.galley.size() / 2.)
             })
             .unwrap();
         let pointer = |pressed| egui::Event::PointerButton {

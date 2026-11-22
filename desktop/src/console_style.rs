@@ -40,6 +40,12 @@ pub fn install(ctx: &egui::Context) {
             .or_default()
             .insert(0, name.into());
     }
+    // Plex Mono lacks the arrows and marks used in receipts and hints.
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .insert(1, "Inter".into());
     ctx.set_fonts(fonts);
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.style_mut_of(egui::Theme::Dark, |style| {
@@ -113,4 +119,28 @@ pub fn dashed_rect(ui: &egui::Ui, rect: egui::Rect, color: Color32) {
         4.,
         3.,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{self, FontFamily, FontId};
+
+    #[test]
+    fn interface_glyphs_exist_in_the_installed_fonts() {
+        let ctx = egui::Context::default();
+        super::install(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let missing: Vec<String> = ctx.fonts_mut(|fonts| {
+            let mut missing = Vec::new();
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                for c in "◇↗↵●○→⚙⌘↳…·×⇧–✓←↩".chars() {
+                    if !fonts.has_glyph(&FontId::new(12., family.clone()), c) {
+                        missing.push(format!("{family:?} {c} U+{:04X}", c as u32));
+                    }
+                }
+            }
+            missing
+        });
+        assert!(missing.is_empty(), "{missing:#?}");
+    }
 }

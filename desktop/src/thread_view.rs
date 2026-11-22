@@ -43,9 +43,10 @@ fn next_run_settings(
     backend: &str,
     actions: &mut Vec<Action>,
 ) {
-    if ui
-        .add_enabled(enabled, egui::Button::new("Run settings"))
-        .clicked()
+    if enabled
+        && ui
+            .add_enabled(enabled, egui::Button::new("Run settings"))
+            .clicked()
     {
         data.editing_thread_settings = Some((key.clone(), settings_for(data, key)));
     }
@@ -754,8 +755,60 @@ impl Desktop {
     }
 }
 
+fn thread_status(
+    data: &Data,
+    key: &ThreadKey,
+    last: Option<&Value>,
+    native_ended: bool,
+    accepts_followup: bool,
+) -> (String, egui::Color32) {
+    use crate::console_style::{ACCENT, ERROR, OK, WARN};
+    if let Some(error) = data.errors.get(&key.peer) {
+        return (format!("machine unavailable · {error}"), ERROR);
+    }
+    if native_ended {
+        return (
+            if accepts_followup {
+                "background command open".into()
+            } else {
+                "waiting for outstanding work".into()
+            },
+            ACCENT,
+        );
+    }
+    let Some(last) = last else {
+        return ("loading thread catalog…".into(), egui::Color32::GRAY);
+    };
+    match last["status"].as_str() {
+        Some("starting" | "running") => ("running".into(), ACCENT),
+        Some("waiting" | "blocked") => {
+            let tag = run_key(
+                &key.peer,
+                last["record"]["spec"]["id"].as_str().unwrap_or(""),
+            );
+            let detail = data
+                .transcripts
+                .get(&tag)
+                .and_then(|transcript| transcript.status.as_ref())
+                .filter(|status| status["status"] == last["status"])
+                .and_then(|status| status["detail"].as_str())
+                .filter(|detail| !detail.is_empty())
+                .unwrap_or("waiting for input");
+            (detail.to_owned(), WARN)
+        }
+        Some("failed") => ("run failed".into(), ERROR),
+        Some("interrupted") => ("run interrupted".into(), ERROR),
+        Some("cancelled") => ("cancelled".into(), egui::Color32::GRAY),
+        Some("completed") => ("done".into(), OK),
+        Some(other) => (other.to_owned(), egui::Color32::GRAY),
+        None => ("unknown".into(), egui::Color32::GRAY),
+    }
+}
+
 pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut Vec<Action>) {
-    let activity = view::header(ui, data, key);
+    // Threads are one timeline: steps collapse between messages.
+    data.saved.activity_views.remove(key);
+    let activity = false;
     let dest = view::destination(data, &key.peer);
     let runs = find_thread(data, key)
         .map(|t| t.runs.clone())
@@ -792,119 +845,123 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         .find(|(k, _)| k == key)
         .map(|(_, f)| std::mem::take(f))
         .unwrap_or_default();
-    let mut switched = None;
-    ui.horizontal_wrapped(|ui| {
-        next_run_settings(
-            ui,
-            data,
-            key,
-            last.is_some()
-                && running.is_none()
-                && pending.is_none()
-                && !moving
-                && !data
-                    .preparing_followups
-                    .values()
-                    .any(|intent| &intent.key == key),
-            last.and_then(|run| run["record"]["spec"]["backend"].as_str())
-                .unwrap_or("codex"),
-            actions,
-        );
-        if activity {
-            ui.weak(&dest.label);
-        }
-        if let Some(error) = data.errors.get(&key.peer) {
-            ui.label(format!("Machine unavailable · {error}"));
-        } else if native_ended {
-            ui.label(if accepts_followup {
-                "Background command still open"
-            } else {
-                "Waiting for outstanding work"
-            });
-        } else if let Some(last) = last {
-            match last["status"].as_str() {
-                Some("starting" | "running") => {
-                    ui.label("Running");
-                }
-                Some("waiting" | "blocked") => {
-                    let tag = run_key(
-                        &key.peer,
-                        last["record"]["spec"]["id"].as_str().unwrap_or(""),
-                    );
-                    let detail = data
-                        .transcripts
-                        .get(&tag)
-                        .and_then(|transcript| transcript.status.as_ref())
-                        .filter(|status| status["status"] == last["status"])
-                        .and_then(|status| status["detail"].as_str())
-                        .filter(|detail| !detail.is_empty())
-                        .unwrap_or("Waiting for input");
-                    ui.label(detail);
-                }
-                Some("failed") => {
-                    ui.label("Run failed");
-                }
-                Some("interrupted") => {
-                    ui.label("Run interrupted");
-                }
-                _ => {}
-            }
-        } else {
-            ui.weak("Waiting for the thread catalog…");
-        }
-        if last.is_some() {
-            view::context_label(ui, data, key, &runs);
-        }
-        if activity && running.is_some() && ui.small_button("Cancel run").clicked() {
-            actions.push(Action::Cancel(key.clone()));
-        }
-    });
+    let settings_enabled = last.is_some()
+        && running.is_none()
+        && pending.is_none()
+        && !moving
+        && !data
+            .preparing_followups
+            .values()
+            .any(|intent| &intent.key == key);
+    let backend = last
+        .and_then(|run| run["record"]["spec"]["backend"].as_str())
+        .unwrap_or("codex")
+        .to_owned();
+    let (status, status_color) = thread_status(data, key, last, native_ended, accepts_followup);
     let live_id = running.as_deref().unwrap_or("");
     let live_tag = run_key(&key.peer, live_id);
-    if let Some(last) = last {
+    let execution = last.map(|last| {
         let tag = run_key(
             &key.peer,
             last["record"]["spec"]["id"].as_str().unwrap_or(""),
         );
-        let execution = data
-            .transcripts
+        data.transcripts
             .get(&tag)
-            .and_then(|transcript| transcript.execution.as_ref())
-            .unwrap_or(&last["record"]["execution"]);
-        if execution.is_object() {
-            ui.collapsing("Execution context", |ui| {
-                ui.label(format!("Machine · {}", dest.label));
-                ui.label(format!(
-                    "Account · {}",
-                    execution["account"].as_str().unwrap_or("Unknown")
-                ));
-                ui.label(format!(
-                    "Session · {}",
-                    execution["session"].as_str().unwrap_or("Unknown")
-                ));
-                let privileges = match execution["elevated"].as_bool() {
-                    Some(true) => "Elevated",
-                    Some(false) => "Standard user",
-                    None => "Unknown",
-                };
-                ui.label(format!("Privileges · {privileges}"));
-                ui.label(format!(
-                    "Directory · {}",
-                    execution["cwd"]
-                        .as_str()
-                        .or_else(|| last["record"]["spec"]["cwd"].as_str())
-                        .unwrap_or("Unknown")
-                ));
-                if let Some(available) = execution["desktop_available"].as_bool() {
-                    ui.label(if available {
-                        "Desktop session available"
-                    } else {
-                        "Desktop session unavailable"
-                    });
-                }
-            });
+            .and_then(|transcript| transcript.execution.clone())
+            .unwrap_or_else(|| last["record"]["execution"].clone())
+    });
+    let mut open_settings = false;
+    ui.horizontal(|ui| {
+        crate::console_style::dot(ui, status_color);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(&status)
+                    .monospace()
+                    .size(10.5)
+                    .color(status_color),
+            )
+            .truncate(),
+        );
+        if let Some(created) = running
+            .is_some()
+            .then(|| last.and_then(|run| run["record"]["created_at"].as_u64()))
+            .flatten()
+        {
+            ui.label(
+                egui::RichText::new(format!("· {}", crate::pulse::age(created)))
+                    .monospace()
+                    .size(10.5)
+                    .weak(),
+            );
         }
+        if last.is_some() {
+            view::context_label(ui, data, key, &runs);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            egui::containers::menu::MenuButton::from_button(
+                egui::Button::new(egui::RichText::new("···").size(13.)).frame(false),
+            )
+            .ui(ui, |ui| {
+                ui.set_min_width(220.);
+                if ui
+                    .add_enabled(settings_enabled, egui::Button::new("Run settings…"))
+                    .clicked()
+                {
+                    open_settings = true;
+                    ui.close();
+                }
+                if running.is_some() && ui.button("Cancel run").clicked() {
+                    actions.push(Action::Cancel(key.clone()));
+                    ui.close();
+                }
+                if let Some(execution) = execution.as_ref().filter(|e| e.is_object()) {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("EXECUTION")
+                            .monospace()
+                            .size(10.)
+                            .weak(),
+                    );
+                    ui.label(format!("Machine · {}", dest.label));
+                    ui.label(format!(
+                        "Account · {}",
+                        execution["account"].as_str().unwrap_or("Unknown")
+                    ));
+                    ui.label(format!(
+                        "Session · {}",
+                        execution["session"].as_str().unwrap_or("Unknown")
+                    ));
+                    let privileges = match execution["elevated"].as_bool() {
+                        Some(true) => "Elevated",
+                        Some(false) => "Standard user",
+                        None => "Unknown",
+                    };
+                    ui.label(format!("Privileges · {privileges}"));
+                    ui.label(format!(
+                        "Directory · {}",
+                        execution["cwd"]
+                            .as_str()
+                            .or_else(|| last.and_then(|l| l["record"]["spec"]["cwd"].as_str()))
+                            .unwrap_or("Unknown")
+                    ));
+                    if let Some(available) = execution["desktop_available"].as_bool() {
+                        ui.label(if available {
+                            "Desktop session available"
+                        } else {
+                            "Desktop session unavailable"
+                        });
+                    }
+                }
+            })
+            .0
+            .on_hover_text("Run settings, cancel and execution context");
+        });
+    });
+    ui.separator();
+    if open_settings {
+        data.editing_thread_settings = Some((key.clone(), settings_for(data, key)));
     }
+    next_run_settings(ui, data, key, false, &backend, actions);
     if let Some(error) = data.watches.get(&live_tag).and_then(|w| w.error.as_ref()) {
         ui.label(format!("Reconnecting to activity · {error}"));
     }
@@ -954,7 +1011,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     }
     // A split pane may have room for a decision and the composer, with the
     // journal itself below the fold. Keep the current decision reachable.
-    let compact = ui.available_height() < 170.;
+    let compact = ui.available_height() < 220.;
     if compact
         && !data.errors.contains_key(&key.peer)
         && last.is_some_and(|run| crate::needs::replay_current(data, &live_tag, run))
@@ -1014,24 +1071,38 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                 }
                 let origin = ui.next_widget_position();
                 let response = ui.push_id(&tag, |ui| {
-                    view::run_divider(ui, run, &format!("Run {number}"));
                     let live = !compact
                         && !data.errors.contains_key(&key.peer)
                         && crate::needs::replay_current(data, &tag, run);
-                    if activity
-                        && let Some(machine) = run["machine"].as_str().filter(|m| *m != key.peer)
-                    {
-                        let label = data
-                            .saved
-                            .destinations
-                            .iter()
-                            .find(|dest| dest.key == machine)
-                            .map(|dest| dest.label.clone())
-                            .unwrap_or_else(|| {
-                                format!("Machine {}", machine.chars().take(8).collect::<String>())
-                            });
-                        ui.weak(label);
-                    }
+                    let moved = run["machine"]
+                        .as_str()
+                        .filter(|m| *m != key.peer)
+                        .map(|machine| {
+                            data.saved
+                                .destinations
+                                .iter()
+                                .find(|dest| dest.key == machine)
+                                .map(|dest| dest.label.clone())
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "Machine {}",
+                                        machine.chars().take(8).collect::<String>()
+                                    )
+                                })
+                        });
+                    let end = data
+                        .transcripts
+                        .get(&tag)
+                        .and_then(|t| t.rows.iter().filter_map(|r| r.at).max());
+                    let detail = data
+                        .transcripts
+                        .get(&tag)
+                        .and_then(|t| t.status.as_ref())
+                        .filter(|status| status["status"] == run["status"])
+                        .and_then(|status| status["detail"].as_str())
+                        .filter(|d| !d.is_empty())
+                        .map(str::to_owned);
+                    view::run_divider(ui, run, number, end, detail.as_deref(), moved.as_deref());
                     let transcript = data.transcripts.get(&tag);
                     let initial_message = transcript.and_then(|t| t.initial_message.as_deref());
                     let refused_update = data.saved.refused_followups.get(&tag).map(String::as_str);
@@ -1120,12 +1191,6 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                                             } else if initial_message == Some(row.id.as_str()) {
                                                 start_receipt(ui, number, refused_update);
                                             }
-                                            if !activity
-                                                && latest_reply.as_ref() == Some(&anchor)
-                                                && ui.small_button("Show in Activity").clicked()
-                                            {
-                                                switched = Some(anchor.clone());
-                                            }
                                         },
                                     )
                                 })
@@ -1136,14 +1201,6 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                             {
                                 data.saved.thread_replies.retain(|reply| {
                                     &reply.key != key || reply.run != id || reply.row != row.id
-                                });
-                            }
-                            if !activity {
-                                response.context_menu(|ui| {
-                                    if ui.button("Show in Activity").clicked() {
-                                        switched = Some(anchor.clone());
-                                        ui.close();
-                                    }
                                 });
                             }
                             ui.add_space(2.);
@@ -1183,9 +1240,6 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             }
         },
     );
-    if let Some(anchor) = switched {
-        view::switch(data, key, true, Some(anchor));
-    }
     if moving {
         ui.horizontal_wrapped(|ui| {
             if data.moving.contains(key) {
@@ -1233,9 +1287,9 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                     .iter()
                     .position(|run| run["record"]["spec"]["id"] == steering.run)
                 {
-                    ui.weak(format!("◌ queued for run {}", index + 1));
+                    ui.weak(format!("○ queued for run {}", index + 1));
                 } else {
-                    ui.weak("◌ queued");
+                    ui.weak("○ queued");
                 }
             } else if data.active_steering.contains(key) {
                 ui.weak("Sending…");
@@ -1252,17 +1306,14 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         });
     }
     let hint = last.map(|run| match send_route(run, false) {
-        SendRoute::Hold => "→ held until run completes".into(),
-        SendRoute::Followup => "→ new turn".into(),
+        SendRoute::Hold => format!("→ held until run {} settles", runs.len()),
+        SendRoute::Followup => format!("→ starts run {}", runs.len() + 1),
         SendRoute::Steer if run["record"]["spec"]["backend"] == "openrouter" => {
             "→ queued for next step".into()
         }
         SendRoute::Steer => format!("→ steers run {}", runs.len()),
         SendRoute::Draft => "→ waiting for a sendable run".into(),
     });
-    if let Some(hint) = hint {
-        view::route_hint(ui, &hint);
-    }
     let frozen = moving
         || data.send_checking.contains(key)
         || data.hold_pending.contains(key)
@@ -1280,6 +1331,8 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             files: &mut files,
             target,
             label: "Send",
+            hint,
+            placeholder: "Message…".into(),
             limit: 256 * 1024,
             blocked: frozen || last.is_none(),
         },
@@ -1414,7 +1467,32 @@ pub(crate) fn backend_request(
     run: &str,
     actions: &mut Vec<Action>,
 ) {
-    request_controls(ui, row, key, run, actions, None);
+    // A pending request reads as a gate in the timeline: amber rule and wash.
+    let pending = row.answer.as_ref().is_none_or(|answer| !answer.waiting());
+    let response = egui::Frame::new()
+        .fill(if pending {
+            egui::Color32::from_rgb(26, 22, 14)
+        } else {
+            egui::Color32::TRANSPARENT
+        })
+        .inner_margin(egui::Margin {
+            left: 10,
+            right: 6,
+            top: 5,
+            bottom: 6,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            request_controls(ui, row, key, run, actions, None);
+        })
+        .response;
+    if pending {
+        ui.painter().vline(
+            response.rect.left() + 1.5,
+            response.rect.y_range(),
+            egui::Stroke::new(3., crate::console_style::WARN),
+        );
+    }
 }
 
 pub(crate) fn request_controls(
@@ -1871,8 +1949,8 @@ mod tests {
     #[test]
     fn ended_antigravity_prompt_exposes_ordinary_send_for_background_work() {
         for (state, hint) in [
-            ("ready", "→ new turn"),
-            ("ended", "→ waiting for a sendable run"),
+            ("ready", "→ starts run 2 ↵"),
+            ("ended", "→ waiting for a sendable run ↵"),
         ] {
             let ctx = egui::Context::default();
             let key = ThreadKey {
@@ -1910,8 +1988,8 @@ mod tests {
             assert!(visible_text(&output, "Running").is_none());
             assert!(visible_text(&output, "Send update").is_none());
             assert!(visible_text(&output, hint).is_some());
-            assert!(visible_text(&output, "antigravity · ctx unknown").is_some());
-            let send = visible_text(&output, "Send").expect("ordinary send button");
+            assert!(visible_text(&output, "· antigravity · ctx unknown").is_some());
+            let send = visible_text(&output, hint).expect("ordinary send control");
             let (_, actions) = click(&mut frame, send);
             assert!(
                 actions

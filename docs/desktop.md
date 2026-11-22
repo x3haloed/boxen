@@ -50,11 +50,23 @@ builds include their SIL Open Font License notices. [Inter](https://github.com/r
 ## First interactions
 
 - macOS and Windows use native menus. Linux uses the in-window menu.
-  **File** offers **New Thread** and **Reconnect Daemon**. The toolbar opens the
-  finder and tool-approval settings and shows the machines in the network.
-- The Watchlist offers Threads, Agents and Mail. Threads groups anonymous
-  conversations by machine. Identity attachment in any run excludes a
-  conversation from Threads. Machine filters and text search stay local.
+  **File** offers **New Thread** and **Reconnect Daemon**. The app toolbar holds
+  the finder field, the network's machines, and on the right the Parked and
+  Tidy chips, Needs you, the grid size and a gear menu with settings, **Live
+  pulse** and the receipt key. A machine shows its observed/active run count
+  only while coverage is incomplete. Needs you appears as an amber chip while a
+  request blocks a run and as a quiet unread count when only replies wait. The
+  right-hand controls keep their room; machines that no longer fit collapse into
+  `+N`.
+- The Watchlist is one list of threads, residents and definitions, with an
+  inspector for the selection. Threads from all machines are listed together,
+  most recently accepted first; the inspector names the machine. A tick marks
+  conversations on the grid. LAST names the latest observed activity and AGE
+  counts from the latest observed event; `~` marks the time since the latest run
+  was accepted for conversations this client has not observed. **+** starts a
+  new thread and **···** switches the sidebar to Agents or Mail. Identity
+  attachment in any run excludes a conversation from Threads. Machine filters
+  and text search stay local.
 - A single click opens one replaceable peek. Double-click or **Open on grid**
   places the conversation. Selecting a visible conversation focuses its
   existing pane. Drafts belong to their conversation.
@@ -62,15 +74,22 @@ builds include their SIL Open Font License notices. [Inter](https://github.com/r
   can take an empty column. When columns are occupied, choosing a snap region
   splits only the affected pane. Shift with a placement shortcut replaces
   the selected pane. A pane can change span or move into available space.
-  Closing leaves a hole. **Tidy** previews an explicit arrangement.
+  Snap zones state what happens to the pane already in each cell, and a hint
+  bar lists the keys. Widening a pane over a neighbor leaves that neighbor the
+  remaining rectangle; spans that would leave it nothing are unavailable.
+  Closing leaves a hole that names its cell and what was closed there. **Tidy**
+  appears while holes exist: **Fill holes** grows neighbors into them, **Even
+  grid** evens spans, each option previews its result on hover, and **Dismiss**
+  keeps Tidy quiet until the holes change.
 - Narrowing the window parks panes that no longer fit. Widening restores their
   homes. Placing a parked pane elsewhere replaces its remembered home. Parked
   panes, placed panes, and attached drafts survive restart. The desktop
   migrates previously pinned docking tabs into grid homes once. A peek is
-  transient.
+  transient. The peek shows the conversation beside the Watchlist with
+  **Open on grid ↗**; Esc closes it without changing the grid.
 - **⌘/Ctrl + K**, **⌘/Ctrl + Shift + P**, or **F1** opens the finder for threads
   and commands. The finder also opens project work and new message editors.
-- **New Thread** in Threads, File, or the command palette opens a compact dialog.
+- **New Thread** (**+** in the Watchlist, File, or the command palette) opens a compact dialog.
   **Start thread** uses this machine, the default Codex model, and a working area
   under the executing daemon's data directory at `threads/<thread-id>`. Expand
   **Run settings** in the dialog to choose the machine, directory, runtime, or model.
@@ -79,20 +98,20 @@ builds include their SIL Open Font License notices. [Inter](https://github.com/r
   The Codex, Antigravity, and Claude Code model dropdowns load from the selected machine and
   include **Default model**. OpenRouter accepts a model ID as text and uses the
   destination's default when left blank.
-  When the daemon queues the first run, the dialog closes and the thread opens
-  in **Messages**. A rejected submission preserves the draft and settings.
+  When the daemon queues the first run, the dialog closes and the thread opens. A rejected submission preserves the draft and settings.
   When queue status is uncertain, the catalog checks for the same request ID and
   **Retry same request** submits that exact request again.
-  On an idle conversation, **Run settings** can change the directory or model
+  On an idle conversation, **Run settings** in the pane's **···** menu can change the directory or model
   for the next send. **Choose a model** uses the same runtime-specific dropdown
   for Codex, Antigravity, and Claude Code. Choosing another machine moves the idle conversation once
   the destination reports its runtime configured,
   including its retained history and attachments. The draft follows the conversation
-  and remains ready to send. The composer sends ordinary follow-ups between runs.
-  During a run it offers steering when the runtime supports it. **⌘/Ctrl + Enter**
-  submits; cancellation is a separate control.
+  and remains ready to send. The composer is one line whose route hint names
+  the effect of sending (`→ steers run 42`, `→ starts run 6`, `→ held until run
+  12 settles`, `→ mail to Meridian`); clicking the hint or pressing Enter sends,
+  and Shift+Enter adds a line. **Cancel run** is in the pane's **···** menu.
 
-Pending backend requests appear in Messages and Activity with their original
+Pending backend requests appear in the timeline as an amber gate with their original
 question and response controls. Pending command approvals sit above history in
 both views. The full command is scrollable and copyable, with the backend's
 offered decisions below the details. **Approve once** applies to the pending
@@ -131,7 +150,7 @@ to the local client and final replies from anonymous runs known to this desktop
 while active or accepted by it. The thread reply is read when its row comes
 into view in the selected conversation.
 
-The expandable **Execution context** detail shows the latest run's machine,
+The pane's **···** menu shows the latest run's execution context: machine,
 account, session, privileges, working directory and observed desktop-session
 availability. Waiting runs display their retained reason, including a missing
 configured login session. These values come from run records and replayed
@@ -154,7 +173,7 @@ Gaps stop that observation and reconnect from the last applied sequence. Actual
 transport failures remain visible and retry after backoff; silence does not imply
 completion. Stale events from a replaced viewer generation are ignored.
 
-Messages reuses the measured layout of offscreen completed runs once their
+The thread timeline reuses the measured layout of offscreen completed runs once their
 terminal sequence has been replayed. The scroll area keeps their space and
 draws them when they come into view or are targeted by an anchor. Changes in
 width, display scale, or the latest-reply control cause remeasurement. Activity
@@ -180,7 +199,7 @@ and its submitted successor. Once the daemon confirms that run, the accepted
 prompt shows `refused → started run` in the timeline, including after restart
 and replay. A queued OpenRouter update has its own receipt until the run records
 its incorporation or ends before applying it.
-The workspace's **Receipts** menu explains what each thread, held follow-up,
+The gear menu's **Receipt key** explains what each thread, held follow-up,
 gate answer and resident mail receipt establishes.
 When Antigravity reports that its prompt ended and a native background command
 remains open, the composer offers ordinary **Send** as soon as the daemon
@@ -462,18 +481,21 @@ The existing workspace refreshes daemon membership about every ten seconds and u
 
 ## Conversation views and attachments
 
-The Agents and Threads panels retain separate lists. Both open a conversation
-with **Messages** and **Activity** in the same tab. The selected view belongs
-to the conversation; a draft belongs to the composer, independently of that
-view. **Show in Activity** moves to the corresponding message. Scrolling away
+A thread is one timeline. Each run opens with a divider such as
+`run 40 · 14:02:11 · 6m48s · ok`; the duration of a settled run ends at its last
+observed event. Runtime steps between messages collapse into groups that name
+their commands or item kinds and report failures. A resident pane keeps **Mail**
+and **Activity** apart, with the Mail scope **With you** or the operator's **All
+mail** beside the tabs. The selected resident view belongs to the conversation;
+a draft belongs to the composer, independently of that view. In a resident's
+Mail, **Show in Activity** moves to the corresponding activation. Scrolling away
 from the end stops following new items; **Jump to latest** resumes following.
 
-Messages uses left and right placement for authorship. Resident Messages
-contains explicit mailbox correspondence; Activity places those same messages
-alongside private activations and narration. Anonymous Messages contains user
-requests, accepted updates, and assistant text. Activity adds ordered runtime
-events. Tool output and results stay with their call, while failed calls and
-pending input remain visible without opening routine activity. There is no
+Messages use left and right placement for authorship. Resident Mail contains
+explicit mailbox correspondence; Activity places those same messages alongside
+private activations and narration. Tool output and results stay with their
+call, while failed calls and pending input remain visible without opening
+routine activity. Assistant text renders inline links, emphasis and code. There is no
 standing success banner.
 
 Enter sends from the focused composer; Shift+Enter adds a line. A resident

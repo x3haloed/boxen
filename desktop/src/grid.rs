@@ -69,6 +69,12 @@ pub struct Grid {
     pub focus: Option<Pane>,
     #[serde(skip, default = "initial_columns")]
     pub columns: usize,
+    /// Holes present when Tidy was dismissed; Tidy stays quiet until they change.
+    #[serde(skip)]
+    pub tidy_quiet: Option<Vec<Cell>>,
+    /// Recently closed panes, so a hole can say what it held.
+    #[serde(skip)]
+    pub closed: Vec<(Cell, String, u64)>,
 }
 
 fn initial_columns() -> usize {
@@ -85,6 +91,8 @@ impl Default for Grid {
             open_here: None,
             focus: None,
             columns: initial_columns(),
+            tidy_quiet: None,
+            closed: Vec::new(),
         }
     }
 }
@@ -153,11 +161,36 @@ impl Grid {
         self.placing = None;
     }
 
+    pub fn close_titled(&mut self, pane: &Pane, title: String) {
+        if let Some(slot) = self.slots.iter().find(|slot| &slot.pane == pane) {
+            let cell = slot.home;
+            self.closed.retain(|(c, _, _)| !c.overlaps(cell));
+            self.closed.push((cell, title, crate::pulse::now()));
+            self.closed.truncate(16);
+        }
+        self.close(pane);
+    }
+
     pub fn close(&mut self, pane: &Pane) {
         self.slots.retain(|slot| &slot.pane != pane);
         if self.focus.as_ref() == Some(pane) {
             self.focus = None;
         }
+    }
+
+    /// What happens to the pane already there: `None` = nothing displaced,
+    /// `Some((pane, None))` = replaced, `Some((pane, Some(cell)))` = it moves to `cell`.
+    pub fn snap_consequence(
+        &self,
+        column: usize,
+        row: usize,
+        replace: bool,
+    ) -> Option<Option<(Pane, Option<Cell>)>> {
+        let plan = self.snap_plan(column, row, replace)?;
+        Some(
+            plan.change
+                .map(|(index, cell)| (self.slots[index].pane.clone(), cell)),
+        )
     }
 
     pub fn snap_region(&self, column: usize, row: usize, replace: bool) -> Option<Cell> {
@@ -314,7 +347,31 @@ impl Grid {
             })
     }
 
+    /// Grow panes into adjacent holes without moving anything.
+    fn grow_into_holes(&self) -> Option<Vec<Placement>> {
+        let mut grown = Grid {
+            slots: self.slots.clone(),
+            columns: self.columns,
+            ..Default::default()
+        };
+        let mut changed = false;
+        while let Some((pane, cell)) = grown
+            .holes()
+            .into_iter()
+            .find_map(|hole| grown.neighbor(hole))
+        {
+            if let Some(slot) = grown.slots.iter_mut().find(|s| s.pane == pane) {
+                slot.home = cell;
+                changed = true;
+            }
+        }
+        changed.then_some(grown.slots)
+    }
+
     pub fn tidy(&self, even: bool) -> Option<Vec<Placement>> {
+        if !even && let Some(grown) = self.grow_into_holes() {
+            return Some(grown);
+        }
         let (visible, parked): (Vec<_>, Vec<_>) = self
             .slots
             .iter()
@@ -353,6 +410,18 @@ impl Grid {
             slot.home = cell;
             arranged.push(slot);
         }
+        if !even {
+            // Fill holes: after compaction, grow neighbors into what is left.
+            let compacted = Grid {
+                slots: arranged.clone(),
+                columns: self.columns,
+                ..Default::default()
+            };
+            if let Some(grown) = compacted.grow_into_holes() {
+                arranged = grown;
+                changed = true;
+            }
+        }
         changed.then_some(arranged)
     }
 
@@ -372,6 +441,82 @@ impl Grid {
             self.install(pane.clone(), candidate);
         }
     }
+
+    /// Widening into occupied cells: each overlapped pane keeps the
+    /// rectangle the wider span leaves it. `None` when a neighbor would be
+    /// left with nothing or a non-rectangular remainder.
+    pub fn span_plan(&self, pane: &Pane, width: usize, height: usize) -> Option<Vec<(Pane, Cell)>> {
+        let home = self.slots.iter().find(|s| s.pane == *pane)?.home;
+        let candidate = Cell {
+            width,
+            height,
+            ..home
+        };
+        if !candidate.fits(self.columns) || candidate.row + height > ROWS {
+            return None;
+        }
+        self.slots
+            .iter()
+            .filter(|slot| slot.pane != *pane && slot.home.overlaps(candidate))
+            .map(|slot| Some((slot.pane.clone(), remainder(slot.home, candidate)?)))
+            .collect()
+    }
+
+    pub fn span_displacing(&mut self, pane: &Pane, width: usize, height: usize) {
+        let Some(plan) = self.span_plan(pane, width, height) else {
+            return;
+        };
+        for (other, cell) in plan {
+            if let Some(slot) = self.slots.iter_mut().find(|s| s.pane == other) {
+                slot.home = cell;
+            }
+        }
+        self.span(pane, width, height);
+    }
+}
+
+/// `cell` minus `taken`, when what is left is one rectangle.
+fn remainder(cell: Cell, taken: Cell) -> Option<Cell> {
+    let covers_rows = taken.row <= cell.row && taken.row + taken.height >= cell.row + cell.height;
+    let covers_columns =
+        taken.column <= cell.column && taken.column + taken.width >= cell.column + cell.width;
+    if covers_rows {
+        let left = taken.column.saturating_sub(cell.column).min(cell.width);
+        let right_start = (taken.column + taken.width).max(cell.column);
+        let right = (cell.column + cell.width).saturating_sub(right_start);
+        return match (left, right) {
+            (0, 0) => None,
+            (left, 0) => Some(Cell {
+                width: left,
+                ..cell
+            }),
+            (0, right) => Some(Cell {
+                column: right_start,
+                width: right,
+                ..cell
+            }),
+            _ => None,
+        };
+    }
+    if covers_columns {
+        let top = taken.row.saturating_sub(cell.row).min(cell.height);
+        let bottom_start = (taken.row + taken.height).max(cell.row);
+        let bottom = (cell.row + cell.height).saturating_sub(bottom_start);
+        return match (top, bottom) {
+            (0, 0) => None,
+            (top, 0) => Some(Cell {
+                height: top,
+                ..cell
+            }),
+            (0, bottom) => Some(Cell {
+                row: bottom_start,
+                height: bottom,
+                ..cell
+            }),
+            _ => None,
+        };
+    }
+    None
 }
 
 impl Desktop {
@@ -421,103 +566,297 @@ impl Desktop {
             crate::console_style::CANVAS,
         );
 
-        ui.horizontal(|ui| {
-            if ui.button("Find…   ⌘K").clicked() {
+        let holes_now = layout.holes();
+        let quiet = layout.tidy_quiet.as_ref() == Some(&holes_now);
+        // Titles for menus that cannot borrow the viewer while the grid is borrowed.
+        let mut titles: Vec<(Pane, String, String)> = Vec::new();
+        let mut panes: Vec<Placement> = layout.slots.clone();
+        if let Some(placing) = layout.placing.clone()
+            && !panes.iter().any(|slot| slot.pane == placing)
+        {
+            panes.push(Placement {
+                pane: placing,
+                home: Cell::column(0),
+            });
+        }
+        for slot in panes {
+            let mut pane = slot.pane.clone();
+            let title = Viewer {
+                data: &mut self.data,
+                actions,
+            }
+            .title(&mut pane)
+            .text()
+            .to_owned();
+            let detail = match &slot.pane {
+                Pane::Thread(key) | Pane::Chat(key) | Pane::Activity(key) => {
+                    let host = crate::conversation::destination(&self.data, &key.peer).label;
+                    let (_, run) = pane_heading(&self.data, &slot.pane, &title);
+                    match run {
+                        Some(run) => format!("{host} · {run}"),
+                        None => host,
+                    }
+                }
+                _ => String::new(),
+            };
+            titles.push((slot.pane, title, detail));
+        }
+        let title_of = |pane: &Pane| {
+            titles
+                .iter()
+                .find(|(p, _, _)| p == pane)
+                .map_or_else(|| "Pane".to_owned(), |(_, title, _)| title.clone())
+        };
+
+        let bar = egui::Rect::from_min_size(
+            ui.available_rect_before_wrap().min,
+            egui::vec2(ui.available_width(), 24.),
+        );
+        ui.allocate_rect(bar, egui::Sense::hover());
+        let mut right = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("toolbar-right")
+                .max_rect(bar)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        {
+            let ui = &mut right;
+            ui.spacing_mut().item_spacing.x = 10.;
+            egui::containers::menu::MenuButton::from_button(
+                egui::Button::new(RichText::new("⚙").size(13.)).frame(false),
+            )
+            .ui(ui, |ui| {
+                if ui.button("Settings…").clicked() {
+                    self.data.tool_approvals.open();
+                    ui.close();
+                }
+                if ui.button("Live pulse").clicked() {
+                    self.grid_mut().open(Pane::LivePulse, true);
+                    ui.close();
+                }
+                ui.menu_button("Receipt key", receipt_key);
+            })
+            .0
+            .on_hover_text("Settings, Live pulse and the receipt key");
+            ui.label(
+                RichText::new(format!("grid {columns} × 2"))
+                    .monospace()
+                    .size(10.5)
+                    .weak(),
+            );
+            crate::needs::toolbar(ui, &self.data, actions);
+            if has_holes && !visible.is_empty() && !quiet {
+                let count = holes_now.len();
+                let chip = egui::Button::new(
+                    RichText::new(format!(
+                        "◇ Tidy · {count} {}",
+                        if count == 1 { "hole" } else { "holes" }
+                    ))
+                    .monospace()
+                    .size(10.5)
+                    .color(crate::console_style::WARN),
+                )
+                .fill(egui::Color32::from_rgb(34, 27, 14))
+                .stroke(egui::Stroke::new(1., egui::Color32::from_rgb(90, 67, 24)));
+                egui::containers::menu::MenuButton::from_button(chip).ui(ui, |ui| {
+                    ui.set_width(300.);
+                    ui.strong("Tidy layout");
+                    ui.weak("Suggestions only; nothing changes until you pick one.");
+                    ui.separator();
+                    for (name, even) in [("Fill holes", false), ("Even grid", true)] {
+                        let plan = self.grid().tidy(even);
+                        let summary = plan.as_ref().map(|plan| {
+                            describe_plan(&self.grid().slots, plan, columns, &title_of)
+                        });
+                        let response = ui.add_enabled(plan.is_some(), egui::Button::new(name));
+                        ui.weak(summary.clone().unwrap_or_else(|| {
+                            if even {
+                                "Already even".into()
+                            } else {
+                                "No pane can grow into the holes".into()
+                            }
+                        }));
+                        ui.add_space(4.);
+                        if let Some(plan) = plan {
+                            if response.clicked() {
+                                self.grid_mut().slots = plan;
+                                ui.close();
+                            } else if response.hovered() {
+                                tidy_preview = Some(plan);
+                            }
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Dismiss")
+                        .on_hover_text("The holes stay and Tidy stays quiet until they change")
+                        .clicked()
+                    {
+                        self.grid_mut().tidy_quiet = Some(holes_now.clone());
+                        ui.close();
+                    }
+                });
+            }
+            if !parked.is_empty() {
+                let chip = egui::Button::new(
+                    RichText::new(format!("Parked ({})", parked.len()))
+                        .monospace()
+                        .size(10.5),
+                );
+                egui::containers::menu::MenuButton::from_button(chip).ui(ui, |ui| {
+                    ui.set_min_width(260.);
+                    for slot in &parked {
+                        let pane = slot.pane.clone();
+                        let (title, detail) = titles
+                            .iter()
+                            .find(|(p, _, _)| *p == pane)
+                            .map(|(_, t, d)| (t.clone(), d.clone()))
+                            .unwrap_or_default();
+                        ui.add(egui::Label::new(RichText::new(&title).strong()).truncate())
+                            .on_hover_text(&title);
+                        ui.weak(if detail.is_empty() {
+                            format!("home column {}", slot.home.column + 1)
+                        } else {
+                            format!("{detail} · home column {}", slot.home.column + 1)
+                        });
+                        ui.horizontal(|ui| {
+                            let layout = self.grid_mut();
+                            if ui.small_button("Peek").clicked() {
+                                layout.open(pane.clone(), false);
+                                ui.close();
+                            }
+                            if ui.small_button("Place on grid…").clicked() {
+                                layout.open(pane.clone(), true);
+                                ui.close();
+                            }
+                        });
+                        ui.add_space(4.);
+                    }
+                });
+            }
+        }
+        let left_rect = egui::Rect::from_min_max(
+            bar.min,
+            egui::pos2(
+                (right.min_rect().left() - 12.).max(bar.left()),
+                bar.bottom(),
+            ),
+        );
+        let mut left = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("toolbar-left")
+                .max_rect(left_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        left.set_clip_rect(left_rect.intersect(ui.clip_rect()));
+        {
+            let ui = &mut left;
+            let search_width = (ui.available_width() * 0.45).clamp(60., 240.);
+            let (search, response) =
+                ui.allocate_exact_size(egui::vec2(search_width, 20.), egui::Sense::click());
+            let painter = ui.painter();
+            painter.rect(
+                search,
+                3.,
+                crate::console_style::FIELD,
+                egui::Stroke::new(
+                    1.,
+                    if response.hovered() {
+                        crate::console_style::ACCENT
+                    } else {
+                        crate::console_style::EDGE
+                    },
+                ),
+                egui::StrokeKind::Inside,
+            );
+            let weak = ui.visuals().weak_text_color();
+            painter.with_clip_rect(search.shrink(2.)).text(
+                search.left_center() + egui::vec2(7., 0.),
+                egui::Align2::LEFT_CENTER,
+                "thr: res: host: run: …",
+                egui::FontId::monospace(10.5),
+                weak,
+            );
+            if search_width > 180. {
+                painter.text(
+                    search.right_center() - egui::vec2(7., 0.),
+                    egui::Align2::RIGHT_CENTER,
+                    "⌘K",
+                    egui::FontId::monospace(10.),
+                    weak,
+                );
+            }
+            response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Find…"));
+            if response
+                .on_hover_text("Find threads, residents, hosts and runs · ⌘K")
+                .clicked()
+            {
                 self.open_palette();
             }
+            ui.add_space(12.);
             let coverage = crate::needs::coverage(&self.data);
-            for dest in &self.data.saved.destinations {
+            let destinations = self.data.saved.destinations.clone();
+            for (index, dest) in destinations.iter().enumerate() {
                 let count = coverage.get(dest.key.as_str());
                 let (observed, total) = count.map_or((0, 0), |c| (c.observed, c.total));
                 let down = self.data.errors.contains_key(&dest.key);
                 let catalogued = self.data.catalogs.contains_key(&dest.key);
-                let (label, color) = if down && !catalogued {
-                    (format!("{} down", dest.label), egui::Color32::LIGHT_RED)
-                } else if down {
+                let (label, color, dot) = if down {
                     (
-                        format!("{} 0/{total}", dest.label),
-                        egui::Color32::LIGHT_RED,
+                        format!("{} unreachable", dest.label),
+                        crate::console_style::ERROR,
+                        crate::console_style::ERROR,
                     )
                 } else if !catalogued {
-                    (format!("{} …", dest.label), egui::Color32::GRAY)
+                    (
+                        format!("{} …", dest.label),
+                        egui::Color32::GRAY,
+                        egui::Color32::GRAY,
+                    )
                 } else if observed != total {
                     (
                         format!("{} {observed}/{total}", dest.label),
-                        egui::Color32::from_rgb(216, 162, 58),
+                        crate::console_style::WARN,
+                        crate::console_style::WARN,
                     )
                 } else {
                     (
-                        format!("{} {observed}/{total}", dest.label),
+                        dest.label.clone(),
                         ui.visuals().text_color(),
+                        crate::console_style::OK,
                     )
                 };
-                let dot = if catalogued && !down && observed == total {
-                    crate::console_style::OK
-                } else {
-                    color
-                };
+                let needed = label.chars().count() as f32 * 6.6 + 22.;
+                if ui.available_width() < needed {
+                    let rest = destinations.len() - index;
+                    ui.label(
+                        RichText::new(format!("+{rest}"))
+                            .monospace()
+                            .size(10.5)
+                            .weak(),
+                    )
+                    .on_hover_text(
+                        destinations[index..]
+                            .iter()
+                            .map(|d| d.label.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                    break;
+                }
                 crate::console_style::dot(ui, dot);
                 ui.label(RichText::new(label).monospace().size(10.5).color(color))
                     .on_hover_text(if down {
-                        "Machine unreachable · active total last observed"
-                    } else {
+                        "Machine unreachable"
+                    } else if total > 0 {
                         "Observed active runs / active runs in the latest catalog"
+                    } else {
+                        "Reachable · no active runs"
                     });
+                ui.add_space(8.);
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Settings").clicked() {
-                    self.data.tool_approvals.open();
-                }
-                ui.weak(format!("{columns} × 2"));
-                crate::needs::toolbar(ui, &self.data, actions);
-                ui.menu_button("Receipts", receipt_key);
-                if ui.small_button("Live pulse").clicked() {
-                    self.grid_mut().open(Pane::LivePulse, true);
-                }
-                if has_holes && !visible.is_empty() {
-                    ui.menu_button("Tidy", |ui| {
-                        for (name, even) in [("Fill holes", false), ("Even grid", true)] {
-                            let plan = self.grid().tidy(even);
-                            let response = ui.add_enabled(plan.is_some(), egui::Button::new(name));
-                            if let Some(plan) = plan {
-                                if response.clicked() {
-                                    self.grid_mut().slots = plan;
-                                    ui.close();
-                                } else if response.hovered() {
-                                    tidy_preview = Some(plan);
-                                }
-                            }
-                        }
-                    });
-                }
-
-                if !parked.is_empty() {
-                    ui.menu_button(format!("Parked ({})", parked.len()), |ui| {
-                        for slot in &parked {
-                            let mut pane = slot.pane.clone();
-                            let title = Viewer {
-                                data: &mut self.data,
-                                actions,
-                            }
-                            .title(&mut pane);
-                            ui.label(title);
-                            ui.weak(format!("Home column {}", slot.home.column + 1));
-                            ui.horizontal(|ui| {
-                                let layout = self.grid_mut();
-                                if ui.small_button("Peek").clicked() {
-                                    layout.open(pane.clone(), false);
-                                    ui.close();
-                                }
-                                if ui.small_button("Place on grid…").clicked() {
-                                    layout.open(pane.clone(), true);
-                                    ui.close();
-                                }
-                            });
-                        }
-                    });
-                }
-            });
-        });
+        }
         ui.separator();
 
         let workspace = ui.available_rect_before_wrap();
@@ -553,16 +892,44 @@ impl Desktop {
         );
         sidebar_ui.set_clip_rect(sidebar_rect);
         sidebar_ui.horizontal(|ui| {
-            ui.strong("Watchlist");
-            for (pane, label) in [
-                (Pane::Threads, "Workspace"),
-                (Pane::Agents, "Agents"),
-                (Pane::Correspondence, "Mail"),
-            ] {
-                if ui.selectable_label(sidebar == pane, label).clicked() {
-                    sidebar = pane;
+            if sidebar == Pane::Threads {
+                ui.strong("Watchlist");
+            } else {
+                if ui.small_button("← Watchlist").clicked() {
+                    sidebar = Pane::Threads;
                 }
+                ui.strong(match sidebar {
+                    Pane::Agents => "Agents",
+                    Pane::Correspondence => "Mail",
+                    _ => "",
+                });
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                egui::containers::menu::MenuButton::from_button(
+                    egui::Button::new("···").frame(false),
+                )
+                .ui(ui, |ui| {
+                    for (pane, label) in [
+                        (Pane::Threads, "Watchlist"),
+                        (Pane::Agents, "Agents and definitions"),
+                        (Pane::Correspondence, "Mail"),
+                    ] {
+                        if ui.selectable_label(sidebar == pane, label).clicked() {
+                            sidebar = pane;
+                            ui.close();
+                        }
+                    }
+                })
+                .0
+                .on_hover_text("Sidebar views");
+                if ui
+                    .add(egui::Button::new("+").frame(false))
+                    .on_hover_text("New thread")
+                    .clicked()
+                {
+                    actions.push(Action::NewConversation);
+                }
+            });
         });
         sidebar_ui.separator();
         self.grid_mut().sidebar = sidebar.clone();
@@ -582,8 +949,30 @@ impl Desktop {
                     .max_rect(bounds.shrink(6.)),
             );
             empty.set_clip_rect(bounds);
-            empty.add_space((bounds.height() / 2. - 26.).max(0.));
+            empty.add_space((bounds.height() / 2. - 34.).max(0.));
+            let closed = self
+                .grid()
+                .closed
+                .iter()
+                .rev()
+                .find(|(cell, _, _)| cell.overlaps(hole))
+                .cloned();
             empty.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "empty · col {}{}",
+                        hole.column + 1,
+                        if hole.height == 1 {
+                            if hole.row == 0 { " top" } else { " bottom" }
+                        } else {
+                            ""
+                        }
+                    ))
+                    .monospace()
+                    .size(10.5)
+                    .weak(),
+                );
+                ui.add_space(4.);
                 if ui.small_button("+ Open here").clicked() {
                     self.open_palette();
                     self.grid_mut().open_here = Some(hole);
@@ -593,6 +982,19 @@ impl Desktop {
                     && ui.small_button("Expand neighbor").clicked()
                 {
                     layout.install(pane, expanded);
+                }
+                if let Some((_, title, at)) = &closed {
+                    ui.add_space(4.);
+                    let short: String = title.chars().take(32).collect();
+                    ui.label(
+                        RichText::new(format!(
+                            "closed {short} · {} UTC",
+                            crate::conversation::utc_minute(*at)
+                        ))
+                        .monospace()
+                        .size(10.)
+                        .weak(),
+                    );
                 }
             });
         }
@@ -609,14 +1011,7 @@ impl Desktop {
             ui.painter().rect_stroke(
                 bounds.shrink(0.5),
                 0.,
-                egui::Stroke::new(
-                    1.,
-                    if focus {
-                        ui.visuals().selection.stroke.color
-                    } else {
-                        ui.visuals().widgets.noninteractive.bg_stroke.color
-                    },
-                ),
+                egui::Stroke::new(1., ui.visuals().widgets.noninteractive.bg_stroke.color),
                 egui::StrokeKind::Inside,
             );
             let title_strip =
@@ -649,24 +1044,35 @@ impl Desktop {
                     "{}",
                     slot.home.column + 1 + slot.home.row * columns
                 ));
-                let name = match &slot.pane {
-                    Pane::Thread(key) | Pane::Chat(key) | Pane::Activity(key) => {
-                        let host = crate::conversation::destination(&self.data, &key.peer);
-                        format!("{} / {}", host.label, title.text())
-                    }
-                    _ => title.text().to_owned(),
-                };
+                let (name, run) = pane_heading(&self.data, &slot.pane, title.text());
                 let width = (ui.available_width() - 75.).max(0.);
                 if ui
                     .allocate_ui_with_layout(
                         egui::vec2(width, 20.),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            ui.add(
-                                egui::Label::new(RichText::new(name).monospace().size(10.5))
-                                    .truncate()
-                                    .sense(egui::Sense::click()),
-                            )
+                            let run_width = run
+                                .as_ref()
+                                .map_or(0., |run| run.chars().count() as f32 * 6.6 + 12.);
+                            let response = ui
+                                .allocate_ui_with_layout(
+                                    egui::vec2((width - run_width).max(20.), 20.),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(name).monospace().size(10.5),
+                                            )
+                                            .truncate()
+                                            .sense(egui::Sense::click()),
+                                        )
+                                    },
+                                )
+                                .inner;
+                            if let Some(run) = run {
+                                ui.label(RichText::new(run).monospace().size(10.5).weak());
+                            }
+                            response
                         },
                     )
                     .inner
@@ -682,23 +1088,59 @@ impl Desktop {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     close = ui.small_button("×").on_hover_text("Close pane").clicked();
+                    let pane = slot.pane.clone();
                     ui.menu_button(format!("{}×{}", slot.home.width, slot.home.height), |ui| {
-                        let layout = self.grid_mut();
+                        ui.set_min_width(240.);
+                        ui.weak("Span · neighbors keep what is left");
                         for span in 1..=columns - slot.home.column {
                             for rows in 1..=2 - slot.home.row {
+                                if span == slot.home.width && rows == slot.home.height {
+                                    continue;
+                                }
                                 let candidate = Cell {
                                     width: span,
                                     height: rows,
                                     ..slot.home
                                 };
-                                if ui
-                                    .add_enabled(
-                                        layout.free(candidate, &slot.pane),
-                                        egui::Button::new(format!("{span}×{rows}")),
-                                    )
-                                    .clicked()
-                                {
-                                    layout.span(&slot.pane, span, rows);
+                                let free = self.grid().free(candidate, &pane);
+                                let plan = if free {
+                                    Some(Vec::new())
+                                } else {
+                                    self.grid().span_plan(&pane, span, rows)
+                                };
+                                let effect = match &plan {
+                                    Some(changes)
+                                        if changes.is_empty()
+                                            && span * rows < slot.home.width * slot.home.height =>
+                                    {
+                                        "leaves a hole".to_owned()
+                                    }
+                                    Some(changes) if changes.is_empty() => {
+                                        "into empty cells".to_owned()
+                                    }
+                                    Some(changes) => changes
+                                        .iter()
+                                        .map(|(other, cell)| {
+                                            format!(
+                                                "{} → {}×{}",
+                                                title_of(other)
+                                                    .chars()
+                                                    .take(18)
+                                                    .collect::<String>(),
+                                                cell.width,
+                                                cell.height
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                                    None => "a neighbor would have no room".to_owned(),
+                                };
+                                let response = ui.add_enabled(
+                                    plan.is_some(),
+                                    egui::Button::new(format!("{span}×{rows}  ·  {effect}")),
+                                );
+                                if response.clicked() {
+                                    self.grid_mut().span_displacing(&pane, span, rows);
                                     ui.close();
                                 }
                             }
@@ -707,7 +1149,8 @@ impl Desktop {
                 });
             });
             if close {
-                self.grid_mut().close(&slot.pane);
+                let title = title_of(&slot.pane);
+                self.grid_mut().close_titled(&slot.pane, title);
             } else {
                 pane_ui.separator();
                 Viewer {
@@ -719,12 +1162,40 @@ impl Desktop {
         }
 
         if let Some(plan) = tidy_preview {
+            let current = self.grid().slots.clone();
             for slot in plan.iter().filter(|slot| slot.home.fits(columns)) {
-                ui.painter().rect_stroke(
-                    rect(slot.home).shrink(3.),
-                    0.,
-                    egui::Stroke::new(2., ui.visuals().selection.stroke.color),
+                let before = current.iter().find(|c| c.pane == slot.pane).map(|c| c.home);
+                if before == Some(slot.home) {
+                    continue;
+                }
+                let area = rect(slot.home).shrink(3.);
+                crate::console_style::dashed_rect(ui, area, crate::console_style::ACCENT);
+                let label = format!(
+                    "preview · {} → {}×{}",
+                    title_of(&slot.pane).chars().take(26).collect::<String>(),
+                    slot.home.width,
+                    slot.home.height
+                );
+                let galley = ui.painter().layout_no_wrap(
+                    label,
+                    egui::FontId::monospace(10.5),
+                    crate::console_style::ACCENT,
+                );
+                let tag = egui::Rect::from_center_size(
+                    egui::pos2(area.center().x, area.top() + 40.),
+                    galley.size() + egui::vec2(16., 8.),
+                );
+                ui.painter().rect(
+                    tag,
+                    3.,
+                    crate::console_style::PANEL,
+                    egui::Stroke::new(1., crate::console_style::ACCENT),
                     egui::StrokeKind::Inside,
+                );
+                ui.painter().galley(
+                    tag.center() - galley.size() / 2.,
+                    galley,
+                    crate::console_style::ACCENT,
                 );
             }
         }
@@ -773,7 +1244,9 @@ impl Desktop {
                     }
                 }
             }
+            let placing_title = placing.as_ref().map(&title_of).unwrap_or_default();
             for (column, row, region) in choices {
+                let consequence = layout_consequence(self.grid(), column, row, replace);
                 let target = rect(Cell {
                     column,
                     row,
@@ -786,32 +1259,93 @@ impl Desktop {
                     egui::Id::new(("grid-snap", column)),
                     egui::Sense::click(),
                 );
-                ui.painter().rect_filled(
-                    target,
-                    0.,
-                    egui::Color32::from_rgba_unmultiplied(76, 158, 255, 40),
-                );
-                if response.hovered() {
-                    ui.painter().rect_filled(
-                        rect(region).shrink(2.),
-                        0.,
-                        egui::Color32::from_rgba_unmultiplied(76, 158, 255, 53),
+                let fill = if response.hovered() {
+                    egui::Color32::from_rgb(22, 34, 52)
+                } else {
+                    egui::Color32::from_rgb(15, 20, 28)
+                };
+                ui.painter().rect_filled(target, 0., fill);
+                if response.hovered()
+                    && region
+                        != (Cell {
+                            column,
+                            row,
+                            width: 1,
+                            height: 1,
+                        })
+                {
+                    crate::console_style::dashed_rect(
+                        ui,
+                        rect(region).shrink(3.),
+                        crate::console_style::ACCENT,
                     );
                 }
+                crate::console_style::dashed_rect(ui, target, crate::console_style::ACCENT);
+                let chip = egui::Rect::from_center_size(
+                    target.center() - egui::vec2(0., 30.),
+                    egui::vec2(24., 24.),
+                );
+                ui.painter().rect(
+                    chip,
+                    3.,
+                    if response.hovered() {
+                        crate::console_style::ACCENT
+                    } else {
+                        crate::console_style::FIELD
+                    },
+                    egui::Stroke::new(1., crate::console_style::ACCENT),
+                    egui::StrokeKind::Inside,
+                );
                 ui.painter().text(
-                    target.center(),
+                    chip.center(),
                     egui::Align2::CENTER_CENTER,
-                    format!(
-                        "{} {}",
-                        if replace {
-                            "Replace in column"
-                        } else {
-                            "Place in column"
-                        },
-                        column + 1
-                    ),
-                    egui::FontId::proportional(13.),
+                    format!("{}", column + 1),
+                    egui::FontId::monospace(12.),
+                    if response.hovered() {
+                        egui::Color32::WHITE
+                    } else {
+                        crate::console_style::ACCENT
+                    },
+                );
+                let heading = match (replace, region.height, row) {
+                    (true, _, _) => format!("Replace in col {}", column + 1),
+                    (false, 2, _) => format!("Column {}", column + 1),
+                    (false, _, 0) => format!("Top of col {}", column + 1),
+                    _ => format!("Bottom of col {}", column + 1),
+                };
+                ui.painter().text(
+                    target.center() + egui::vec2(0., 2.),
+                    egui::Align2::CENTER_CENTER,
+                    heading,
+                    egui::FontId::proportional(12.5),
                     ui.visuals().text_color(),
+                );
+                let effect = match &consequence {
+                    Some(Some((pane, Some(cell)))) => format!(
+                        "{} → {} {}×{}",
+                        title_of(pane).chars().take(24).collect::<String>(),
+                        if cell.height == 2 {
+                            "full".to_owned()
+                        } else if cell.row == 0 {
+                            "top".to_owned()
+                        } else {
+                            "bottom".to_owned()
+                        },
+                        cell.width,
+                        cell.height
+                    ),
+                    Some(Some((pane, None))) => format!(
+                        "{} closes",
+                        title_of(pane).chars().take(24).collect::<String>()
+                    ),
+                    _ => "empty cell · nothing moves".into(),
+                };
+                ui.painter().text(
+                    target.center() + egui::vec2(0., 20.),
+                    egui::Align2::CENTER_CENTER,
+                    effect,
+                    egui::FontId::monospace(10.),
+                    ui.visuals().weak_text_color(),
                 );
                 let key = [
                     egui::Key::Num1,
@@ -837,6 +1371,34 @@ impl Desktop {
                     self.grid_mut().snap(column, row, replace);
                 }
             }
+            let hint = format!(
+                "Place {}   1–{} {}   ⇧1–{} replace   Space peek   Esc cancel",
+                placing_title.chars().take(28).collect::<String>(),
+                columns.min(4),
+                if replace { "replace" } else { "choose" },
+                columns.min(4),
+            );
+            let galley = ui.painter().layout_no_wrap(
+                hint,
+                egui::FontId::monospace(10.5),
+                ui.visuals().text_color(),
+            );
+            let bar = egui::Rect::from_center_size(
+                egui::pos2(board.center().x, board.bottom() - 34.),
+                galley.size() + egui::vec2(24., 12.),
+            );
+            ui.painter().rect(
+                bar,
+                4.,
+                crate::console_style::PANEL,
+                egui::Stroke::new(1., crate::console_style::ACCENT),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().galley(
+                bar.center() - galley.size() / 2.,
+                galley,
+                ui.visuals().text_color(),
+            );
             if ui
                 .ctx()
                 .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
@@ -862,22 +1424,45 @@ impl Desktop {
             }
             .title(&mut pane);
             let mut open = true;
-            egui::Window::new(title.text())
+            let (heading, run) = pane_heading(&self.data, &pane, title.text());
+            let heading = match run {
+                Some(run) => format!("{heading}  {run}"),
+                None => heading,
+            };
+            let size = egui::vec2(
+                (board.width() * 0.55).clamp(380., 620.),
+                (board.height() * 0.72).max(300.),
+            );
+            egui::Window::new(RichText::new(heading).monospace().size(10.5))
                 .id(egui::Id::new(("peek", id)))
-                .default_pos(board.min + egui::vec2(8., 12.))
-                .default_size([440., 360.])
-                .max_height(board.height() * 0.85)
+                .fixed_pos(board.min + egui::vec2(8., 8.))
+                .fixed_size(size)
                 .collapsible(false)
+                .resizable(false)
                 .open(&mut open)
                 .show(ui.ctx(), |ui| {
-                    if ui.small_button("Open on grid").clicked() {
-                        self.grid_mut().open(pane.clone(), true);
-                    }
-                    Viewer {
-                        data: &mut self.data,
-                        actions,
-                    }
-                    .ui(ui, &mut pane);
+                    let footer = 26.;
+                    let body = egui::vec2(ui.available_width(), (size.y - footer).max(120.));
+                    ui.allocate_ui(body, |ui| {
+                        ui.set_min_size(body);
+                        Viewer {
+                            data: &mut self.data,
+                            actions,
+                        }
+                        .ui(ui, &mut pane);
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Open on grid ↗").clicked() {
+                            self.grid_mut().open(pane.clone(), true);
+                        }
+                        ui.label(
+                            RichText::new("Esc closes · the grid is not changed")
+                                .monospace()
+                                .size(10.)
+                                .weak(),
+                        );
+                    });
                 });
             if !open
                 || (placing.is_none()
@@ -1019,6 +1604,68 @@ fn receipt_key(ui: &mut egui::Ui) {
         });
 }
 
+fn layout_consequence(
+    grid: &Grid,
+    column: usize,
+    row: usize,
+    replace: bool,
+) -> Option<Option<(Pane, Option<Cell>)>> {
+    grid.snap_consequence(column, row, replace)
+}
+
+fn describe_plan(
+    current: &[Placement],
+    plan: &[Placement],
+    columns: usize,
+    title_of: &dyn Fn(&Pane) -> String,
+) -> String {
+    let changes: Vec<String> = plan
+        .iter()
+        .filter(|slot| slot.home.fits(columns))
+        .filter_map(|slot| {
+            let before = current.iter().find(|c| c.pane == slot.pane)?.home;
+            (before != slot.home).then(|| {
+                let size = format!("{}×{}", slot.home.width, slot.home.height);
+                let title = title_of(&slot.pane);
+                let short: String = title.chars().take(22).collect();
+                if before.width != slot.home.width || before.height != slot.home.height {
+                    if before.column == slot.home.column && before.row == slot.home.row {
+                        format!("{short} grows to {size}")
+                    } else {
+                        format!("{short} → col {} · {size}", slot.home.column + 1)
+                    }
+                } else {
+                    format!("{short} → col {}", slot.home.column + 1)
+                }
+            })
+        })
+        .collect();
+    changes.join("; ")
+}
+
+/// `THIS MACHINE · LOCAL DEV ENVIRONMENT` plus `run 42` / `act 14`.
+pub fn pane_heading(data: &crate::Data, pane: &Pane, title: &str) -> (String, Option<String>) {
+    match pane {
+        Pane::Thread(key) => {
+            let host = crate::conversation::destination(data, &key.peer);
+            let runs = crate::find_thread(data, key).map_or(0, |t| t.runs.len());
+            (
+                format!("{} · {}", host.label, title).to_uppercase(),
+                (runs > 0).then(|| format!("run {runs}")),
+            )
+        }
+        Pane::Chat(key) | Pane::Activity(key) => {
+            let host = crate::conversation::destination(data, &key.peer);
+            let acts = data.agents.history(key).map_or(0, |runs| runs.len());
+            (
+                format!("{} · {}", host.label, title).to_uppercase(),
+                (acts > 0).then(|| format!("act {acts}")),
+            )
+        }
+        _ => (title.to_uppercase(), None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1128,6 +1775,65 @@ mod tests {
     }
 
     #[test]
+    fn fill_holes_grows_a_neighbor_and_span_keeps_neighbors_rectangular() {
+        let mut grid = Grid {
+            columns: 2,
+            ..Default::default()
+        };
+        grid.open(pane("left"), true);
+        grid.open(pane("right"), true);
+        grid.span(&pane("left"), 1, 1);
+        assert_eq!(grid.holes().len(), 1);
+        let plan = grid.tidy(false).expect("fill holes has a plan");
+        let left = plan.iter().find(|slot| slot.pane == pane("left")).unwrap();
+        assert_eq!((left.home.width, left.home.height), (1, 2));
+
+        let mut grid = Grid {
+            columns: 3,
+            ..Default::default()
+        };
+        for name in ["a", "b", "c"] {
+            grid.open(pane(name), true);
+        }
+        let plan = grid
+            .span_plan(&pane("a"), 2, 1)
+            .expect("b keeps its bottom half");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(
+            plan[0].1,
+            Cell {
+                column: 1,
+                row: 1,
+                width: 1,
+                height: 1
+            }
+        );
+        assert!(
+            grid.span_plan(&pane("a"), 2, 2).is_none(),
+            "b would have nothing left"
+        );
+        grid.span_displacing(&pane("a"), 2, 1);
+        assert_eq!(
+            grid.slots[0].home,
+            Cell {
+                column: 0,
+                row: 0,
+                width: 2,
+                height: 1
+            }
+        );
+        assert_eq!(
+            grid.slots[1].home,
+            Cell {
+                column: 1,
+                row: 1,
+                width: 1,
+                height: 1
+            }
+        );
+    }
+
+    #[test]
     fn width_round_trip_parks_only_the_fourth_column() {
         let mut grid = Grid {
             columns: Grid::columns_for(2040.),
@@ -1174,7 +1880,10 @@ mod tests {
             assert_eq!(desktop.grid().columns, columns);
             assert_eq!(visible_text("Parked (1)"), shown == 3);
             for (index, name) in names.iter().enumerate() {
-                assert_eq!(visible_text(&format!("Machine / {name}")), index < shown);
+                assert_eq!(
+                    visible_text(&format!("MACHINE · {}", name.to_uppercase())),
+                    index < shown
+                );
             }
             assert_eq!(
                 desktop

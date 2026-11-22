@@ -1385,28 +1385,50 @@ fn thread_rows(
     ui: &mut egui::Ui,
     data: &Data,
     actions: &mut Vec<Action>,
-    dest: &Destination,
+    destinations: &[Destination],
     query: &str,
 ) {
-    if let Some(error) = data.errors.get(&dest.key) {
-        ui.colored_label(egui::Color32::LIGHT_RED, format!("Unreachable · {error}"));
+    let mut threads: Vec<(&Destination, &Conversation)> = Vec::new();
+    for dest in destinations {
+        if let Some(error) = data.errors.get(&dest.key) {
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                format!("{} unreachable · {error}", dest.label),
+            );
+        }
+        match data.catalogs.get(&dest.key) {
+            Some(list) => threads.extend(list.iter().map(|thread| (dest, thread))),
+            None => {
+                ui.weak(if dest.address.is_empty() && dest.key != data.local_key {
+                    format!(
+                        "{}: an address is needed in Commands → Machine connections.",
+                        dest.label
+                    )
+                } else {
+                    format!("Connecting to {}…", dest.label)
+                });
+            }
+        }
     }
-    let Some(threads) = data.catalogs.get(&dest.key) else {
-        ui.weak(if dest.address.is_empty() && dest.key != data.local_key {
-            "An address is needed in Commands → Machine connections."
-        } else {
-            "Connecting…"
-        });
-        return;
-    };
+    // Most recently accepted work first, across machines.
+    threads.sort_by_key(|(_, thread)| {
+        std::cmp::Reverse(
+            thread
+                .runs
+                .iter()
+                .filter_map(|run| run["record"]["created_at"].as_u64())
+                .max()
+                .unwrap_or(0),
+        )
+    });
     if threads.is_empty() {
-        ui.weak("No anonymous threads on this machine.");
+        ui.weak("No anonymous threads.");
         return;
     }
     let mut matches = false;
-    for thread in threads
-        .iter()
-        .filter(|t| t.title.to_lowercase().contains(query))
+    for (dest, thread) in threads
+        .into_iter()
+        .filter(|(_, t)| t.title.to_lowercase().contains(query))
     {
         matches = true;
         let selected = data.selected_thread.as_ref() == Some(&thread.key);
@@ -1439,14 +1461,19 @@ fn thread_rows(
             "failed" | "interrupted" => egui::Color32::from_rgb(239, 91, 80),
             _ => ui.visuals().weak_text_color(),
         };
-        let last = if state == "unseen" { "offline" } else { observed.map_or("—", |event| event.label) };
+        let last = if state == "unseen" { "offline" } else { observed.as_ref().map_or("—", |event| event.label) };
+        let age = observed
+            .as_ref()
+            .map(|event| crate::pulse::age(event.at))
+            .or_else(|| watchlist::accepted_age(&thread.runs).map(|age| format!("~{age}")))
+            .unwrap_or_else(|| "—".into());
         let response = ui.push_id((&thread.key.peer, &thread.key.id), |ui| {
             watchlist::Row {
                 title: &thread.title,
                 state: &status,
                 color,
                 last,
-                age: &watchlist::event_age(observed),
+                age: &age,
                 selected,
                 muted: state == "unseen",
                 context: Some((&thread.key, &thread.runs)),
@@ -1615,9 +1642,6 @@ impl TabViewer for Viewer<'_> {
             }
             Pane::LegacyNewConversation => unreachable!("removed while loading the workspace"),
             Pane::Threads => {
-                if ui.button("New Thread").clicked() {
-                    self.actions.push(Action::NewConversation);
-                }
                 ui.horizontal(|ui| {
                     let search_width =
                         (ui.available_width() - 28. - ui.spacing().item_spacing.x).max(24.);
@@ -1731,19 +1755,8 @@ impl TabViewer for Viewer<'_> {
                             });
                         }
                         ui.label(RichText::new("THREADS").monospace().small().weak());
-                        let grouped = destinations.len() > 1;
-                        for dest in &destinations {
-                            if grouped {
-                                egui::CollapsingHeader::new(&dest.label)
-                                    .id_salt(("thread-machine", &dest.key))
-                                    .default_open(true)
-                                    .show(ui, |ui| {
-                                        thread_rows(ui, self.data, self.actions, dest, &query);
-                                    });
-                            } else {
-                                thread_rows(ui, self.data, self.actions, dest, &query);
-                            }
-                        }
+                        // One flat list; the inspector names the machine.
+                        thread_rows(ui, self.data, self.actions, &destinations, &query);
                         agents::watchlist(ui, self.data, &destinations, &query, self.actions);
                     });
                 if let Some(key) = &self.data.selected_thread {

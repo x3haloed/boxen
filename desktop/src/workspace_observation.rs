@@ -13,7 +13,8 @@ pub struct ExchangeUsage {
 
 impl ExchangeUsage {
     pub fn label(self) -> String {
-        let amount = |value: Option<u64>| value.map_or("unknown".into(), |value| value.to_string());
+        let amount =
+            |value: Option<u64>| value.map_or("unknown".into(), crate::model::token_amount);
         format!("in {} · out {}", amount(self.input), amount(self.output))
     }
 

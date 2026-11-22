@@ -519,7 +519,7 @@ fn watch_resident(
     let last = if offline {
         "offline"
     } else {
-        event.map_or("—", |event| event.label)
+        event.as_ref().map_or("—", |event| event.label)
     };
     let text = if offline {
         "unseen".into()
@@ -544,7 +544,11 @@ fn watch_resident(
                 state: &text,
                 color,
                 last,
-                age: &crate::watchlist::event_age(event),
+                age: &event
+                    .as_ref()
+                    .map(|event| crate::pulse::age(event.at))
+                    .or_else(|| crate::watchlist::accepted_age(runs).map(|age| format!("~{age}")))
+                    .unwrap_or_else(|| "—".into()),
                 selected: data.selected_thread.as_ref() == Some(&key),
                 muted: offline,
                 context: Some((&key, runs)),

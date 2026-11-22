@@ -127,9 +127,9 @@ impl AnswerReceipt {
         match self.state {
             AnswerState::Sending => "Sending answer…".into(),
             AnswerState::Queued | AnswerState::Writing if self.yours => {
-                "◌ your answer queued".into()
+                "○ your answer queued".into()
             }
-            AnswerState::Queued | AnswerState::Writing => "◌ answer queued".into(),
+            AnswerState::Queued | AnswerState::Writing => "○ answer queued".into(),
             AnswerState::Written if self.yours => "✓ your answer written".into(),
             AnswerState::Written => {
                 format!(
@@ -226,7 +226,7 @@ fn context_percent(tokens: u64, window: u64) -> u128 {
     u128::from(tokens) * 100 / u128::from(window)
 }
 
-fn token_amount(tokens: u64) -> String {
+pub fn token_amount(tokens: u64) -> String {
     for (scale, suffix) in [(1_000_000, "M"), (1_000, "k")] {
         if tokens >= scale {
             let value = tokens as f64 / scale as f64;
@@ -279,6 +279,8 @@ pub struct Transcript {
     pub completed_at: Option<u64>,
     pub hold: Option<Value>,
     pub latest_visible: Option<(u64, crate::pulse::Visible)>,
+    /// The latest visible event other than a run status change.
+    pub latest_activity: Option<crate::pulse::Visible>,
     pub rows: Vec<Row>,
     pub rejected_updates: BTreeMap<String, (String, bool)>,
     pub queued_updates: HashSet<String>,
@@ -791,6 +793,12 @@ impl Transcript {
             _ => {}
         }
         if let Some(observed) = crate::pulse::visible(event) {
+            if !matches!(
+                observed.label,
+                "completed" | "interrupted" | "cancelled" | "failed"
+            ) {
+                self.latest_activity = Some(observed.clone());
+            }
             self.latest_visible = Some((seq, observed));
         }
         self.seq = seq;

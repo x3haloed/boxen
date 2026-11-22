@@ -61,10 +61,15 @@ impl View {
             .insert(id.into(), (layout, bounds.translate(-origin.to_vec2())));
     }
 }
-pub fn header(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey) -> bool {
+pub fn header(
+    ui: &mut egui::Ui,
+    data: &mut Data,
+    key: &ThreadKey,
+    extra: impl FnOnce(&mut egui::Ui, &mut Data, bool),
+) -> bool {
     let mut activity = data.saved.activity_views.contains(key);
     ui.horizontal(|ui| {
-        for (label, target) in [("Messages", false), ("Activity", true)] {
+        for (label, target) in [("Mail", false), ("Activity", true)] {
             if ui.selectable_label(activity == target, label).clicked() && activity != target {
                 let anchor = data
                     .views
@@ -77,6 +82,7 @@ pub fn header(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey) -> bool {
                 activity = target;
             }
         }
+        extra(ui, data, activity);
     });
     ui.separator();
     activity
@@ -155,21 +161,7 @@ pub fn reserve(text: &str, files: &[FileRef], extra: usize, width: f32) -> f32 {
         + (extra * 22) as f32
 }
 
-pub fn route_hint(ui: &mut egui::Ui, hint: &str) {
-    let font = egui::FontId::monospace(10.5);
-    let height = ui.fonts_mut(|fonts| fonts.row_height(&font));
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), height),
-        egui::Layout::right_to_left(egui::Align::Center),
-        |ui| {
-            ui.add(
-                egui::Label::new(RichText::new(hint).font(font).weak())
-                    .halign(egui::Align::Min)
-                    .truncate(),
-            );
-        },
-    );
-}
+const ACCENT_HINT: egui::Color32 = crate::console_style::ACCENT;
 
 pub struct Composition {
     pub send: bool,
@@ -180,6 +172,9 @@ pub struct Composer<'a> {
     pub files: &'a mut Vec<FileRef>,
     pub target: Target,
     pub label: &'a str,
+    /// Route hint shown inside the composer; clicking it sends.
+    pub hint: Option<String>,
+    pub placeholder: String,
     pub limit: usize,
     pub blocked: bool,
 }
@@ -220,6 +215,8 @@ pub fn composer(
         files,
         target,
         label,
+        hint,
+        placeholder,
         limit,
         blocked,
     } = composer;
@@ -235,18 +232,23 @@ pub fn composer(
             let attach = ui
                 .add_enabled(
                     !working && files.len() < attachments::MAX_FILES,
-                    egui::Button::new(if working { "Preparing…" } else { "Attach" }),
+                    egui::Button::new(if working { "…" } else { "+" }).frame(false),
                 )
-                .on_hover_text("Choose files or drop files onto the composer")
+                .on_hover_text("Attach files · or drop files onto the composer")
                 .clicked();
-            let font = egui::TextStyle::Button.resolve(ui.style());
+            let send_text = match &hint {
+                Some(hint) => format!("{hint} ↵"),
+                None => format!("{label} ↵"),
+            };
+            let send_font = egui::FontId::monospace(10.5);
             let send_width = ui.fonts_mut(|f| {
-                f.layout_no_wrap(label.into(), font, egui::Color32::WHITE)
+                f.layout_no_wrap(send_text.clone(), send_font.clone(), egui::Color32::WHITE)
                     .size()
                     .x
             }) + ui.spacing().button_padding.x * 2.
-                + ui.spacing().item_spacing.x;
-            let width = (ui.available_width() - send_width).max(40.);
+                + 4.;
+            let send_width = send_width.min(ui.available_width() * 0.6);
+            let width = (ui.available_width() - send_width - ui.spacing().item_spacing.x).max(40.);
             let editor = ui
                 .allocate_ui_with_layout(
                     egui::vec2(width, 0.),
@@ -265,7 +267,8 @@ pub fn composer(
                                             egui::Modifiers::SHIFT,
                                             egui::Key::Enter,
                                         ))
-                                        .hint_text("Message…")
+                                        .hint_text(placeholder.as_str())
+                                        .frame(egui::Frame::NONE)
                                         .desired_rows(1)
                                         .desired_width(f32::INFINITY),
                                 )
@@ -279,8 +282,23 @@ pub fn composer(
                 && (!text.trim().is_empty() || !files.is_empty())
                 && text.len() <= limit;
             let click = ui
-                .add_enabled(valid, egui::Button::new(label))
-                .on_hover_text("Enter to send · Shift+Enter for a new line")
+                .add_enabled_ui(valid, |ui| {
+                    ui.add_sized(
+                        egui::vec2(send_width, 18.),
+                        egui::Button::new(RichText::new(&send_text).font(send_font).color(
+                            if valid {
+                                ACCENT_HINT
+                            } else {
+                                ui.visuals().weak_text_color()
+                            },
+                        ))
+                        .frame(false)
+                        .truncate(),
+                    )
+                })
+                .inner
+                .on_hover_text(format!("{label} · Enter sends · Shift+Enter adds a line"))
+                .on_disabled_hover_text(send_text.clone())
                 .clicked();
             attachments::add_files(
                 ui,
@@ -514,15 +532,76 @@ pub fn message_row(
     .response
 }
 
-pub fn run_divider(ui: &mut egui::Ui, run: &Value, label: &str) {
-    ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        journal_time(ui, run["record"]["created_at"].as_u64());
-        ui.label(RichText::new(label).monospace().size(10.5).strong());
-        if let Some(status) = run["status"].as_str() {
-            ui.label(RichText::new(status).monospace().size(10.5).weak());
+pub fn span(ms: u64) -> String {
+    let seconds = ms / 1000;
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m{:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60),
+    }
+}
+
+/// `── run 40 · 14:02:11 · 6m48s · ok`. `end` is the last observed event of
+/// a settled run; the daemon snapshot carries no settlement time.
+pub fn run_divider(
+    ui: &mut egui::Ui,
+    run: &Value,
+    number: usize,
+    end: Option<u64>,
+    detail: Option<&str>,
+    machine: Option<&str>,
+) {
+    let created = run["record"]["created_at"].as_u64();
+    let status = run["status"].as_str().unwrap_or("");
+    let (word, color) = match status {
+        "completed" => ("ok".to_owned(), ui.visuals().weak_text_color()),
+        "starting" | "running" => ("running".to_owned(), console_style::ACCENT),
+        "waiting" | "blocked" => (
+            format!("waiting · {}", detail.unwrap_or("input")),
+            console_style::WARN,
+        ),
+        "failed" | "interrupted" => (status.to_owned(), console_style::ERROR),
+        other => (other.to_owned(), ui.visuals().weak_text_color()),
+    };
+    let current = matches!(status, "waiting" | "blocked");
+    let mut parts = vec![format!("run {number}")];
+    if let Some(at) = created {
+        let second = at / 1000;
+        parts.push(format!(
+            "{:02}:{:02}:{:02}",
+            (second / 3600) % 24,
+            (second / 60) % 60,
+            second % 60
+        ));
+        let finished = if crate::model::terminal(run) {
+            end
+        } else {
+            Some(crate::pulse::now())
+        };
+        if let Some(finished) = finished.filter(|f| *f >= at) {
+            parts.push(span(finished - at));
         }
+    }
+    parts.push(word);
+    if let Some(machine) = machine {
+        parts.push(machine.to_owned());
+    }
+    ui.add_space(4.);
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(28., 14.), egui::Sense::hover());
+        ui.painter().hline(
+            rect.x_range(),
+            rect.center().y,
+            egui::Stroke::new(1., console_style::EDGE),
+        );
+        let text = parts.join(" · ");
+        let _ = current;
+        ui.add(
+            egui::Label::new(RichText::new(text).monospace().size(10.5).color(color)).truncate(),
+        )
+        .on_hover_text("Journal times are UTC");
     });
+    ui.add_space(2.);
 }
 
 fn markdown(ui: &mut egui::Ui, text: &str) {
@@ -546,43 +625,182 @@ fn markdown(ui: &mut egui::Ui, text: &str) {
             );
             continue;
         }
-        if let Some((title, url, rest)) = line
-            .strip_prefix('[')
-            .and_then(|s| s.split_once("]("))
-            .and_then(|(label, s)| s.split_once(')').map(|(url, rest)| (label, url, rest)))
-            && (url.starts_with("https://") || url.starts_with("http://"))
-        {
-            ui.horizontal_wrapped(|ui| {
-                ui.hyperlink_to(title, url);
-                ui.add(egui::Label::new(rest.trim_start()).wrap().selectable(true));
-            });
+        let heading = line.starts_with('#') && line.trim_start_matches('#').starts_with(' ');
+        let line = if heading {
+            line.trim_start_matches('#').trim_start()
         } else {
-            let heading = line.starts_with('#') && line.trim_start_matches('#').starts_with(' ');
-            let line = if heading {
-                line.trim_start_matches('#').trim_start()
-            } else {
-                line
-            };
-            let line = if let Some(rest) = line.strip_prefix("- ") {
-                format!("• {rest}")
-            } else {
-                line.into()
-            };
-            let font = egui::TextStyle::Body.resolve(ui.style());
-            let strong = egui::Color32::from_gray(if ui.visuals().dark_mode { 245 } else { 10 });
-            let mut job = egui::text::LayoutJob::default();
-            for (i, part) in line.split("**").enumerate() {
-                let color = if i % 2 == 1 || heading {
+            line
+        };
+        let line = if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            format!("• {rest}")
+        } else {
+            line.into()
+        };
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let strong = egui::Color32::from_gray(if ui.visuals().dark_mode { 245 } else { 10 });
+        let normal = ui.visuals().text_color();
+        let segments = inline_markdown(&line);
+        let format_for = |style: Inline| {
+            let mut format = egui::TextFormat::simple(
+                if style.code {
+                    egui::FontId::monospace(font.size - 1.)
+                } else {
+                    font.clone()
+                },
+                if style.bold || heading {
                     strong
                 } else {
-                    ui.visuals().text_color()
-                };
-                job.append(part, 0., egui::TextFormat::simple(font.clone(), color));
+                    normal
+                },
+            );
+            format.italics = style.italic;
+            if style.code {
+                format.background = console_style::FIELD;
             }
+            format
+        };
+        // One galley per line keeps wrapping and layout identical to plain
+        // text; links are found by character position when clicked.
+        let mut job = egui::text::LayoutJob::default();
+        let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        let mut chars = 0;
+        for segment in &segments {
+            match segment {
+                Segment::Text(text, style) => {
+                    job.append(text, 0., format_for(*style));
+                    chars += text.chars().count();
+                }
+                Segment::Link(title, url) => {
+                    let mut format = format_for(Inline::default());
+                    format.color = ui.visuals().hyperlink_color;
+                    format.underline = egui::Stroke::new(1., ui.visuals().hyperlink_color);
+                    job.append(title, 0., format);
+                    let count = title.chars().count();
+                    links.push((chars..chars + count, url.clone()));
+                    chars += count;
+                }
+            }
+        }
+        if links.is_empty() {
             ui.add(egui::Label::new(job).wrap().selectable(true));
+        } else {
+            let (pos, galley, response) = egui::Label::new(job)
+                .wrap()
+                .selectable(false)
+                .sense(egui::Sense::click())
+                .layout_in_ui(ui);
+            let link_at = |point: egui::Pos2| {
+                let index = galley.cursor_from_pos(point - pos).index.0;
+                links
+                    .iter()
+                    .find(|(range, _)| range.contains(&index))
+                    .map(|(_, url)| url.clone())
+            };
+            let hovered = response.hover_pos().and_then(link_at);
+            if let Some(url) = &hovered {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                response.clone().on_hover_text(url);
+            }
+            if response.clicked()
+                && let Some(url) = response.interact_pointer_pos().and_then(link_at)
+            {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+            ui.painter().galley(pos, galley, ui.visuals().text_color());
         }
     }
 }
+
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct Inline {
+    bold: bool,
+    italic: bool,
+    code: bool,
+}
+
+#[derive(Debug, PartialEq)]
+enum Segment {
+    Text(String, Inline),
+    Link(String, String),
+}
+
+/// Inline Markdown used by agents: `**bold**`, `*italic*`/`_italic_`,
+/// `` `code` `` and `[title](https://…)`. Anything unmatched stays literal.
+fn inline_markdown(line: &str) -> Vec<Segment> {
+    let mut out: Vec<Segment> = Vec::new();
+    let mut style = Inline::default();
+    let mut buffer = String::new();
+    let flush = |buffer: &mut String, out: &mut Vec<Segment>, style: Inline| {
+        if !buffer.is_empty() {
+            out.push(Segment::Text(std::mem::take(buffer), style));
+        }
+    };
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let rest: String = chars[i..].iter().collect();
+        if c == '`' {
+            if style.code {
+                flush(&mut buffer, &mut out, style);
+                style.code = false;
+                i += 1;
+                continue;
+            }
+            if chars[i + 1..].contains(&'`') {
+                flush(&mut buffer, &mut out, style);
+                style.code = true;
+                i += 1;
+                continue;
+            }
+        } else if style.code {
+            buffer.push(c);
+            i += 1;
+            continue;
+        } else if c == '['
+            && let Some((title, after)) = rest[1..].split_once("](")
+            && !title.contains(']')
+            && let Some((url, _)) = after.split_once(')')
+            && (url.starts_with("https://") || url.starts_with("http://"))
+            && !url.contains(char::is_whitespace)
+        {
+            flush(&mut buffer, &mut out, style);
+            let consumed = 1 + title.chars().count() + 2 + url.chars().count() + 1;
+            out.push(Segment::Link(title.replace(['*', '_'], ""), url.to_owned()));
+            i += consumed;
+            continue;
+        } else if let Some(after) = rest.strip_prefix("**") {
+            let closing = style.bold || after.contains("**");
+            if closing {
+                flush(&mut buffer, &mut out, style);
+                style.bold = !style.bold;
+                i += 2;
+                continue;
+            }
+        } else if c == '*' || c == '_' {
+            let prev = i.checked_sub(1).map(|p| chars[p]);
+            let next = chars.get(i + 1).copied();
+            let opens = !style.italic
+                && next.is_some_and(|n| !n.is_whitespace())
+                && prev.is_none_or(|p| !p.is_alphanumeric())
+                && chars[i + 1..].contains(&c);
+            let closes = style.italic
+                && prev.is_some_and(|p| !p.is_whitespace())
+                && next.is_none_or(|n| !n.is_alphanumeric());
+            if opens || closes {
+                flush(&mut buffer, &mut out, style);
+                style.italic = !style.italic;
+                i += 1;
+                continue;
+            }
+        }
+        buffer.push(c);
+        i += 1;
+    }
+    flush(&mut buffer, &mut out, style);
+    out
+}
+
 #[derive(Default)]
 struct ContextReading {
     measure: Option<ContextMeasure>,
@@ -624,6 +842,32 @@ impl ContextReading {
             })
         }
     }
+}
+
+/// The inspector's reading: `61% of window` with its source and time.
+pub fn context_summary(data: &Data, key: &ThreadKey, runs: &[Value]) -> (String, Option<String>) {
+    let backend = runs
+        .last()
+        .and_then(|run| run["record"]["spec"]["backend"].as_str())
+        .unwrap_or("unknown");
+    let reading = context_reading(data, key, runs);
+    let Some(measure) = reading.measure else {
+        return ("Unknown".into(), None);
+    };
+    let text = match measure {
+        ContextMeasure::Codex { .. } => measure.label().replace("ctx ", "") + " of window",
+        _ => measure.label(),
+    };
+    let text = if reading.warning() {
+        format!("{text} · past 85% line")
+    } else {
+        text
+    };
+    let source = reading
+        .measured_at
+        .map(|at| format!("{backend} · {} UTC", utc_minute(at)))
+        .or_else(|| Some(format!("{backend}-reported")));
+    (text, source)
 }
 
 fn context_reading(data: &Data, key: &ThreadKey, runs: &[Value]) -> ContextReading {
@@ -758,16 +1002,21 @@ pub fn context_label(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, runs: &[Va
     let label = reading
         .measure
         .map_or_else(|| "ctx unknown".into(), ContextMeasure::label);
-    ui.menu_button(
-        RichText::new(format!("{backend} · {label}"))
-            .monospace()
-            .size(10.5)
-            .weak(),
-        |ui| {
-            ui.set_max_width(425.);
-            context_details(ui, backend, &reading);
-        },
-    );
+    egui::containers::menu::MenuButton::from_button(
+        egui::Button::new(
+            RichText::new(format!("· {backend} · {label}"))
+                .monospace()
+                .size(10.5)
+                .weak(),
+        )
+        .frame(false),
+    )
+    .ui(ui, |ui| {
+        ui.set_max_width(425.);
+        context_details(ui, backend, &reading);
+    })
+    .0
+    .on_hover_text("Context reading · click for its source");
     if reading.warning() {
         ui.colored_label(context_warning_color(), "past 85% line")
             .on_hover_text("Boxen's warning line. Codex controls its own compaction.");
@@ -828,28 +1077,40 @@ pub fn incident(row: &Row) -> bool {
                 .iter()
                 .any(|s| row.text.starts_with(s))
 }
+/// A short name for one collapsed step: the command or tool line, or the
+/// kind of item when the backend gives no shorter description.
+fn step_title(row: &Row) -> String {
+    match row.label.as_str() {
+        "Thinking" => "thinking".into(),
+        "Tool" | "Command" => row
+            .text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| line.chars().take(48).collect())
+            .unwrap_or_else(|| row.label.to_lowercase()),
+        other => {
+            // Backend item types such as `fileChange` or `webSearch`.
+            let mut words = String::new();
+            for c in other.chars() {
+                if c.is_uppercase() && !words.is_empty() {
+                    words.push(' ');
+                }
+                words.extend(c.to_lowercase());
+            }
+            words
+        }
+    }
+}
 pub fn activity_rows(ui: &mut egui::Ui, rows: &[Row]) {
     let ordinary: Vec<_> = rows
         .iter()
-        .filter(|row| !(incident(row) || row.label == "Status" && row.text == "completed"))
+        // Status rows repeat what the run divider already says.
+        .filter(|row| !(incident(row) || row.label == "Status"))
         .collect();
     if let Some(first) = ordinary.first() {
         let count = ordinary.len();
-        let mut titles: Vec<_> = ordinary
-            .iter()
-            .filter(|row| matches!(row.label.as_str(), "Tool" | "Command" | "Thinking"))
-            .map(|row| {
-                if row.label == "Thinking" {
-                    "thinking"
-                } else {
-                    row.text
-                        .lines()
-                        .next()
-                        .filter(|line| !line.is_empty())
-                        .unwrap_or(&row.label)
-                }
-            })
-            .collect();
+        let mut titles: Vec<String> = ordinary.iter().map(|row| step_title(row)).collect();
         titles.dedup();
         let title = format!(
             "{count} {}{}",
@@ -1030,6 +1291,48 @@ pub fn activity_row(ui: &mut egui::Ui, row: &Row) {
 }
 
 #[cfg(test)]
+mod inline_tests {
+    use super::{Inline, Segment, inline_markdown};
+
+    #[test]
+    fn inline_markdown_handles_mid_line_links_italics_and_code() {
+        let segments =
+            inline_markdown("See [Gergle, *Visual*](https://example.com/a) and *this* `x*y` here");
+        assert_eq!(
+            segments,
+            vec![
+                Segment::Text("See ".into(), Inline::default()),
+                Segment::Link("Gergle, Visual".into(), "https://example.com/a".into()),
+                Segment::Text(" and ".into(), Inline::default()),
+                Segment::Text(
+                    "this".into(),
+                    Inline {
+                        italic: true,
+                        ..Default::default()
+                    }
+                ),
+                Segment::Text(" ".into(), Inline::default()),
+                Segment::Text(
+                    "x*y".into(),
+                    Inline {
+                        code: true,
+                        ..Default::default()
+                    }
+                ),
+                Segment::Text(" here".into(), Inline::default()),
+            ]
+        );
+        assert_eq!(
+            inline_markdown("a * b and snake_case_name"),
+            vec![Segment::Text(
+                "a * b and snake_case_name".into(),
+                Inline::default()
+            )]
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1123,6 +1426,8 @@ mod tests {
                         files: &mut files,
                         target: target.clone(),
                         label: "Send",
+                        hint: None,
+                        placeholder: "Message…".into(),
                         limit: 32768,
                         blocked: false,
                     },

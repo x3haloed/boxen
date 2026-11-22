@@ -67,7 +67,9 @@ pub fn header(ui: &mut egui::Ui) {
     label(ui, c.name, "NAME", weak);
     label(ui, c.state, "STATE", weak).on_hover_text("Current input owner or latest activation");
     label(ui, c.last, "LAST", weak).on_hover_text("Latest event observed by this client");
-    label(ui, c.age, "AGE", weak).on_hover_text("Time since the last observed event");
+    label(ui, c.age, "AGE", weak).on_hover_text(
+        "Time since the last observed event · ~ marks time since the latest run was accepted, for rows this client has not observed",
+    );
 }
 
 pub struct Row<'a> {
@@ -87,6 +89,16 @@ impl Row<'_> {
         if self.selected {
             ui.painter()
                 .rect_filled(c.name.union(c.age), 0., ui.visuals().selection.bg_fill);
+        }
+        if let Some((key, _)) = self.context
+            && on_grid(data, key)
+        {
+            let tick = egui::Rect::from_min_size(
+                c.name.left_top() - egui::vec2(4., -2.),
+                egui::vec2(2., HEIGHT - 4.),
+            );
+            ui.painter()
+                .rect_filled(tick, 0., crate::console_style::ACCENT);
         }
         let title = RichText::new(self.title).color(if self.muted {
             ui.visuals().weak_text_color()
@@ -116,6 +128,18 @@ impl Row<'_> {
     }
 }
 
+/// Whether this conversation currently occupies a visible grid cell.
+fn on_grid(data: &Data, key: &ThreadKey) -> bool {
+    data.saved.workspace.grid.as_ref().is_some_and(|grid| {
+        grid.slots.iter().any(|slot| {
+            slot.home.fits(grid.columns)
+                && matches!(&slot.pane,
+                    crate::model::Pane::Thread(k) | crate::model::Pane::Chat(k) | crate::model::Pane::Activity(k)
+                        if k == key)
+        })
+    })
+}
+
 pub fn opens(ui: &egui::Ui, response: &egui::Response) -> Option<bool> {
     if response.clicked() {
         response.request_focus();
@@ -129,21 +153,38 @@ pub fn opens(ui: &egui::Ui, response: &egui::Response) -> Option<bool> {
     }
 }
 
-pub fn latest_visible<'a>(data: &'a Data, key: &ThreadKey, runs: &[Value]) -> Option<&'a Visible> {
-    runs.iter()
+/// LAST names the latest activity (a status change only when nothing else
+/// was observed); AGE counts from the latest visible event, status included.
+pub fn latest_visible(data: &Data, key: &ThreadKey, runs: &[Value]) -> Option<Visible> {
+    let transcripts: Vec<_> = runs
+        .iter()
         .filter_map(|run| {
             let id = run["record"]["spec"]["id"].as_str()?;
-            data.transcripts
-                .get(&run_key(&key.peer, id))?
-                .latest_visible
-                .as_ref()
-                .map(|(_, event)| event)
+            data.transcripts.get(&run_key(&key.peer, id))
         })
+        .collect();
+    let latest = transcripts
+        .iter()
+        .filter_map(|t| t.latest_visible.as_ref().map(|(_, event)| event))
+        .max_by_key(|event| event.at)?;
+    let label = transcripts
+        .iter()
+        .filter_map(|t| t.latest_activity.as_ref())
         .max_by_key(|event| event.at)
+        .map_or(latest.label, |event| event.label);
+    Some(Visible {
+        at: latest.at,
+        label,
+    })
 }
 
-pub fn event_age(event: Option<&Visible>) -> String {
-    event.map_or_else(|| "—".into(), |event| pulse::age(event.at))
+/// AGE for rows this client has not observed: time since the latest run was
+/// accepted. Callers prefix it with `~`.
+pub fn accepted_age(runs: &[Value]) -> Option<String> {
+    runs.iter()
+        .filter_map(|run| run["record"]["created_at"].as_u64())
+        .max()
+        .map(pulse::age)
 }
 
 pub struct RepoObservation {
@@ -254,6 +295,7 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
     let run = runs.last();
     let dest = conversation::destination(data, &key.peer);
     let latest = latest_visible(data, key, runs);
+    let latest = latest.as_ref();
     let tag = run
         .and_then(|run| run["record"]["spec"]["id"].as_str())
         .map(|id| run_key(&key.peer, id));
@@ -275,16 +317,42 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
             .size(10.5)
             .weak(),
     );
-    let state = if data.errors.contains_key(&key.peer) {
-        "Machine unreachable"
+    let (state, color) = if data.errors.contains_key(&key.peer) {
+        ("machine unreachable", crate::console_style::ERROR)
     } else {
-        run.and_then(|run| run["status"].as_str())
-            .unwrap_or("Status unknown")
+        match run.and_then(|run| run["status"].as_str()) {
+            Some("waiting" | "blocked") => ("awaiting input", crate::console_style::WARN),
+            Some("starting" | "running") => ("running", crate::console_style::ACCENT),
+            Some("failed") => ("failed", crate::console_style::ERROR),
+            Some("interrupted") => ("interrupted", crate::console_style::ERROR),
+            Some("completed") => ("done", crate::console_style::OK),
+            Some(other) => (other, ui.visuals().weak_text_color()),
+            None => ("status unknown", ui.visuals().weak_text_color()),
+        }
+    };
+    let pending = match (run, &tag, transcript) {
+        (Some(run), Some(tag), Some(transcript))
+            if crate::needs::replay_current(data, tag, run) =>
+        {
+            transcript
+                .rows
+                .iter()
+                .find(|row| row.request.is_some())
+                .zip(run["record"]["spec"]["id"].as_str())
+                .map(|(row, id)| format!("{id}:{}", row.id))
+        }
+        _ => None,
+    };
+    let (state, color) = if pending.is_some() {
+        ("awaiting your answer", crate::console_style::WARN)
+    } else {
+        (state, color)
     };
     ui.horizontal(|ui| {
-        ui.label(state);
+        ui.label(RichText::new(state).strong().color(color));
         if let Some(event) = latest {
-            ui.weak(format!("{} · {}", event.label, pulse::age(event.at)));
+            ui.weak(pulse::age(event.at))
+                .on_hover_text(format!("Latest observed event · {}", event.label));
         }
     });
     ui.columns(2, |columns| {
@@ -317,8 +385,8 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
         );
     });
     ui.columns(2, |columns| {
-        columns[0].label(RichText::new("CONTEXT").monospace().size(10.5).weak());
-        columns[0].horizontal_wrapped(|ui| conversation::context_label(ui, data, key, runs));
+        let (reading, source) = conversation::context_summary(data, key, runs);
+        field(&mut columns[0], "CONTEXT", &reading, source.as_deref());
         if let Some(usage) = transcript.and_then(|transcript| transcript.exchange_usage) {
             let summary = usage.label();
             let source = usage.source();
@@ -364,25 +432,36 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
     } else {
         field(ui, "TESTS", "Unknown", None);
     }
+    ui.add_space(6.);
     ui.horizontal_wrapped(|ui| {
-        if ui.small_button("Open on grid").clicked() {
-            actions.push(if resident.is_some() {
+        let primary = |label: &str| {
+            egui::Button::new(RichText::new(label).color(Color32::WHITE))
+                .fill(crate::console_style::ACCENT)
+        };
+        let open = || {
+            if resident.is_some() {
                 Action::OpenChat(key.clone(), true)
             } else {
                 Action::Open(key.clone(), true)
-            });
-        }
-        if let (Some(run), Some(tag), Some(transcript)) = (run, &tag, transcript)
-            && crate::needs::replay_current(data, tag, run)
-            && let Some(row) = transcript.rows.iter().find(|row| row.request.is_some())
-            && let Some(id) = run["record"]["spec"]["id"].as_str()
-            && ui.small_button("Pending request").clicked()
+            }
+        };
+        if let Some(anchor) = &pending {
+            if ui.add(primary("Go to request ↵")).clicked() {
+                actions.push(Action::OpenGate(
+                    key.clone(),
+                    resident.is_some(),
+                    anchor.clone(),
+                ));
+            }
+            if ui.small_button("Open on grid").clicked() {
+                actions.push(open());
+            }
+        } else if ui
+            .add(primary("Open ↵"))
+            .on_hover_text("Place on the grid")
+            .clicked()
         {
-            actions.push(Action::OpenGate(
-                key.clone(),
-                resident.is_some(),
-                format!("{id}:{}", row.id),
-            ));
+            actions.push(open());
         }
     });
 }

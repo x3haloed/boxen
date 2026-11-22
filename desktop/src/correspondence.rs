@@ -1243,42 +1243,80 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
         attachments::{FileRef, Target},
         conversation as view,
     };
-    let activity = view::header(ui, data, key);
-    if !activity {
-        let scope = ui.make_persistent_id(("resident-mail-scope", key));
-        let mut all = ui
-            .data_mut(|memory| memory.get_temp::<bool>(scope))
-            .unwrap_or(false);
-        ui.horizontal(|ui| {
-            if ui.selectable_label(!all, "With you").clicked() {
-                all = false;
-                data.mail.operator_inboxes.remove(key);
-            }
-            if ui.selectable_label(all, "All mail").clicked() && !all {
-                all = true;
-                actions.push(Action::Mail(MailAction::OperatorInbox(key.clone(), 0)));
-            }
-        });
-        ui.data_mut(|memory| memory.insert_temp(scope, all));
-        if all {
-            operator_inbox(ui, data, key, actions);
-            return;
-        }
-    }
     let local = view::local(data);
     let resident_name = agent_name(data, key);
-    if let Some(runs) = data.agents.history(key).filter(|runs| !runs.is_empty()) {
-        ui.horizontal_wrapped(|ui| view::context_label(ui, data, key, runs));
-    }
-    if !data.mail.errors.contains_key(&key.peer)
-        && let Some(run) = data.agents.history(key).and_then(|runs| runs.last())
-        && !crate::model::terminal(run)
-    {
-        ui.weak(if run["status"] == "waiting" {
-            "Waiting for input"
-        } else {
-            "Working"
-        });
+    ui.horizontal(|ui| {
+        let run = data.agents.history(key).and_then(|runs| runs.last());
+        let (state, color) = match run {
+            _ if data.mail.errors.contains_key(&key.peer) => {
+                ("unreachable", crate::console_style::ERROR)
+            }
+            Some(run) if run["status"] == "waiting" => {
+                ("waiting for input", crate::console_style::WARN)
+            }
+            Some(run) if !crate::model::terminal(run) => ("working", crate::console_style::ACCENT),
+            Some(run) if matches!(run["status"].as_str(), Some("failed" | "interrupted")) => (
+                run["status"].as_str().unwrap_or(""),
+                crate::console_style::ERROR,
+            ),
+            _ => ("idle", egui::Color32::GRAY),
+        };
+        crate::console_style::dot(ui, color);
+        ui.label(
+            egui::RichText::new(state)
+                .monospace()
+                .size(10.5)
+                .color(color),
+        );
+        ui.label(
+            egui::RichText::new("· resident")
+                .monospace()
+                .size(10.5)
+                .weak(),
+        );
+        if let Some(runs) = data.agents.history(key).filter(|runs| !runs.is_empty()) {
+            view::context_label(ui, data, key, runs);
+        }
+    });
+    let scope = ui.make_persistent_id(("resident-mail-scope", key));
+    let mut all = ui
+        .data_mut(|memory| memory.get_temp::<bool>(scope))
+        .unwrap_or(false);
+    let activity = view::header(ui, data, key, |ui, data, activity| {
+        if activity {
+            return;
+        }
+        ui.add_space(10.);
+        ui.label(egui::RichText::new("scope").monospace().size(10.).weak());
+        if ui
+            .selectable_label(!all, if all { "○ With you" } else { "● With you" })
+            .clicked()
+        {
+            all = false;
+            data.mail.operator_inboxes.remove(key);
+        }
+        if ui
+            .selectable_label(all, if all { "● All mail" } else { "○ All mail" })
+            .on_hover_text("Operator view of the resident's whole mailbox")
+            .clicked()
+            && !all
+        {
+            all = true;
+            actions.push(Action::Mail(MailAction::OperatorInbox(key.clone(), 0)));
+        }
+        if all {
+            ui.label(
+                egui::RichText::new("operator view")
+                    .monospace()
+                    .size(10.)
+                    .weak(),
+            );
+        }
+    });
+    ui.data_mut(|memory| memory.insert_temp(scope, all));
+    if !activity && all {
+        operator_inbox(ui, data, key, actions);
+        return;
     }
     if let Some(error) = data.mail.errors.get(&key.peer) {
         ui.label(format!("Agent machine unavailable · {error}"));
@@ -1559,13 +1597,22 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
     let resident = data.agents.resident(key);
     let name = resident
         .and_then(|resident| resident["name"].as_str())
-        .unwrap_or("resident");
+        .map_or_else(
+            // Before the resident catalog loads, the fallback carries the machine too.
+            || {
+                resident_name
+                    .split(" · ")
+                    .next()
+                    .unwrap_or("resident")
+                    .to_owned()
+            },
+            str::to_owned,
+        );
     let activation = if resident.is_some_and(|resident| resident["auto_activate"] == false) {
         " · auto-activation off"
     } else {
         ""
     };
-    view::route_hint(ui, &format!("→ mail to {name}{activation}"));
     let blocked = draft.pending.is_some() || data.local_key.is_empty();
     let result = view::composer(
         ui,
@@ -1575,6 +1622,8 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
             files: &mut draft.files,
             target,
             label: "Send",
+            hint: Some(format!("→ mail to {name}{activation}")),
+            placeholder: format!("Message {name}…"),
             limit: 32 * 1024,
             blocked,
         },
@@ -1671,10 +1720,19 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let operator = client.operation(&dest, json!({"op":"resident_inbox","id":id,"after":0})).unwrap();
+        let operator = client
+            .operation(&dest, json!({"op":"resident_inbox","id":id,"after":0}))
+            .unwrap();
         let all_mail = operator["messages"].as_array().unwrap();
-        assert!(all_mail.iter().any(|message| message["body"] == "AUTOMATION_NOT_HUMAN"));
-        let all_mail_record = all_mail.iter().find(|message| message["id"] == mail_id).unwrap();
+        assert!(
+            all_mail
+                .iter()
+                .any(|message| message["body"] == "AUTOMATION_NOT_HUMAN")
+        );
+        let all_mail_record = all_mail
+            .iter()
+            .find(|message| message["id"] == mail_id)
+            .unwrap();
         assert!(all_mail_record["activation_input"]["seq"].is_u64());
         for _ in 0..2 {
             // A fresh viewer starts at original journals again after restart.
