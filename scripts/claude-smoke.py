@@ -146,6 +146,15 @@ with tempfile.TemporaryDirectory(prefix='boxen-claude-smoke-') as directory:
         assert snapshot['status'] == 'completed' and snapshot['backend_thread'] != initial_session
         assert any(event['kind'] == 'backend_session_rebuilt' for event in recovered)
 
+        ctx_run = start('CONTEXT_RECEIPT')
+        context_rows, context_snapshot = collect(ctx_run['id'])
+        assert context_snapshot['status'] == 'completed'
+        receipt = [event['data'] for event in context_rows if event['kind'] == 'backend_compaction']
+        assert receipt == [{'backend': 'claude', 'trigger': 'auto', 'pre_tokens': 162000}], receipt
+        readings = [event['data']['input_tokens'] for event in context_rows if event['kind'] == 'backend_usage']
+        assert readings == [162000, 41000], readings
+        assert collect(ctx_run['id'])[0] == context_rows
+
         pending = start('INTERRUPT')
         collect(pending['id'], stop_at='backend_thread')
         try:

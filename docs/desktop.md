@@ -161,13 +161,18 @@ reports that the same session can take a fresh prompt. Late command updates
 remain visible on the run that started the command.
 The GUI does not store credentials, copy model keys, or depend on browser storage.
 
-Thread panes project context measurements from retained runtime events. Codex
-uses its last exchange token count and reported model window. The 85% mark is
-a Boxen warning line. A Codex compaction completion appears as a context row and
-invalidates the earlier gauge until a new sample arrives. Antigravity uses its
-reported session token counts. OpenRouter shows selected bytes against the
-budget available after reservations. Missing samples and incomplete replay show
-an unknown gauge.
+Thread panes project runtime context measurements from retained events. Codex
+uses its last exchange token count and reported model window. The 85% warning
+line is a Boxen estimate. Claude Code shows the latest main-session input token
+count, including cached input. Antigravity uses its reported session token
+counts. OpenRouter shows the selected bytes and the selectable budget after
+reservations. Missing samples and incomplete replay show an unknown gauge.
+
+A reported compaction clears the prior measurement and appears in the timeline.
+Claude Code can report a trigger and before-token count; a later usage sample
+has its own timestamp. OpenRouter records actual projections and run-stopping
+shortages. The pane and Watchlist surface recent consequences for 30 minutes.
+The latest event remains available in the retained timeline.
 
 The **Live pulse** pane receives a bounded arrival-order projection of live
 run observations. Events read while catching up to a sampled journal frontier

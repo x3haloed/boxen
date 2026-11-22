@@ -26,7 +26,19 @@ pub fn visible(event: &Value) -> Option<Visible> {
         "tool_started" => "tool",
         "tool_result" => "result",
         "tool_outcome_unknown" | "control_error" | "observation_incident" => "incident",
-        "context_boundary" => "context",
+        "backend_compaction" => "compaction",
+        "context_shortage" => "context shortage",
+        "context_boundary"
+            if data["masked"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+                || data["source_count"]
+                    .as_u64()
+                    .zip(data["selected"].as_array())
+                    .is_some_and(|(count, selected)| count > selected.len() as u64) =>
+        {
+            "context selection"
+        }
         "status" => match data["status"].as_str()? {
             "completed" => "completed",
             "interrupted" => "interrupted",
@@ -66,7 +78,7 @@ pub fn visible(event: &Value) -> Option<Visible> {
     })
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

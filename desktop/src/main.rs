@@ -875,6 +875,11 @@ impl Desktop {
                         selected.push((key.clone(), run));
                     }
                 }
+                Pane::Chat(key) | Pane::Activity(key) => {
+                    if let Some(run) = self.data.agents.history(key).and_then(|runs| runs.last()) {
+                        selected.push((key.clone(), run.clone()));
+                    }
+                }
                 _ => {}
             }
         }
@@ -1340,11 +1345,14 @@ fn thread_rows(
         let response = ui
             .push_id((&thread.key.peer, &thread.key.id), |ui| {
                 ui.horizontal(|ui| {
-                    let name_width = (ui.available_width() - 148.).max(36.);
+                    let row_width = ui.clip_rect().right() - ui.next_widget_position().x - 8.;
+                    let columns = 58. + 48. + 29. + 8.;
+                    let name_width = (row_width - columns - 4. * ui.spacing().item_spacing.x).max(20.);
                     let response = ui.add_sized(
                         [name_width, 22.],
                         egui::Button::selectable(selected, &thread.title).truncate(),
                     );
+                    conversation::context_mark(ui, data, &thread.key, &thread.runs);
                     let status = if has_background && state != "unseen" {
                         format!("{state} +bg")
                     } else {
@@ -1716,7 +1724,9 @@ impl TabViewer for Viewer<'_> {
                             .filter(|value| !value.is_empty())
                             .unwrap_or("Default model"),
                     );
-                    conversation::context_label(ui, self.data, key, run);
+                    ui.horizontal_wrapped(|ui| {
+                        conversation::context_label(ui, self.data, key, &thread.runs);
+                    });
                 }
             }
             Pane::Thread(key) => thread_view::panel(ui, self.data, key, self.actions),

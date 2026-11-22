@@ -34,6 +34,21 @@ impl Default for Settings {
         }
     }
 }
+#[derive(Debug, Serialize)]
+pub(crate) struct Shortage {
+    pub protected_bytes: usize,
+    pub available_bytes: usize,
+    pub configured_bytes: usize,
+}
+
+impl std::fmt::Display for Shortage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the newest request and exchange exceed this context budget (protected_bytes={}, available_bytes={}, configured_bytes={}); original input/effects remain retained, and a larger context setting can admit them without replay", self.protected_bytes, self.available_bytes, self.configured_bytes)
+    }
+}
+
+impl std::error::Error for Shortage {}
+
 impl Settings {
     pub fn resident() -> Self {
         Self {
@@ -846,7 +861,12 @@ impl View {
                     .sum();
             }
             if used + n > budget {
-                return Err(format!("the newest request and exchange exceed this context budget (protected_bytes={}, available_bytes={}, configured_bytes={}); original input/effects remain retained, and a larger context setting can admit them without replay", used + n, budget, self.settings.budget_bytes).into());
+                return Err(Shortage {
+                    protected_bytes: used + n,
+                    available_bytes: budget,
+                    configured_bytes: self.settings.budget_bytes,
+                }
+                .into());
             }
             used += n;
         }

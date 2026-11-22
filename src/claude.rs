@@ -370,6 +370,20 @@ impl Turn<'_> {
                     self.session = Some(session.into());
                 }
             }
+            (Some("system"), Some("compact_boundary")) => {
+                let metadata = &frame["compact_metadata"];
+                let trigger = metadata["trigger"]
+                    .as_str()
+                    .filter(|trigger| matches!(*trigger, "manual" | "auto"));
+                let pre_tokens = metadata["pre_tokens"].as_u64();
+                self.run.append(
+                    "backend_compaction",
+                    json!({"backend":"claude","trigger":trigger,"pre_tokens":pre_tokens}),
+                )?;
+                Scope::Run(self.run).diagnostic(Level::Info, "claude.compaction", || {
+                    json!({"trigger":trigger,"pre_tokens":pre_tokens})
+                });
+            }
             (Some("stream_event"), _) if frame["parent_tool_use_id"].is_null() => {
                 self.stream_event(&frame["event"])?;
             }
@@ -449,6 +463,24 @@ impl Turn<'_> {
 
     fn stream_event(&mut self, event: &Value) -> Result<()> {
         let block = match event["type"].as_str() {
+            Some("message_start") => {
+                let usage = &event["message"]["usage"];
+                let input = usage["input_tokens"].as_u64().and_then(|input| {
+                    ["cache_creation_input_tokens", "cache_read_input_tokens"]
+                        .into_iter()
+                        .try_fold(input, |total, field| match usage.get(field) {
+                            None | Some(Value::Null) => Some(total),
+                            Some(value) => total.checked_add(value.as_u64()?),
+                        })
+                });
+                if let Some(input) = input {
+                    self.run.append("backend_usage", json!({"backend":"claude","input_tokens":input}))?;
+                    Scope::Run(self.run).diagnostic(Level::Debug, "claude.input_usage", || {
+                        json!({"input_tokens":input})
+                    });
+                }
+                return Ok(());
+            }
             Some("content_block_start") => &event["content_block"],
             Some("content_block_delta") => &event["delta"],
             _ => return Ok(()),

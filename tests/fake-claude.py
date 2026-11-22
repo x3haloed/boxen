@@ -95,6 +95,13 @@ for line in sys.stdin:
         while not Path('release-held-followup').exists():
             assert time.monotonic() < deadline, 'fixture gate was not released'
             time.sleep(.025)
+    if prompt == 'CONTEXT_RECEIPT':
+        part('message_start', message={'usage': {'input_tokens': 162000}})
+        system('compact_boundary', compact_metadata={'trigger': 'auto', 'pre_tokens': 162000})
+        emit('stream_event', parent_tool_use_id='ignored', event={'type':'message_start', 'message':{'usage': {'input_tokens': 300000}}})
+        part('message_start', message={'usage': {
+            'input_tokens': 31000, 'cache_creation_input_tokens': 3000, 'cache_read_input_tokens': 7000,
+        }})
     if prompt == 'INTERRUPT':
         continue
     if prompt == 'BROKEN':

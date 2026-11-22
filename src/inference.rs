@@ -809,7 +809,21 @@ pub fn execute(
         apply_steering(&run, &mut pending, &mut Vec::new())?;
         let context_started = Instant::now();
         source.extend_run(&run, &mut context_cursor)?;
-        let plan = view.plan(&source)?;
+        let plan = match view.plan(&source) {
+            Ok(plan) => plan,
+            Err(error) => {
+                if let Some(shortage) = error.downcast_ref::<context::Shortage>() {
+                    run.diagnostic(
+                        Level::Warn,
+                        "context.shortage",
+                        || json!(shortage),
+                        || Value::Null,
+                    );
+                    run.append("context_shortage", serde_json::to_value(shortage)?)?;
+                }
+                return Err(error);
+            }
+        };
         run.diagnostic(
             Level::Debug,
             "inference.context.planned",

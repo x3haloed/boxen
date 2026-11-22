@@ -4,7 +4,7 @@
 use crate::{
     Action, Data,
     attachments::{self, FileAction, FileRef, Preview, Target},
-    model::{Destination, Row, ThreadKey},
+    model::{ContextChange, ContextMeasure, Destination, Row, ThreadKey, Transcript},
 };
 use eframe::egui::{self, RichText};
 use serde_json::Value;
@@ -546,30 +546,167 @@ fn markdown(ui: &mut egui::Ui, text: &str) {
         }
     }
 }
-pub fn context_label(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, run: &serde_json::Value) {
-    let Some(id) = run["record"]["spec"]["id"].as_str() else {
-        return;
+#[derive(Default)]
+struct ContextReading {
+    measure: Option<ContextMeasure>,
+    measured_at: Option<u64>,
+    change: Option<(ContextChange, u64)>,
+}
+
+impl ContextReading {
+    fn warning(&self) -> bool {
+        self.measure.is_some_and(ContextMeasure::past_warning_line)
+    }
+
+    fn recent(&self) -> Option<(ContextChange, u64)> {
+        const RECENT_MS: u64 = 30 * 60 * 1000;
+        self.change.filter(|(_, at)| {
+            crate::pulse::now()
+                .checked_sub(*at)
+                .is_some_and(|age| age <= RECENT_MS)
+        })
+    }
+}
+
+fn context_reading(data: &Data, key: &ThreadKey, runs: &[Value]) -> ContextReading {
+    let Some(run) = runs.last() else {
+        return ContextReading::default();
     };
-    let tag = crate::client::run_key(&key.peer, id);
-    let connected = !data.errors.contains_key(&key.peer)
-        && data
-            .watches
-            .get(&tag)
-            .is_none_or(|watch| watch.error.is_none());
-    let measure = data.transcripts.get(&tag).and_then(|t| {
-        (connected && t.seq >= run["last_seq"].as_u64().unwrap_or(0))
-            .then_some(t.context)
-            .flatten()
-    });
-    if let Some(measure) = measure {
-        ui.weak(measure.label())
-            .on_hover_text(measure.description());
-        if measure.past_warning_line() {
-            ui.colored_label(egui::Color32::from_rgb(216, 162, 58), "past 85% line")
-                .on_hover_text(measure.description());
+    let caught_up = |run: &Value| -> Option<&Transcript> {
+        let id = run["record"]["spec"]["id"].as_str()?;
+        let tag = crate::client::run_key(&key.peer, id);
+        let transcript = data.transcripts.get(&tag)?;
+        (transcript.seq >= run["last_seq"].as_u64().unwrap_or(0)
+            && data
+                .watches
+                .get(&tag)
+                .is_none_or(|watch| watch.error.is_none()))
+        .then_some(transcript)
+    };
+    if data.errors.contains_key(&key.peer)
+        || (data.agents.resident(key).is_some() && data.agents.error(key).is_some())
+    {
+        return ContextReading::default();
+    }
+    let Some(current) = caught_up(run) else {
+        return ContextReading::default();
+    };
+    let previous_change = || {
+        let session = current.backend_session.as_deref()?;
+        let machine = run["machine"].as_str().unwrap_or(&key.peer);
+        let model = current.backend_model.as_deref();
+        runs.iter()
+            .rev()
+            .skip(1)
+            .take_while(|prior| prior["machine"].as_str().unwrap_or(&key.peer) == machine)
+            .map_while(caught_up)
+            .take_while(|prior| {
+                prior.backend_model.as_deref() == model
+                    && prior.backend_session.as_deref() == Some(session)
+            })
+            .filter_map(|prior| prior.context_change)
+            .next()
+    };
+    ContextReading {
+        measure: current.context,
+        measured_at: current.context_at,
+        change: current.context_change.or_else(previous_change),
+    }
+}
+
+fn context_details(ui: &mut egui::Ui, backend: &str, reading: &ContextReading) {
+    if let Some(measure) = reading.measure {
+        ui.label(measure.description());
+        if let Some(at) = reading.measured_at {
+            let source = if backend == "openrouter" {
+                "Boxen context plan"
+            } else {
+                backend
+            };
+            ui.weak(format!("{source} · {} UTC", utc_minute(at)));
         }
     } else {
-        ui.weak("ctx unknown");
+        ui.weak("Context reading unknown");
+    }
+    if reading.warning() {
+        ui.colored_label(context_warning_color(), "Past Boxen’s 85% warning line");
+    }
+    ui.weak(match backend {
+        "codex" => "Codex controls compaction. Its threshold is unknown.",
+        "claude" => {
+            "Claude Code reports compaction boundaries and the before-token count when available."
+        }
+        "openrouter" => "Boxen records changes to history selection and shortages as they occur.",
+        "antigravity" => {
+            "Antigravity reports session usage when available. Compaction evidence is unknown."
+        }
+        _ => "Runtime context evidence is unknown.",
+    });
+    if let Some((change, at)) = reading.change {
+        ui.label(format!(
+            "Last observed event · {} · {} UTC",
+            change.label(),
+            utc_minute(at)
+        ));
+    }
+}
+
+pub fn context_label(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, runs: &[Value]) {
+    let backend = runs
+        .last()
+        .and_then(|run| run["record"]["spec"]["backend"].as_str())
+        .unwrap_or("unknown");
+    let reading = context_reading(data, key, runs);
+    let label = reading
+        .measure
+        .map_or_else(|| "ctx unknown".into(), ContextMeasure::label);
+    ui.menu_button(RichText::new(label).monospace().small().weak(), |ui| {
+        ui.set_max_width(320.);
+        context_details(ui, backend, &reading);
+    });
+    if reading.warning() {
+        ui.colored_label(context_warning_color(), "past 85% line")
+            .on_hover_text("Boxen's warning line. Codex controls its own compaction.");
+    }
+    if let Some((change, at)) = reading.recent() {
+        ui.weak(format!("{} {}", change.label(), utc_minute(at)))
+            .on_hover_text("Recorded context event · UTC");
+    }
+}
+
+fn context_warning_color() -> egui::Color32 {
+    egui::Color32::from_rgb(216, 162, 58)
+}
+
+fn context_icon(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(8., 12.), egui::Sense::hover());
+    let center = rect.center();
+    let radius = 3.;
+    ui.painter()
+        .circle_stroke(center, radius, egui::Stroke::new(1., color));
+    let half = (0..=8)
+        .map(|step| {
+            let angle = std::f32::consts::PI * step as f32 / 8.;
+            center + egui::vec2(-angle.sin(), angle.cos()) * radius
+        })
+        .collect();
+    ui.painter()
+        .add(egui::Shape::convex_polygon(half, color, egui::Stroke::NONE));
+    response
+}
+
+pub fn context_mark(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, runs: &[Value]) {
+    let reading = context_reading(data, key, runs);
+    if reading.warning() {
+        context_icon(ui, context_warning_color()).on_hover_text("Past Boxen’s 85% warning line");
+    } else if let Some((change, at)) = reading.recent() {
+        context_icon(ui, ui.visuals().weak_text_color()).on_hover_text(format!(
+            "{} · {} UTC",
+            change.label(),
+            utc_minute(at),
+        ));
+    } else {
+        ui.allocate_space(egui::vec2(8., 12.));
     }
 }
 
@@ -621,7 +758,8 @@ pub fn activity_row(ui: &mut egui::Ui, row: &Row) {
         if row.label == "Context" {
             ui.horizontal_wrapped(|ui| {
                 journal_time(ui, row.at);
-                ui.weak(format!("◐ {}", row.text));
+                context_icon(ui, ui.visuals().weak_text_color());
+                ui.weak(&row.text);
             });
             return;
         }

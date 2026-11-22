@@ -1214,6 +1214,9 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
     }
     let local = view::local(data);
     let resident_name = agent_name(data, key);
+    if let Some(runs) = data.agents.history(key).filter(|runs| !runs.is_empty()) {
+        ui.horizontal_wrapped(|ui| view::context_label(ui, data, key, runs));
+    }
     if !data.mail.errors.contains_key(&key.peer)
         && let Some(run) = data.agents.history(key).and_then(|runs| runs.last())
         && !crate::model::terminal(run)

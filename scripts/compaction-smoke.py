@@ -200,6 +200,14 @@ with tempfile.TemporaryDirectory(prefix='boxen-compaction-') as temporary:
         finish(cli_run)
         cli_status=json.loads(cli(0,'context',f'127.0.0.1:{peers[1]}',keys[1],cli_run['record']['spec']['thread_id'],'{"action":"status"}'))
         assert cli_status['boundary']['settings']['mode']=='verbatim'
+        shortage = start('X' * 70000, mode='verbatim')
+        shortage_rows, shortage_run = collect(shortage)
+        assert shortage_run['status'] == 'interrupted', shortage_run['status']
+        control = [e['data'] for e in shortage_rows if e['kind'] == 'context_shortage']
+        assert len(control) == 1 and control[0]['protected_bytes'] > control[0]['available_bytes'], control
+        assert not any(e['kind'] == 'inference_frame' for e in shortage_rows)
+        assert collect(shortage)[0] == shortage_rows
+
         default_run=start('default policy proof')
         finish(default_run)
         assert ctx(default_run['record']['spec']['thread_id'],'status')['boundary']['settings']['mode']=='summary'

@@ -248,6 +248,18 @@ Older fixed-choice events provide a `choices` list and take a result with an
 offered `option_id`. An invalid response leaves the request pending. The
 [Antigravity runtime guide](antigravity.md) describes setup and native session behavior.
 
+## Context observations
+
+Claude Code's main-session input reading appears as `backend_usage` with
+`backend: "claude"` and `input_tokens`, inclusive of reported cached input.
+A native compaction boundary appears as `backend_compaction` with
+`backend: "claude"`, and the reported `trigger` and `pre_tokens` when available.
+A subsequent input reading has its own sequence and timestamp. [Claude Code stream schema](https://code.claude.com/docs/en/agent-sdk/typescript#sdkcompactboundarymessage)
+
+For OpenRouter, `context_shortage` records a projection that could not fit the
+protected input and exchange. It carries `protected_bytes`, `available_bytes`,
+and `configured_bytes`. The existing run status and journal retain the outcome.
+
 ## Built-in inference events
 
 The authenticated operation `{"op":"runtime_info"}` reports available runtime kinds and configuration readiness without returning credentials. OpenRouter threads use the existing start/list/control/watch operations; resident creation adds optional `backend` (default `codex`). See [inference](inference.md) for configuration, lifecycle, limits and verification.

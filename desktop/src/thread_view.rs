@@ -811,8 +811,8 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         } else {
             ui.weak("Waiting for the thread catalog…");
         }
-        if let Some(run) = last {
-            view::context_label(ui, data, key, run);
+        if last.is_some() {
+            view::context_label(ui, data, key, &runs);
         }
         if activity && running.is_some() && ui.small_button("Cancel run").clicked() {
             actions.push(Action::Cancel(key.clone()));

@@ -162,6 +162,7 @@ pub struct ToolDetail {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextMeasure {
     Codex { tokens: u64, window: u64 },
+    Claude { input_tokens: u64 },
     Antigravity { tokens: u64, window: u64 },
     Selection { selected: u64, available: u64 },
 }
@@ -171,6 +172,7 @@ impl ContextMeasure {
             Self::Codex { tokens, window } => {
                 format!("ctx {:.0}%", tokens as f64 * 100.0 / window as f64)
             }
+            Self::Claude { input_tokens } => format!("{input_tokens} tok in, last turn"),
             Self::Antigravity { tokens, window } => format!("ctx {tokens} / {window} tok"),
             Self::Selection {
                 selected,
@@ -194,6 +196,9 @@ impl ContextMeasure {
             Self::Codex { .. } => {
                 "Codex last reported exchange tokens against its model window. Boxen marks 85% as a warning. Codex controls its own compaction."
             }
+            Self::Claude { .. } => {
+                "Input tokens from Claude Code’s latest main-session model exchange, including cached input."
+            }
             Self::Antigravity { .. } => {
                 "Antigravity reported current session tokens and window size."
             }
@@ -203,6 +208,23 @@ impl ContextMeasure {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextChange {
+    Compaction,
+    Projection,
+    Shortage,
+}
+
+impl ContextChange {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Compaction => "compacted",
+            Self::Projection => "history projected",
+            Self::Shortage => "context shortage",
+        }
+    }
+}
+
 fn context_amounts(used: &Value, limit: &Value) -> Option<(u64, u64)> {
     Some((used.as_u64()?, limit.as_u64().filter(|&n| n != 0)?))
 }
@@ -213,6 +235,10 @@ pub struct Transcript {
     pub execution: Option<Value>,
     pub status: Option<Value>,
     pub context: Option<ContextMeasure>,
+    pub context_at: Option<u64>,
+    pub context_change: Option<(ContextChange, u64)>,
+    pub backend_model: Option<String>,
+    pub backend_session: Option<String>,
     pub hold: Option<Value>,
     pub latest_visible: Option<(u64, crate::pulse::Visible)>,
     pub rows: Vec<Row>,
@@ -224,6 +250,18 @@ pub struct Transcript {
     event_at: Option<u64>,
 }
 impl Transcript {
+    fn measure_context(&mut self, measure: Option<ContextMeasure>) {
+        self.context = measure;
+        self.context_at = measure.and(self.event_at);
+    }
+
+    fn context_changed(&mut self, seq: u64, change: ContextChange, description: String) {
+        if let Some(at) = self.event_at {
+            self.context_change = Some((change, at));
+        }
+        self.put(format!("event-{seq}"), "Context", description, false);
+    }
+
     fn put(&mut self, id: String, label: &str, text: String, append: bool) {
         let at = self.event_at;
         let index = *self.positions.entry(id.clone()).or_insert_with(|| {
@@ -366,21 +404,56 @@ impl Transcript {
             self.answer_event(kind, data);
         }
         match kind {
-            "backend_thread" => self.context = None,
+            "backend_thread" => {
+                self.measure_context(None);
+                self.context_change = None;
+                self.backend_model = data["model"].as_str().map(str::to_owned);
+                self.backend_session = data["id"].as_str().map(str::to_owned);
+            }
             "held_followup" => self.see_hold(data),
             "backend_usage" if data["backend"] == "antigravity" => {
-                self.context = context_amounts(&data["used"], &data["size"])
-                    .map(|(tokens, window)| ContextMeasure::Antigravity { tokens, window });
+                self.measure_context(context_amounts(&data["used"], &data["size"])
+                    .map(|(tokens, window)| ContextMeasure::Antigravity { tokens, window }));
+            }
+            "backend_usage" if data["backend"] == "claude" => {
+                self.measure_context(data["input_tokens"].as_u64()
+                    .map(|input_tokens| ContextMeasure::Claude { input_tokens }));
+            }
+            "backend_compaction" if data["backend"] == "claude" => {
+                self.measure_context(None);
+                let trigger = data["trigger"].as_str().map_or_else(String::new, |value| format!(" · {value}"));
+                let size = data["pre_tokens"].as_u64().map_or_else(String::new, |value| format!(" · {value} tok before"));
+                self.context_changed(seq, ContextChange::Compaction, format!("Claude Code compacted{trigger}{size}"));
             }
             "context_budget" => {
-                self.context = context_amounts(&data["selected_bytes"], &data["selection_available_bytes"])
-                    .map(|(selected, available)| ContextMeasure::Selection { selected, available });
+                self.measure_context(context_amounts(&data["selected_bytes"], &data["selection_available_bytes"])
+                    .map(|(selected, available)| ContextMeasure::Selection { selected, available }));
+            }
+            "context_shortage" => {
+                self.measure_context(None);
+                let description = match (data["protected_bytes"].as_u64(), data["available_bytes"].as_u64()) {
+                    (Some(protected), Some(available)) => format!("OpenRouter context shortage · {protected} B required · {available} B available"),
+                    _ => "OpenRouter context shortage".into(),
+                };
+                self.context_changed(seq, ContextChange::Shortage, description);
             }
             "activation_input" => self.put(format!("event-{seq}"),"Activation input",text("text"),false),
             "transcript_imported" => {self.imported=true;self.put(format!("event-{seq}"),"Imported history",display(data),false);}
             "inference_message" if self.imported => self.put(format!("event-{seq}"),if data["role"]=="user" {"Imported user"} else {"Imported assistant"},display(&data["content"]),false),
             "scheduled_event" => self.put(format!("event-{seq}"),"Schedule",display(data),false),
-            "context_boundary" => self.put(format!("event-{seq}"),"Context",format!("Policy: {} · {} of {} source entries selected · {} observation bodies masked. Original history remains retained.",data["settings"]["mode"].as_str().unwrap_or("unknown"),data["selected"].as_array().map_or(0,Vec::len),data["source_count"],data["masked"].as_array().map_or(0,Vec::len)),false),
+            "context_boundary" => {
+                if let (Some(selected), Some(count), Some(masked)) =
+                    (data["selected"].as_array(), data["source_count"].as_u64(), data["masked"].as_array())
+                {
+                    let omitted = count.saturating_sub(selected.len() as u64);
+                    if !masked.is_empty() || omitted != 0 {
+                        self.context_changed(seq, ContextChange::Projection, format!(
+                            "OpenRouter history selection · {} projected · {omitted} omitted", masked.len()
+                        ));
+                    }
+                }
+            }
+
             "inference_frame" if data["event"]["type"]=="response_headers" && data["event"]["status"].as_u64().is_some_and(|s|s>=400) => self.put(format!("event-{seq}"),"Incident",format!("Inference provider response: HTTP {}\nGeneration: {}",data["event"]["status"],data["event"]["generation_id"].as_str().unwrap_or("not supplied")),false),
             "user_message" => {
                 let id = format!("event-{seq}");
@@ -430,14 +503,14 @@ impl Transcript {
                 let p = &data["params"];
                 if method == "thread/tokenUsage/updated" {
                     let usage = &p["tokenUsage"];
-                    self.context = context_amounts(&usage["last"]["totalTokens"], &usage["modelContextWindow"])
-                        .map(|(tokens, window)| ContextMeasure::Codex { tokens, window });
+                    self.measure_context(context_amounts(&usage["last"]["totalTokens"], &usage["modelContextWindow"])
+                        .map(|(tokens, window)| ContextMeasure::Codex { tokens, window }));
                 } else if matches!(method, "item/started" | "item/completed")
                     && p["item"]["type"] == "contextCompaction"
                 {
                     if method == "item/completed" {
-                        self.context = None;
-                        self.put(format!("event-{seq}"), "Context", "Codex reported compaction".into(), false);
+                        self.measure_context(None);
+                        self.context_changed(seq, ContextChange::Compaction, "Codex reported compaction".into());
                     }
                 } else if method == "item/tool/call" && let Some(call) = p["callId"].as_str() {
                     self.put(format!("tool-{call}"),"Tool",format!("{}\n{}",display(&p["tool"]),display(&p["arguments"])),false);
@@ -573,7 +646,8 @@ impl Transcript {
             | "context_summary_failed"
             | "observation_incident" => {
                 if kind == "backend_session_rebuilt" {
-                    self.context = None;
+                    self.measure_context(None);
+                    self.context_change = None;
                 }
                 self.put(format!("event-{seq}"), "Incident", display(data), false)
             }
@@ -687,6 +761,27 @@ mod tests {
             "ctx 74/160 KiB selectable"
         );
         assert!(!transcript.context.unwrap().past_warning_line());
+    }
+
+    #[test]
+    fn context_projection_keeps_reported_compaction_separate_from_the_next_reading() {
+        let mut transcript = Transcript::default();
+        let apply = |transcript: &mut Transcript, seq, kind, data| {
+            transcript.apply(&json!({"seq":seq,"at":seq*1000,"kind":kind,"data":data})).unwrap();
+        };
+        apply(&mut transcript, 1, "backend_usage", json!({"backend":"claude","input_tokens":162000}));
+        apply(&mut transcript, 2, "backend_compaction", json!({"backend":"claude","trigger":"auto","pre_tokens":162000}));
+        assert!(transcript.context.is_none());
+        assert_eq!(transcript.context_change, Some((ContextChange::Compaction, 2000)));
+        assert_eq!(transcript.rows[0].text, "Claude Code compacted · auto · 162000 tok before");
+        apply(&mut transcript, 3, "backend_usage", json!({"backend":"claude","input_tokens":41000}));
+        assert_eq!(transcript.context, Some(ContextMeasure::Claude { input_tokens: 41000 }));
+        assert_eq!(transcript.context_at, Some(3000));
+        assert_eq!(transcript.context_change, Some((ContextChange::Compaction, 2000)));
+        apply(&mut transcript, 4, "backend_thread", json!({"id":"replacement","backend":"claude"}));
+        assert!(transcript.context.is_none());
+        assert!(transcript.context_change.is_none());
+        assert_eq!(transcript.rows.len(), 1);
     }
 
     #[test]
