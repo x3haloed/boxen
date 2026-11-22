@@ -185,8 +185,17 @@ fn controls(
                     pending.push((message, format!("{text}{file_context}")));
                 }
             }
-            Control::Respond { request_id, attempt, .. } => {
-                run.response_progress("response_refused", &request_id, attempt.as_ref(), "runtime_has_no_input_request")?;
+            Control::Respond {
+                request_id,
+                attempt,
+                ..
+            } => {
+                run.response_progress(
+                    "response_refused",
+                    &request_id,
+                    attempt.as_ref(),
+                    "runtime_has_no_input_request",
+                )?;
                 run.append(
                     "control_error",
                     json!({"message":"this runtime has no pending backend input request"}),
@@ -249,6 +258,251 @@ fn frame_records(
 }
 
 const EXCHANGE_CANCELLED: &str = "Inference connection closed on cancellation; upstream computation or billing may already have occurred";
+const LOOP_WINDOW_BYTES: usize = 3072;
+const LOOP_CHECK_INTERVAL_BYTES: usize = 512;
+const LOOP_MIN_BYTES: usize = 512;
+const LOOP_MAX_PERIOD: usize = 256;
+const MAX_RUNAWAY_RETRIES: usize = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RunawayReason {
+    RepetitionLoop {
+        reasoning_bytes: usize,
+        period: usize,
+        repeated_bytes: usize,
+    },
+    ReasoningLimit {
+        reasoning_bytes: usize,
+        limit: usize,
+    },
+}
+impl RunawayReason {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::RepetitionLoop { .. } => "reasoning_repetition",
+            Self::ReasoningLimit { .. } => "reasoning_limit",
+        }
+    }
+    fn reasoning_bytes(&self) -> usize {
+        match self {
+            Self::RepetitionLoop {
+                reasoning_bytes, ..
+            }
+            | Self::ReasoningLimit {
+                reasoning_bytes, ..
+            } => *reasoning_bytes,
+        }
+    }
+    fn detail(&self) -> String {
+        match self {
+            Self::RepetitionLoop {
+                reasoning_bytes,
+                period,
+                ..
+            } => format!(
+                "inference exchange aborted after {reasoning_bytes} reasoning bytes entered a {period}-byte repetition loop without output; no partial output or tool calls were accepted"
+            ),
+            Self::ReasoningLimit {
+                reasoning_bytes,
+                limit,
+            } => format!(
+                "inference exchange aborted after {reasoning_bytes} reasoning bytes exceeded the {limit}-byte reasoning-without-output limit; no partial output or tool calls were accepted"
+            ),
+        }
+    }
+    fn frame_event(&self) -> Value {
+        match self {
+            Self::RepetitionLoop {
+                reasoning_bytes,
+                period,
+                repeated_bytes,
+            } => json!({
+                "type": "exchange_aborted",
+                "kind": self.kind(),
+                "reason": self.detail(),
+                "reasoning_bytes": reasoning_bytes,
+                "period": period,
+                "repeated_bytes": repeated_bytes,
+            }),
+            Self::ReasoningLimit {
+                reasoning_bytes,
+                limit,
+            } => json!({
+                "type": "exchange_aborted",
+                "kind": self.kind(),
+                "reason": self.detail(),
+                "reasoning_bytes": reasoning_bytes,
+                "max_reasoning_bytes": limit,
+            }),
+        }
+    }
+    fn retry_notice(&self) -> &'static str {
+        match self {
+            Self::RepetitionLoop { .. } => {
+                "The previous inference attempt for this step was aborted after its reasoning stream entered a repetition loop without producing output. No partial output or tool calls from that attempt were accepted or executed; this retry starts from the same history."
+            }
+            Self::ReasoningLimit { .. } => {
+                "The previous inference attempt for this step was aborted after its reasoning stream exceeded the reasoning-without-output byte limit. No partial output or tool calls from that attempt were accepted or executed; this retry starts from the same history."
+            }
+        }
+    }
+}
+
+enum ExchangeOutcome {
+    Cancelled,
+    Completed(Value),
+    Runaway(RunawayReason),
+}
+
+fn detect_repetition(tail: &str) -> Option<(usize, usize)> {
+    let mut norm = Vec::with_capacity(tail.len());
+    let mut in_space = true;
+    for ch in tail.chars() {
+        if ch.is_whitespace() {
+            if !in_space {
+                norm.push(b' ');
+                in_space = true;
+            }
+        } else {
+            let mut buf = [0u8; 4];
+            norm.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            in_space = false;
+        }
+    }
+    if norm.last() == Some(&b' ') {
+        norm.pop();
+    }
+    let n = norm.len();
+    if n < LOOP_MIN_BYTES {
+        return None;
+    }
+    let max_p = LOOP_MAX_PERIOD.min(n / 3);
+    for p in 1..=max_p {
+        let mut matched = 0;
+        let limit = n - p;
+        while matched < limit && norm[n - 1 - matched] == norm[n - 1 - matched - p] {
+            matched += 1;
+        }
+        let total_rep = matched + p;
+        let min_cycles = if p <= 64 { 6 } else { 4 };
+        if total_rep >= LOOP_MIN_BYTES && total_rep >= p * min_cycles {
+            return Some((p, total_rep));
+        }
+    }
+    None
+}
+
+struct ReasoningGuard {
+    enabled: bool,
+    output_seen: bool,
+    reasoning_bytes: usize,
+    max_bytes: Option<usize>,
+    tail: String,
+    bytes_since_check: usize,
+}
+impl ReasoningGuard {
+    fn new(enabled: bool, max_bytes: Option<usize>) -> Self {
+        Self {
+            enabled,
+            output_seen: false,
+            reasoning_bytes: 0,
+            max_bytes,
+            tail: String::new(),
+            bytes_since_check: 0,
+        }
+    }
+    fn push_reasoning(&mut self, text: &str) -> Option<RunawayReason> {
+        if text.is_empty() {
+            return None;
+        }
+        self.reasoning_bytes = self.reasoning_bytes.saturating_add(text.len());
+        self.bytes_since_check = self.bytes_since_check.saturating_add(text.len());
+        self.tail.push_str(text);
+        if self.tail.len() > LOOP_WINDOW_BYTES {
+            let mut cut = self.tail.len() - LOOP_WINDOW_BYTES;
+            while cut < self.tail.len() && !self.tail.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.tail.drain(..cut);
+        }
+        if let Some(limit) = self.max_bytes
+            && self.reasoning_bytes > limit
+        {
+            return Some(RunawayReason::ReasoningLimit {
+                reasoning_bytes: self.reasoning_bytes,
+                limit,
+            });
+        }
+        if self.bytes_since_check >= LOOP_CHECK_INTERVAL_BYTES {
+            self.bytes_since_check = 0;
+            if let Some((period, repeated_bytes)) = detect_repetition(&self.tail) {
+                return Some(RunawayReason::RepetitionLoop {
+                    reasoning_bytes: self.reasoning_bytes,
+                    period,
+                    repeated_bytes,
+                });
+            }
+        }
+        None
+    }
+    fn observe(&mut self, event: &Value) -> Option<RunawayReason> {
+        if !self.enabled || self.output_seen || event["type"] != "provider_frame" {
+            return None;
+        }
+        let choices = event["frame"]["choices"].as_array()?;
+        for choice in choices {
+            if choice["index"] != 0 {
+                continue;
+            }
+            if !choice["finish_reason"].is_null() {
+                return None;
+            }
+            let delta = &choice["delta"];
+            if delta["content"].as_str().is_some_and(|s| !s.is_empty())
+                || delta["tool_calls"]
+                    .as_array()
+                    .is_some_and(|calls| !calls.is_empty())
+            {
+                self.output_seen = true;
+                self.tail.clear();
+                return None;
+            }
+            if let Some(text) = delta["reasoning"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    delta["reasoning_content"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                })
+            {
+                if let Some(reason) = self.push_reasoning(text) {
+                    return Some(reason);
+                }
+            } else if let Some(details) = delta["reasoning_details"].as_array() {
+                for item in details {
+                    if item["type"] == "reasoning.text"
+                        && let Some(text) = item["text"].as_str().filter(|s| !s.is_empty())
+                        && let Some(reason) = self.push_reasoning(text)
+                    {
+                        return Some(reason);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+fn fallback_reasoning_effort(current: Option<&str>, had_reasoning: bool) -> Option<&'static str> {
+    if !had_reasoning {
+        return None;
+    }
+    match crate::reasoning::requested(current) {
+        None | Some("medium" | "high" | "xhigh" | "max") => Some("low"),
+        Some(_) => None,
+    }
+}
 
 fn exchange(
     run: &Arc<Run>,
@@ -258,7 +512,7 @@ fn exchange(
     rx: &mpsc::Receiver<Control>,
     pending: &mut Vec<(Value, String)>,
     purpose: &str,
-) -> Result<Option<Value>> {
+) -> Result<ExchangeOutcome> {
     let payload = serde_json::to_vec(&json!({"config":config,"body":body}))?;
     if payload.len() > media::REQUEST_LIMIT {
         return Err("inference request exceeds 24 MiB; full history remains retained".into());
@@ -343,13 +597,17 @@ fn exchange(
         .runtime_policy
         .inference_idle_timeout_seconds
         .map(|seconds| Duration::from_secs(u64::from(seconds)));
+    let mut guard = ReasoningGuard::new(
+        purpose == "workload",
+        record.runtime_policy.reasoning_byte_limit(),
+    );
     let mut waiting_reported = false;
     let mut last_frame = Instant::now();
     let mut retained = Vec::new();
     let mut bytes = 0;
     loop {
         if controls(run, rx, pending)? {
-            return Ok(None);
+            return Ok(ExchangeOutcome::Cancelled);
         }
         match events.recv_timeout(Duration::from_millis(50)) {
             Ok(Ok((event, frame_bytes))) => {
@@ -374,6 +632,7 @@ fn exchange(
                 let mut stream_events = Vec::new();
                 let mut frames = Vec::new();
                 let mut error = None;
+                let mut runaway = None;
                 let batch_start = bytes;
                 loop {
                     let (event, frame_bytes) = frame;
@@ -387,8 +646,15 @@ fn exchange(
                         event["type"].as_str(),
                         Some("exchange_completed" | "exchange_failed")
                     );
+                    if !terminal {
+                        runaway = guard.observe(&event);
+                    }
                     frames.push((event, bytes));
-                    if terminal || frames.len() == 16 || bytes - batch_start >= 256 * 1024 {
+                    if terminal
+                        || runaway.is_some()
+                        || frames.len() == 16
+                        || bytes - batch_start >= 256 * 1024
+                    {
                         break;
                     }
                     match events.try_recv() {
@@ -409,6 +675,19 @@ fn exchange(
                         || event.clone(),
                     );
                     retained.push(event);
+                }
+                if let Some(reason) = runaway {
+                    run.append(
+                        "inference_frame",
+                        json!({"step":step,"purpose":purpose,"event":reason.frame_event()}),
+                    )?;
+                    run.diagnostic(
+                        Level::Warn,
+                        "inference.exchange.runaway_aborted",
+                        || json!({"step":step,"purpose":purpose,"kind":reason.kind(),"reasoning_bytes":reason.reasoning_bytes(),"reason":reason.detail()}),
+                        || Value::Null,
+                    );
+                    return Ok(ExchangeOutcome::Runaway(reason));
                 }
                 if let Some(error) = error {
                     return Err(error.into());
@@ -436,7 +715,7 @@ fn exchange(
                     }
                     run.append("inference_exchange_completed",json!({"step":step,"finish_reason":projection["finish_reason"],"usage":projection["usage"],"purpose":purpose}))?;
                     run.diagnostic(Level::Info,"inference.exchange.completed",||json!({"step":step,"finish_reason":projection["finish_reason"],"usage":projection["usage"]}),||Value::Null);
-                    return Ok(Some(projection));
+                    return Ok(ExchangeOutcome::Completed(projection));
                 }
             }
             Ok(Err(error)) => return Err(error.into()),
@@ -791,6 +1070,8 @@ pub fn execute(
     )?;
     let mut pending = Vec::new();
     let policy = run.snapshot().record.runtime_policy;
+    let mut runaway_retries = 0usize;
+    let mut pending_retry: Option<(&'static str, Option<&'static str>)> = None;
     for step in 0usize.. {
         if policy.max_exchanges.is_some_and(|limit| step >= limit) {
             run.diagnostic(
@@ -882,8 +1163,10 @@ pub fn execute(
                     &mut pending,
                     "compaction",
                 ) {
-                    Ok(None) => return Ok(RunOutcome::Cancelled(EXCHANGE_CANCELLED.into())),
-                    Ok(Some(p))
+                    Ok(ExchangeOutcome::Cancelled) => {
+                        return Ok(RunOutcome::Cancelled(EXCHANGE_CANCELLED.into()));
+                    }
+                    Ok(ExchangeOutcome::Completed(p))
                         if p["finish_reason"] == "stop"
                             && p["assistant"]["tool_calls"]
                                 .as_array()
@@ -934,11 +1217,16 @@ pub fn execute(
         let (mut wire_messages, pdf, missing) =
             media::project(history.journal_directory(), &messages)?;
         wire_messages.insert(0, json!({"role":"system","content":system}));
+        let retry_state = pending_retry.take();
+        let retry_note = retry_state
+            .as_ref()
+            .map(|(notice, _)| format!("\n{notice}"))
+            .unwrap_or_default();
         // Current metadata is provider input only. Keeping it after the projected
         // history allows the provider to reuse the unchanged token prefix.
         wire_messages.push(json!({
             "role":"system",
-            "content":format!("{}{}\nContext selection budget (serialized bytes, not provider tokens; schemas/host framing also consume provider input): {}\n",run_context,view.framing(&source,first),plan.budget_usage),
+            "content":format!("{}{}{}\nContext selection budget (serialized bytes, not provider tokens; schemas/host framing also consume provider input): {}\n",run_context,view.framing(&source,first),retry_note,plan.budget_usage),
         }));
         run.diagnostic(
             Level::Debug,
@@ -956,7 +1244,10 @@ pub fn execute(
             );
         }
         let mut body = json!({"model":model,"session_id":workload_session,"messages":wire_messages,"tools":tools,"stream":true,"stream_options":{"include_usage":true},"max_tokens":run.snapshot().record.runtime_policy.max_output_tokens,"provider":run.snapshot().record.runtime_policy.provider()});
-        if let Some(effort) = crate::reasoning::requested(record.reasoning_effort.as_deref()) {
+        let active_effort = retry_state
+            .and_then(|(_, effort)| effort)
+            .or_else(|| crate::reasoning::requested(record.reasoning_effort.as_deref()));
+        if let Some(effort) = active_effort {
             body["reasoning"] = json!({"effort":effort});
         }
         if policy.max_output_tokens.is_none() {
@@ -965,7 +1256,7 @@ pub fn execute(
         if pdf {
             body["plugins"] = json!([{"id":"file-parser","pdf":{"engine":"native"}}]);
         }
-        let Some(projection) = exchange(
+        let projection = match exchange(
             &run,
             &jobs.inference,
             &body,
@@ -973,27 +1264,88 @@ pub fn execute(
             &controls_rx,
             &mut pending,
             "workload",
-        )?
-        else {
-            return Ok(RunOutcome::Cancelled(EXCHANGE_CANCELLED.into()));
+        )? {
+            ExchangeOutcome::Cancelled => {
+                return Ok(RunOutcome::Cancelled(EXCHANGE_CANCELLED.into()));
+            }
+            ExchangeOutcome::Runaway(reason) => {
+                if runaway_retries < MAX_RUNAWAY_RETRIES
+                    && policy.max_exchanges.is_none_or(|limit| step + 1 < limit)
+                {
+                    runaway_retries += 1;
+                    let effort =
+                        fallback_reasoning_effort(record.reasoning_effort.as_deref(), true);
+                    let detail = reason.detail();
+                    run.append(
+                        "inference_exchange_retry",
+                        json!({"step":step,"attempt":runaway_retries,"kind":reason.kind(),"reason":detail,"reasoning_effort":effort}),
+                    )?;
+                    run.diagnostic(
+                        Level::Warn,
+                        "inference.exchange.retry",
+                        || json!({"step":step,"attempt":runaway_retries,"kind":reason.kind(),"reasoning_effort":effort}),
+                        || Value::Null,
+                    );
+                    pending_retry = Some((reason.retry_notice(), effort));
+                    continue;
+                }
+                return Err(reason.detail().into());
+            }
+            ExchangeOutcome::Completed(projection) => projection,
         };
         let search_boundary = source.entries.len();
         let assistant = projection["assistant"].clone();
-        run.append("inference_message", assistant.clone())?;
-        messages.push(assistant.clone());
         let calls = assistant["tool_calls"]
             .as_array()
             .cloned()
             .unwrap_or_default();
         if projection["finish_reason"] == "length" {
-            return Err(
-                "model output reached its limit; no calls from this response were executed".into(),
-            );
+            let detail =
+                "model output reached its limit; no calls from this response were executed";
+            let had_reasoning = assistant["reasoning"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+                || assistant["reasoning_content"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty())
+                || assistant["reasoning_details"]
+                    .as_array()
+                    .is_some_and(|a| !a.is_empty());
+            if runaway_retries < MAX_RUNAWAY_RETRIES
+                && policy.max_exchanges.is_none_or(|limit| step + 1 < limit)
+            {
+                runaway_retries += 1;
+                let effort =
+                    fallback_reasoning_effort(record.reasoning_effort.as_deref(), had_reasoning);
+                run.append(
+                    "inference_exchange_retry",
+                    json!({"step":step,"attempt":runaway_retries,"kind":"output_limit","reason":detail,"reasoning_effort":effort}),
+                )?;
+                run.diagnostic(
+                    Level::Warn,
+                    "inference.exchange.retry",
+                    || json!({"step":step,"attempt":runaway_retries,"kind":"output_limit","reasoning_effort":effort}),
+                    || Value::Null,
+                );
+                pending_retry = Some((
+                    "The previous inference attempt for this step reached the output token limit before completing. No partial output or tool calls from that attempt were accepted or executed; this retry starts from the same history.",
+                    effort,
+                ));
+                continue;
+            }
+            return Err(detail.into());
         }
         if calls.is_empty() {
             if projection["finish_reason"] != "stop" {
                 return Err("provider ended without a normal final response".into());
             }
+            let text = assistant["content"].as_str().unwrap_or("");
+            if resident.is_none() && text.trim().is_empty() {
+                return Err("anonymous request ended without a conventional text response".into());
+            }
+            runaway_retries = 0;
+            run.append("inference_message", assistant.clone())?;
+            messages.push(assistant.clone());
             if controls(&run, &controls_rx, &mut pending)? {
                 return Ok(RunOutcome::Cancelled(
                     "Cancelled after inference completed".into(),
@@ -1001,10 +1353,6 @@ pub fn execute(
             }
             if !pending.is_empty() {
                 continue;
-            }
-            let text = assistant["content"].as_str().unwrap_or("");
-            if resident.is_none() && text.trim().is_empty() {
-                return Err("anonymous request ended without a conventional text response".into());
             }
             run.append(
                 "assistant_message",
@@ -1029,6 +1377,9 @@ pub fn execute(
                 return Err("tool call IDs are empty or repeated; no calls were executed".into());
             }
         }
+        runaway_retries = 0;
+        run.append("inference_message", assistant.clone())?;
+        messages.push(assistant.clone());
         for call in calls {
             if controls(&run, &controls_rx, &mut pending)? {
                 return Ok(RunOutcome::Cancelled(
@@ -1145,5 +1496,134 @@ mod tests {
                 .contains("uncertain")
         );
         assert_eq!(repair(&mut history).unwrap(), 0);
+    }
+    #[test]
+    fn repetition_detector_catches_degenerate_loops_without_false_positives() {
+        // Real observed degenerate patterns: "Hmm." with paragraph breaks and "OK./Emit./Emitting."
+        let hmm = format!(
+            "Normal orientation paragraph about the state of the room. {}",
+            "Hmm. Hmm. Hmm. Hmm. Hmm.\n\n".repeat(40)
+        );
+        let (period, rep) = detect_repetition(&hmm).expect("should detect Hmm loop");
+        assert_eq!(period, 5);
+        assert!(rep >= LOOP_MIN_BYTES);
+
+        let emit = "OK.\n\nEmit.\n\nOK.\n\nEmitting.\n\n".repeat(40);
+        let (period, rep) = detect_repetition(&emit).expect("should detect OK/Emit loop");
+        assert!(period <= 32);
+        assert!(rep >= LOOP_MIN_BYTES);
+
+        // Legitimate prose, numbered steps, and brief hesitations must not trigger.
+        let prose = (0..60)
+            .map(|i| {
+                format!(
+                    "Step {i}: inspect record {i} and compare against entry {}. ",
+                    i * 7
+                )
+            })
+            .collect::<String>();
+        assert!(detect_repetition(&prose).is_none());
+        assert!(
+            detect_repetition("Hmm. Hmm. Hmm. Actually, let me check the file first.").is_none()
+        );
+    }
+    #[test]
+    fn reasoning_guard_enforces_limit_and_disarms_on_visible_output() {
+        let frame = |delta: Value| json!({"type":"provider_frame","frame":{"choices":[{"index":0,"delta":delta,"finish_reason":null}]}});
+        // Empty content strings do not disarm the guard; exceeding max_bytes aborts.
+        let chunk_a: String = (0..60).map(|i| format!("step-{i:02}-alpha ")).collect();
+        let chunk_b: String = (0..60).map(|i| format!("step-{i:02}-bravo ")).collect();
+        let mut guard = ReasoningGuard::new(true, Some(1024));
+        assert!(
+            guard
+                .observe(&frame(json!({"content":"","reasoning":chunk_a})))
+                .is_none()
+        );
+        assert!(matches!(
+            guard.observe(&frame(json!({"content":"","reasoning":chunk_b}))),
+            Some(RunawayReason::ReasoningLimit { limit: 1024, .. })
+        ));
+
+        // Non-empty content disarms the guard even if more reasoning follows.
+        let mut guard = ReasoningGuard::new(true, Some(1024));
+        assert!(
+            guard
+                .observe(&frame(json!({"content":"answer","reasoning":"ok"})))
+                .is_none()
+        );
+        assert!(
+            guard
+                .observe(&frame(json!({"reasoning":"Hmm. ".repeat(400)})))
+                .is_none()
+        );
+
+        // Non-empty tool_calls disarms the guard.
+        let mut guard = ReasoningGuard::new(true, Some(1024));
+        assert!(
+            guard
+                .observe(&frame(json!({"tool_calls":[{"index":0,"id":"c1"}]})))
+                .is_none()
+        );
+        assert!(
+            guard
+                .observe(&frame(json!({"reasoning":"Hmm. ".repeat(400)})))
+                .is_none()
+        );
+
+        // Repetition loop triggers well before the byte ceiling.
+        let mut guard = ReasoningGuard::new(true, Some(131_072));
+        let mut hit = None;
+        for _ in 0..40 {
+            if let Some(reason) = guard.observe(&frame(
+                json!({"content":"","reasoning":"Hmm. Hmm. Hmm. Hmm. "}),
+            )) {
+                hit = Some(reason);
+                break;
+            }
+        }
+        assert!(matches!(hit, Some(RunawayReason::RepetitionLoop { .. })));
+
+        // Duplicate reasoning + reasoning_content in one delta is not double-counted.
+        let mut guard = ReasoningGuard::new(true, Some(1024));
+        assert!(
+            guard
+                .observe(&frame(
+                    json!({"reasoning":chunk_a,"reasoning_content":chunk_a})
+                ))
+                .is_none()
+        );
+    }
+    #[test]
+    fn fallback_effort_only_steps_down_active_reasoning() {
+        assert_eq!(fallback_reasoning_effort(None, false), None);
+        assert_eq!(fallback_reasoning_effort(Some("high"), false), None);
+        assert_eq!(fallback_reasoning_effort(None, true), Some("low"));
+        assert_eq!(
+            fallback_reasoning_effort(Some("default"), true),
+            Some("low")
+        );
+        assert_eq!(fallback_reasoning_effort(Some("high"), true), Some("low"));
+        assert_eq!(fallback_reasoning_effort(Some("medium"), true), Some("low"));
+        assert_eq!(fallback_reasoning_effort(Some("low"), true), None);
+        assert_eq!(fallback_reasoning_effort(Some("minimal"), true), None);
+        assert_eq!(fallback_reasoning_effort(Some("none"), true), None);
+    }
+    #[test]
+    fn runtime_policy_validates_max_reasoning_bytes() {
+        let mut policy = crate::runtime_policy::Policy::default();
+        assert_eq!(
+            policy.reasoning_byte_limit(),
+            Some(crate::runtime_policy::DEFAULT_MAX_REASONING_BYTES)
+        );
+        policy.max_reasoning_bytes = Some(0);
+        assert!(policy.validate().is_ok());
+        assert_eq!(policy.reasoning_byte_limit(), None);
+        policy.max_reasoning_bytes = Some(2048);
+        assert!(policy.validate().is_ok());
+        assert_eq!(policy.reasoning_byte_limit(), Some(2048));
+        policy.max_reasoning_bytes = Some(512);
+        assert!(policy.validate().is_err());
+        policy.max_reasoning_bytes = Some(5_000_000);
+        assert!(policy.validate().is_err());
     }
 }

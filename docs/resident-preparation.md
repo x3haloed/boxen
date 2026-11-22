@@ -45,7 +45,11 @@ output limit. Null message/exchange settings allow continued work until normal
 completion, cancellation or a runtime failure. These are not large numeric
 stand-ins for unlimited operation. Omitted settings retain the existing defaults:
 2048 output tokens, 16 message attempts and 16 workload exchanges. Explicit
-exchange budgets range from 1 to 65536. Transport timeouts, context selection,
+exchange budgets range from 1 to 65536. `max_reasoning_bytes` bounds reasoning
+text emitted before visible content or tool calls on workload exchanges: omitting
+it (or `null`) applies the 131,072-byte (128 KiB) default, `0` disables the byte
+ceiling (stream repetition-loop detection remains active), and explicit values
+range from 1,024 to 4,194,304 bytes. Transport timeouts, context selection,
 media bounds and managed-backend settings remain independent.
 
 The shared resident-tool boundary reserves each outgoing message attempt in the

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{io::Read, path::Path};
 
+pub const DEFAULT_MAX_REASONING_BYTES: usize = 131_072;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Policy {
@@ -14,6 +16,8 @@ pub struct Policy {
     pub max_exchanges: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inference_idle_timeout_seconds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_reasoning_bytes: Option<usize>,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -24,6 +28,7 @@ impl Default for Policy {
             max_message_sends: Some(16),
             max_exchanges: Some(16),
             inference_idle_timeout_seconds: None,
+            max_reasoning_bytes: None,
         }
     }
 }
@@ -60,6 +65,15 @@ impl Policy {
                 "inference_idle_timeout_seconds is a positive number of seconds or null".into(),
             );
         }
+        if self
+            .max_reasoning_bytes
+            .is_some_and(|n| n != 0 && !(1024..=4_194_304).contains(&n))
+        {
+            return Err(
+                "max_reasoning_bytes is 1024–4194304 bytes, 0 to disable, or null for the 131072-byte default"
+                    .into(),
+            );
+        }
         if self.providers.len() > 16
             || self.providers.iter().any(|p| {
                 p.is_empty()
@@ -72,6 +86,13 @@ impl Policy {
             return Err("runtime policy providers are at most 16 bounded provider slugs".into());
         }
         Ok(())
+    }
+    pub fn reasoning_byte_limit(&self) -> Option<usize> {
+        match self.max_reasoning_bytes {
+            Some(0) => None,
+            Some(n) => Some(n),
+            None => Some(DEFAULT_MAX_REASONING_BYTES),
+        }
     }
     pub fn provider(&self) -> Value {
         let mut v = json!({"require_parameters":true,"allow_fallbacks":self.allow_fallbacks});

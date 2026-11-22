@@ -43,7 +43,11 @@ pub(crate) struct Shortage {
 
 impl std::fmt::Display for Shortage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the newest request and exchange exceed this context budget (protected_bytes={}, available_bytes={}, configured_bytes={}); original input/effects remain retained, and a larger context setting can admit them without replay", self.protected_bytes, self.available_bytes, self.configured_bytes)
+        write!(
+            f,
+            "the newest request and exchange exceed this context budget (protected_bytes={}, available_bytes={}, configured_bytes={}); original input/effects remain retained, and a larger context setting can admit them without replay",
+            self.protected_bytes, self.available_bytes, self.configured_bytes
+        )
     }
 }
 
@@ -574,15 +578,9 @@ fn masked(e: &Entry) -> Value {
     json!({"role":"tool","tool_call_id":e.message["tool_call_id"],"content":format!("Historical observation {} is omitted by the older-tool-body policy. boxen_history read returns the original without repeating its effects.",e.id)})
 }
 // Plain text duplication is removable; opaque, signed and encrypted state remains exact.
-fn deduplicate_reasoning(message: &mut Value) {
-    let Some(text) = message["reasoning"].as_str() else {
-        return;
-    };
-    let Some(details) = message["reasoning_details"].as_array() else {
-        return;
-    };
-    if details.is_empty()
-        || details.iter().any(|d| {
+fn has_opaque_reasoning(message: &Value) -> bool {
+    message["reasoning_details"].as_array().is_some_and(|ds| {
+        ds.iter().any(|d| {
             d["type"] != "reasoning.text"
                 || d.get("signature").is_some()
                 || d.get("data").is_some()
@@ -591,13 +589,50 @@ fn deduplicate_reasoning(message: &mut Value) {
                         .any(|k| !matches!(k.as_str(), "type" | "text" | "format" | "index"))
                 })
         })
-    {
+    })
+}
+fn deduplicate_reasoning(message: &mut Value) {
+    let Some(text) = message["reasoning"].as_str() else {
+        return;
+    };
+    let Some(details) = message["reasoning_details"].as_array() else {
+        return;
+    };
+    if details.is_empty() || has_opaque_reasoning(message) {
         return;
     }
     let joined: String = details.iter().filter_map(|d| d["text"].as_str()).collect();
     if joined == text {
         message.as_object_mut().unwrap().remove("reasoning");
     }
+}
+fn is_empty_reasoning_only(message: &Value) -> bool {
+    message["role"] == "assistant"
+        && message["content"].as_str().is_none_or(str::is_empty)
+        && message["tool_calls"].as_array().is_none_or(Vec::is_empty)
+        && (message.get("reasoning").is_some()
+            || message.get("reasoning_content").is_some()
+            || message.get("reasoning_details").is_some())
+}
+fn strip_plain_reasoning(message: &mut Value) -> bool {
+    if message["role"] != "assistant"
+        || has_opaque_reasoning(message)
+        || message["tool_calls"]
+            .as_array()
+            .is_some_and(|calls| !calls.is_empty())
+    {
+        return false;
+    }
+    let Some(obj) = message.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for key in ["reasoning", "reasoning_content", "reasoning_details"] {
+        if obj.remove(key).is_some() {
+            changed = true;
+        }
+    }
+    changed
 }
 
 // Only complete call/result units can become references. This never dispatches a call.
@@ -625,20 +660,7 @@ fn reference_completed(
         return false;
     }
     // Provider-native reasoning state cannot be reconstructed from text references.
-    if entries[first].message["reasoning_details"]
-        .as_array()
-        .is_some_and(|ds| {
-            ds.iter().any(|d| {
-                d["type"] != "reasoning.text"
-                    || d.get("signature").is_some()
-                    || d.get("data").is_some()
-                    || d.as_object().is_none_or(|o| {
-                        o.keys()
-                            .any(|k| !matches!(k.as_str(), "type" | "text" | "format" | "index"))
-                    })
-            })
-        })
-    {
+    if has_opaque_reasoning(&entries[first].message) {
         return false;
     }
     let mut assistant = projected[first].as_ref().clone();
@@ -804,11 +826,19 @@ impl View {
             })
             .collect();
         for (i, message) in projected.iter_mut().enumerate() {
-            if !exact_pins.contains(&i)
-                && message["reasoning"].is_string()
-                && message["reasoning_details"].is_array()
-            {
-                deduplicate_reasoning(message.to_mut());
+            if !exact_pins.contains(&i) {
+                if message["reasoning"].is_string() && message["reasoning_details"].is_array() {
+                    deduplicate_reasoning(message.to_mut());
+                }
+                // Historical truncated/reasoning-only assistant entries (empty content, no calls)
+                // carry no completed speech or effects; stripping plain reasoning prevents them
+                // from displacing prior conversation history while preserving boxen_history.
+                if !units.last().is_some_and(|u| u.contains(&i))
+                    && is_empty_reasoning_only(message)
+                    && !has_opaque_reasoning(message)
+                {
+                    strip_plain_reasoning(message.to_mut());
+                }
             }
         }
         let mut included = HashSet::new();
@@ -853,7 +883,13 @@ impl View {
             }
             if used + n > budget
                 && !units[i].iter().any(|j| exact_pins.contains(j))
-                && reference_completed(entries, &units[i], &mut projected)
+                && (reference_completed(entries, &units[i], &mut projected)
+                    || units[i].iter().fold(false, |changed, &j| {
+                        (projected[j]["role"] == "assistant"
+                            && !has_opaque_reasoning(&projected[j])
+                            && strip_plain_reasoning(projected[j].to_mut()))
+                            || changed
+                    }))
             {
                 n = units[i]
                     .iter()
@@ -870,7 +906,7 @@ impl View {
             }
             used += n;
         }
-        let cost = |u: &Vec<usize>| {
+        let cost = |projected: &[Cow<'_, Value>], u: &[usize]| {
             u.iter()
                 .map(|i| projected[*i].to_string().len() + 512)
                 .sum::<usize>()
@@ -896,7 +932,7 @@ impl View {
             let extra: usize = indexes
                 .iter()
                 .filter(|i| !included.contains(*i))
-                .map(|i| cost(&units[*i]))
+                .map(|i| cost(&projected, &units[*i]))
                 .sum();
             if extra + pins > self.settings.pin_quota_bytes || extra + used > budget {
                 excluded.push(json!({"id":b["id"],"entries":b["entries"],"reason":"pin_quota_or_prompt_budget"}));
@@ -910,10 +946,38 @@ impl View {
             if included.contains(&i) {
                 continue;
             }
-            let c = cost(&units[i]);
+            let c = cost(&projected, &units[i]);
             if used + c <= budget {
                 included.insert(i);
                 used += c;
+            } else if !units[i].iter().any(|j| exact_pins.contains(j)) {
+                let mut candidates: Vec<(usize, Value)> = Vec::new();
+                for &j in &units[i] {
+                    let mut m = projected[j].as_ref().clone();
+                    if strip_plain_reasoning(&mut m) {
+                        candidates.push((j, m));
+                    }
+                }
+                if !candidates.is_empty() {
+                    let reduced: usize = units[i]
+                        .iter()
+                        .map(|j| {
+                            candidates.iter().find(|(k, _)| k == j).map_or_else(
+                                || projected[*j].to_string().len(),
+                                |(_, m)| m.to_string().len(),
+                            ) + 512
+                        })
+                        .sum();
+                    if used + reduced <= budget {
+                        for (j, m) in candidates {
+                            projected[j] = Cow::Owned(m);
+                        }
+                        included.insert(i);
+                        used += reduced;
+                        continue;
+                    }
+                }
+                break;
             } else {
                 break;
             }
@@ -1444,5 +1508,60 @@ mod tests {
             View::new(settings(), &s).unwrap().plan(&s).unwrap().notes[0]["revision"],
             2
         );
+    }
+    #[test]
+    fn historical_empty_reasoning_runaway_does_not_brick_wall_prior_history() {
+        let runaway = "Hmm. ".repeat(20_000);
+        let s = source(vec![
+            json!({"role":"user","content":"earlier question"}),
+            json!({"role":"assistant","content":"earlier answer"}),
+            json!({"role":"assistant","content":"","reasoning":runaway,"reasoning_details":[{"type":"reasoning.text","text":runaway,"format":"unknown","index":0}]}),
+            json!({"role":"user","content":"next turn"}),
+        ]);
+        let original = s.entries[2].message.clone();
+        let p = View::new(settings(), &s).unwrap().plan(&s).unwrap();
+        // Original journal entry stays verbatim in source.entries for boxen_history.
+        assert_eq!(s.entries[2].message, original);
+        // All four entries survive instead of breaking at the 100 KB+ reasoning entry.
+        assert_eq!(p.selected.len(), 4);
+        assert!(
+            p.messages
+                .iter()
+                .any(|m| m["content"] == "earlier question")
+        );
+        assert!(p.messages.iter().any(|m| m["content"] == "earlier answer"));
+        assert!(p.messages.iter().any(|m| m["content"] == "next turn"));
+        // Opaque reasoning is never stripped.
+        let opaque = source(vec![
+            json!({"role":"user","content":"earlier"}),
+            json!({"role":"assistant","content":"","reasoning_details":[{"type":"reasoning.encrypted","data":"x".repeat(40_000)}]}),
+            json!({"role":"user","content":"next"}),
+        ]);
+        let p2 = View::new(settings(), &opaque)
+            .unwrap()
+            .plan(&opaque)
+            .unwrap();
+        assert_eq!(p2.selected.len(), 1);
+    }
+    #[test]
+    fn oversized_historical_plain_reasoning_reply_strips_reasoning_to_preserve_history() {
+        let s = source(vec![
+            json!({"role":"user","content":"earlier question"}),
+            json!({"role":"assistant","content":"concise visible answer","reasoning":"thought ".repeat(20_000)}),
+            json!({"role":"user","content":"follow-up"}),
+        ]);
+        let p = View::new(settings(), &s).unwrap().plan(&s).unwrap();
+        assert_eq!(p.selected.len(), 3);
+        assert!(
+            p.messages
+                .iter()
+                .any(|m| m["content"] == "earlier question")
+        );
+        let reply = p
+            .messages
+            .iter()
+            .find(|m| m["content"] == "concise visible answer")
+            .unwrap();
+        assert!(reply.get("reasoning").is_none());
     }
 }

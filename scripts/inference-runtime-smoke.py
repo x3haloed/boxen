@@ -130,6 +130,23 @@ class Provider(http.server.BaseHTTPRequestHandler):
             elif prompt=='INTERRUPT_AFTER_EFFECT' and not tools:call('boxen_shell',{'command':python_shell("open('uncertain.txt','a').write('once')")})
             elif prompt=='INTERRUPT_AFTER_EFFECT':emit(frame({'content':'unaccepted partial'}));return
             elif prompt=='TRUNCATED':call('boxen_shell',{'command':'touch forbidden.txt'},finish='length')
+            elif prompt=='TRUNCATED_RECOVER':
+                if body.get('reasoning')=={'effort':'low'}:text('TRUNCATED_RECOVERED')
+                else:call('boxen_shell',{'command':'touch forbidden.txt'},finish='length')
+            elif prompt=='RUNAWAY_LOOP':
+                if body.get('reasoning')=={'effort':'low'}:text('LOOP_RECOVERED')
+                else:
+                    for _ in range(120):
+                        emit(frame({'content':'','reasoning':'Hmm. Hmm. Hmm. Hmm. Hmm.\n\n'}))
+                        time.sleep(.01)
+                    emit(frame(finish='length'))
+            elif prompt=='RUNAWAY_LIMIT':
+                if body.get('reasoning')=={'effort':'low'}:text('LIMIT_RECOVERED')
+                else:
+                    for i in range(60):
+                        emit(frame({'content':'','reasoning':f'deliberation-segment-{i:03d}-distinct-token-sequence '}))
+                        time.sleep(.01)
+                    emit(frame(finish='length'))
             elif prompt=='SLOW_SHELL' and not tools:call('boxen_shell',{'command':python_shell("import subprocess,sys; child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); open('descendant.pid','w').write(str(child.pid)); open('started.txt','w').write('started'); child.wait()")})
             elif prompt=='BAD_ARGUMENTS' and not tools:call('boxen_shell','{"command":')
             elif prompt=='BAD_ARGUMENTS':text('ARGUMENT_REJECTION_OBSERVED')
@@ -293,7 +310,41 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         follow=start('FOLLOWUP',ordinary['record']['spec']['thread_id']);assert collect(follow)[1]['status']=='completed'
         assert result(follow)['response']=='FOLLOWUP_RESPONSE'
         print('PASS remote shell effect, realtime observation, reconnect replay, conventional response and native metadata in follow-up')
-        truncated=start('TRUNCATED');assert collect(truncated)[1]['status']=='interrupted';assert not (directory/'forbidden.txt').exists()
+        truncated=start('TRUNCATED');trunc_events,trunc_done=collect(truncated)
+        assert trunc_done['status']=='interrupted' and not (directory/'forbidden.txt').exists()
+        assert [e['data']['role'] for e in trunc_events if e['kind']=='inference_message']==['user']
+        assert sum(e['kind']=='inference_exchange_retry' for e in trunc_events)==1
+        trunc_follow=start('CHILD_REQUEST',truncated['record']['spec']['thread_id'])
+        tf_events,tf_done=collect(trunc_follow)
+        assert tf_done['status']=='completed' and result(trunc_follow)['response']=='CHILD_RESPONSE'
+        assert not any(e['kind']=='context_projection' for e in tf_events)
+        before=len(observed);tr_rec=start('TRUNCATED_RECOVER');tr_events,tr_done=collect(tr_rec)
+        assert tr_done['status']=='completed' and result(tr_rec)['response']=='TRUNCATED_RECOVERED'
+        assert not (directory/'forbidden.txt').exists()
+        assert [e['data']['role'] for e in tr_events if e['kind']=='inference_message']==['user','assistant']
+        assert sum(e['kind']=='inference_exchange_retry' for e in tr_events)==1
+        assert 'reasoning' not in observed[before] and observed[before+1]['reasoning']=={'effort':'low'}
+        assert observed[before]['messages'][:-1]==observed[before+1]['messages'][:-1]
+        assert 'reached the output token limit' in observed[before+1]['messages'][-1]['content']
+        before=len(observed);loop_run=start('RUNAWAY_LOOP');loop_events,loop_done=collect(loop_run)
+        assert loop_done['status']=='completed' and result(loop_run)['response']=='LOOP_RECOVERED'
+        assert [e['data']['role'] for e in loop_events if e['kind']=='inference_message']==['user','assistant']
+        assert any(e['kind']=='inference_frame' and e['data']['event'].get('type')=='exchange_aborted' and e['data']['event'].get('kind')=='reasoning_repetition' for e in loop_events)
+        assert sum(e['kind']=='inference_exchange_retry' for e in loop_events)==1
+        assert 'reasoning' not in observed[before] and observed[before+1]['reasoning']=={'effort':'low'}
+        assert observed[before]['messages'][:-1]==observed[before+1]['messages'][:-1]
+        assert 'repetition loop' in observed[before+1]['messages'][-1]['content']
+        health_after_loop=api({'op':'inference_health','offset':0})['incidents']
+        assert not any(i['thread_id']==loop_run['record']['spec']['thread_id'] for i in health_after_loop),health_after_loop
+        limit_policy=data[1]/'runtime-policy.json'
+        limit_policy.write_text(json.dumps({'max_reasoning_bytes':2048}))
+        before=len(observed);limit_run=start('RUNAWAY_LIMIT');limit_policy.unlink()
+        limit_events,limit_done=collect(limit_run)
+        assert limit_done['status']=='completed' and result(limit_run)['response']=='LIMIT_RECOVERED'
+        assert any(e['kind']=='inference_frame' and e['data']['event'].get('type')=='exchange_aborted' and e['data']['event'].get('kind')=='reasoning_limit' and e['data']['event'].get('max_reasoning_bytes')==2048 for e in limit_events)
+        assert observed[before+1]['reasoning']=={'effort':'low'}
+        assert observed[before]['messages'][:-1]==observed[before+1]['messages'][:-1]
+        print('PASS runaway reasoning loop/limit abort, unaccepted length truncation, prefix-preserving bounded retry and clean health projection')
         bad=start('BAD_ARGUMENTS');assert collect(bad)[1]['status']=='completed';assert result(bad)['response']=='ARGUMENT_REJECTION_OBSERVED'
         interrupted=start('INTERRUPT_AFTER_EFFECT');assert collect(interrupted)[1]['status']=='interrupted'
         assert (directory/'uncertain.txt').read_text()=='once'
