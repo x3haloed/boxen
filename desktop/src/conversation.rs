@@ -439,14 +439,13 @@ pub fn destination(data: &Data, key: &str) -> Destination {
             address: String::new(),
         })
 }
+pub fn utc_minute(at: u64) -> String {
+    let minute = at / 60_000;
+    format!("{:02}:{:02}", (minute / 60) % 24, minute % 60)
+}
+
 pub fn journal_time(ui: &mut egui::Ui, at: Option<u64>) {
-    let label = at.map_or_else(
-        || "—".into(),
-        |at| {
-            let minute = at / 60_000;
-            format!("{:02}:{:02}", (minute / 60) % 24, minute % 60)
-        },
-    );
+    let label = at.map_or_else(|| "—".into(), utc_minute);
     ui.add_sized(
         [40., 18.],
         egui::Label::new(RichText::new(label).monospace().small().weak()).halign(egui::Align::Min),

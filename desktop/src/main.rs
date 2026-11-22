@@ -70,6 +70,7 @@ struct AnswerAttempt {
     request: Value,
 }
 struct Observing {
+    key: ThreadKey,
     epoch: u64,
     stop: Arc<AtomicBool>,
     retry: Instant,
@@ -519,15 +520,9 @@ impl Desktop {
                         selected["cwd"] = batch["snapshot"]["record"]["spec"]["cwd"].clone();
                         transcript.execution = Some(selected);
                     }
-                    let replaying = self
-                        .data
-                        .watches
-                        .get(&id)
-                        .and_then(|watch| watch.frontier)
-                        .is_none_or(|frontier| transcript.seq < frontier);
-                    let thread = batch["snapshot"]["record"]["spec"]["thread_id"]
-                        .as_str()
-                        .unwrap_or_default();
+                    let watch = &self.data.watches[&id];
+                    let key = watch.key.clone();
+                    let replaying = watch.frontier.is_none_or(|frontier| transcript.seq < frontier);
                     let mut failed = None;
                     let mut replayed = 0;
                     for event in batch["events"].as_array().into_iter().flatten() {
@@ -543,7 +538,7 @@ impl Desktop {
                             if replaying {
                                 replayed += 1;
                             } else {
-                                self.data.pulse.live(&id, thread, event.1.clone());
+                                self.data.pulse.live(&key, event.1.clone());
                             }
                         }
                     }
@@ -587,6 +582,9 @@ impl Desktop {
                         });
                     }
                     if let Some(w) = self.data.watches.get_mut(&id) {
+                        if failed.is_some() {
+                            self.data.pulse.gap(&id, &key);
+                        }
                         w.error = failed;
                         w.done = batch["done"] == true && w.error.is_none();
                         w.frontier = batch["snapshot"]["last_seq"].as_u64();
@@ -608,7 +606,7 @@ impl Desktop {
                     if let Some(w) = self.data.watches.get_mut(&id)
                         && w.epoch == epoch
                     {
-                        self.data.pulse.gap(&id);
+                        self.data.pulse.gap(&id, &w.key);
                         for steering in &self.data.saved.steering {
                             if run_key(&steering.key.peer, &steering.run) == id {
                                 self.data.fresh_steering.remove(&steering.id);
@@ -945,6 +943,7 @@ impl Desktop {
                 self.data.watches.insert(
                     tag,
                     Observing {
+                        key,
                         epoch: self.next_watch,
                         stop,
                         retry: Instant::now(),
@@ -1018,12 +1017,9 @@ impl Desktop {
             Action::File(action) => self.file_action(action),
             Action::Respond(key, id, request_id, result) => {
                 let tag = run_key(&key.peer, &id);
-                let pending = !self.data.errors.contains_key(&key.peer)
-                    && self
-                        .data
-                        .watches
-                        .get(&tag)
-                        .is_some_and(|watch| watch.error.is_none())
+                let pending = needs::active_runs(&self.data).any(|run| {
+                    run.key == key && run.id() == id && run.observed(&self.data, &tag)
+                })
                     && self.data.transcripts.get(&tag).is_some_and(|transcript| {
                         transcript.rows.iter().any(|row| {
                             row.request
@@ -1533,7 +1529,7 @@ impl TabViewer for Viewer<'_> {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
         match tab {
             Pane::Agents => agents::panel(ui, self.data, self.actions),
-            Pane::LivePulse => pulse::panel(ui, self.data),
+            Pane::LivePulse => pulse::panel(ui, self.data, self.actions),
             Pane::Work => {
                 if let Some(action) = self.data.work.panel(ui, &mut self.data.saved.work) {
                     self.actions.push(Action::Work(action));

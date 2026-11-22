@@ -420,17 +420,38 @@ impl Desktop {
             if ui.button("Find…   ⌘K").clicked() {
                 self.open_palette();
             }
+            let coverage = crate::needs::coverage(&self.data);
             for dest in &self.data.saved.destinations {
-                let reachable = !self.data.errors.contains_key(&dest.key);
-                let dot = if !reachable {
-                    egui::Color32::from_rgb(239, 91, 80)
-                } else if self.data.catalogs.contains_key(&dest.key) {
-                    egui::Color32::from_rgb(63, 185, 80)
+                let count = coverage.get(dest.key.as_str());
+                let (observed, total) = count.map_or((0, 0), |c| (c.observed, c.total));
+                let down = self.data.errors.contains_key(&dest.key);
+                let catalogued = self.data.catalogs.contains_key(&dest.key);
+                let (label, color) = if down && !catalogued {
+                    (format!("{} down", dest.label), egui::Color32::LIGHT_RED)
+                } else if down {
+                    (
+                        format!("{} 0/{total}", dest.label),
+                        egui::Color32::LIGHT_RED,
+                    )
+                } else if !catalogued {
+                    (format!("{} …", dest.label), egui::Color32::GRAY)
+                } else if observed != total {
+                    (
+                        format!("{} {observed}/{total}", dest.label),
+                        egui::Color32::from_rgb(216, 162, 58),
+                    )
                 } else {
-                    egui::Color32::GRAY
+                    (
+                        format!("{} {observed}/{total}", dest.label),
+                        ui.visuals().text_color(),
+                    )
                 };
-                ui.colored_label(dot, "●");
-                ui.label(RichText::new(&dest.label).monospace());
+                ui.label(RichText::new(label).monospace().small().color(color))
+                    .on_hover_text(if down {
+                        "Machine unreachable · active total last observed"
+                    } else {
+                        "Observed active runs / active runs in the latest catalog"
+                    });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Settings").clicked() {

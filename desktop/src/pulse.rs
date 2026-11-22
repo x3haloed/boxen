@@ -1,5 +1,5 @@
 //! Bounded arrival-order projection of the journal observers.
-use crate::{Data, conversation, model::ThreadKey};
+use crate::{Action, Data, conversation, model::ThreadKey};
 use eframe::egui::{self, RichText};
 use serde_json::Value;
 use std::{
@@ -66,11 +66,15 @@ pub fn visible(event: &Value) -> Option<Visible> {
     })
 }
 
-pub fn age(at: u64) -> String {
-    let now = SystemTime::now()
+fn now() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis();
+        .as_millis() as u64
+}
+
+pub fn age(at: u64) -> String {
+    let now = u128::from(now());
     let at = u128::from(at);
     if at > now + 1000 {
         return "skew".into();
@@ -86,14 +90,15 @@ pub fn age(at: u64) -> String {
 
 enum Entry {
     Event {
-        tag: String,
-        thread: String,
+        key: ThreadKey,
         event: Visible,
     },
     Gap {
         tag: String,
+        key: ThreadKey,
+        detected: u64,
         recovered: usize,
-        closed: bool,
+        ended: Option<u64>,
     },
 }
 
@@ -110,82 +115,129 @@ impl Pulse {
         self.entries.push_back(entry);
     }
 
-    pub fn gap(&mut self, tag: &str) {
-        if self.entries.iter().any(|entry| matches!(entry, Entry::Gap { tag: previous, closed:false, .. } if previous == tag)) {
+    pub fn gap(&mut self, tag: &str, key: &ThreadKey) {
+        if self.entries.iter().any(|entry| matches!(entry, Entry::Gap { tag: previous, ended:None, .. } if previous == tag)) {
             return;
         }
         self.append(Entry::Gap {
             tag: tag.into(),
+            key: key.clone(),
+            detected: now(),
             recovered: 0,
-            closed: false,
+            ended: None,
         });
     }
 
-    pub fn live(&mut self, tag: &str, thread: &str, event: Visible) {
+    pub fn live(&mut self, key: &ThreadKey, event: Visible) {
         self.append(Entry::Event {
-            tag: tag.into(),
-            thread: thread.into(),
+            key: key.clone(),
             event,
         });
     }
 
     pub fn replayed(&mut self, tag: &str, count: usize, reached_frontier: bool) {
         if let Some(Entry::Gap {
-            recovered, closed, ..
+            recovered, ended, ..
         }) = self.entries.iter_mut().rev().find(
-            |entry| matches!(entry, Entry::Gap { tag: prior, closed:false, .. } if prior == tag),
+            |entry| matches!(entry, Entry::Gap { tag: prior, ended:None, .. } if prior == tag),
         ) {
             *recovered += count;
-            *closed = reached_frontier;
+            if reached_frontier {
+                *ended = Some(now());
+            }
         }
     }
 }
 
-pub fn panel(ui: &mut egui::Ui, data: &Data) {
-    ui.weak("Live only · received order · open a thread to replay it");
+pub fn panel(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
+    let coverage = crate::needs::coverage(data);
+    ui.horizontal_wrapped(|ui| {
+        for dest in &data.saved.destinations {
+            let count = coverage.get(dest.key.as_str());
+            let state = if data.errors.contains_key(&dest.key) {
+                "down"
+            } else if !data.catalogs.contains_key(&dest.key) {
+                "connecting"
+            } else if count.is_some_and(|count| count.observed < count.total) {
+                "gap"
+            } else {
+                "live"
+            };
+            let label = count.map_or_else(
+                || format!("{} · {state}", dest.label),
+                |count| {
+                    format!(
+                        "{} · {state} {}/{}",
+                        dest.label, count.observed, count.total
+                    )
+                },
+            );
+            ui.label(RichText::new(label).monospace().small());
+        }
+    });
+    ui.separator();
+    let height = (ui.available_height() - 25.).max(24.);
     egui::ScrollArea::vertical()
         .id_salt("live-pulse")
+        .max_height(height)
         .stick_to_bottom(true)
         .show(ui, |ui| {
             if data.pulse.entries.is_empty() {
                 ui.weak("Waiting for live activity");
             }
             for entry in &data.pulse.entries {
-                let tag = match entry {
-                    Entry::Event { tag, .. } | Entry::Gap { tag, .. } => tag,
+                let key = match entry {
+                    Entry::Event { key, .. } | Entry::Gap { key, .. } => key,
                 };
-                let (peer, run) = tag.split_once(':').unwrap_or(("", tag));
-                let machine = conversation::destination(data, peer);
-                ui.horizontal_wrapped(|ui| match entry {
-                    Entry::Event { thread, event, .. } => {
-                        let key = ThreadKey {
-                            peer: peer.into(),
-                            id: thread.into(),
-                        };
-                        let name = crate::find_thread(data, &key)
-                            .map(|t| t.title.as_str())
-                            .unwrap_or_else(|| if run.len() >= 8 { &run[..8] } else { run });
-                        ui.weak(age(event.at));
-                        ui.label(&machine.label);
-                        ui.label(name);
-                        ui.label(RichText::new(event.label).monospace());
+                let machine = conversation::destination(data, &key.peer);
+                let resident = data.agents.resident(key).is_some();
+                let title = crate::find_thread(data, key)
+                    .map(|thread| thread.title.as_str())
+                    .or_else(|| {
+                        data.agents
+                            .resident(key)
+                            .and_then(|resident| resident["name"].as_str())
+                    })
+                    .unwrap_or("Conversation");
+                ui.horizontal_wrapped(|ui| {
+                    match entry {
+                        Entry::Event { event, .. } => {
+                            conversation::journal_time(ui, Some(event.at));
+                            ui.weak(&machine.label);
+                            ui.label(RichText::new(event.label).monospace());
+                        }
+                        Entry::Gap {
+                            detected,
+                            recovered,
+                            ended,
+                            ..
+                        } => {
+                            ui.weak(&machine.label);
+                            let from = conversation::utc_minute(*detected);
+                            let gap = ended.map_or_else(
+                                || format!("Coverage gap since {from}"),
+                                |end| {
+                                    format!(
+                                        "Coverage gap {from}–{} · {recovered} replayed into",
+                                        conversation::utc_minute(end),
+                                    )
+                                },
+                            );
+                            ui.colored_label(egui::Color32::from_rgb(216, 162, 58), gap)
+                                .on_hover_text("Client observation time (UTC)");
+                        }
                     }
-                    Entry::Gap {
-                        recovered, closed, ..
-                    } => {
-                        ui.weak(&machine.label);
-                        ui.colored_label(
-                            egui::Color32::from_rgb(216, 162, 58),
-                            if *closed {
-                                format!("Coverage gap · {recovered} events replayed into the run")
-                            } else {
-                                "Coverage gap · waiting for observation".into()
-                            },
-                        );
+                    if ui.link(title).clicked() {
+                        if resident {
+                            actions.push(Action::OpenActivity(key.clone(), false));
+                        } else {
+                            actions.push(Action::Open(key.clone(), false));
+                        }
                     }
                 });
             }
         });
+    ui.weak("Live only · received order · open a thread to replay it");
 }
 
 #[cfg(test)]
@@ -197,21 +249,23 @@ mod tests {
     fn replay_updates_the_gap_and_live_rows_stay_in_arrival_order() {
         let mut pulse = Pulse::default();
         assert!(visible(&json!({"at":10,"kind":"context_budget"})).is_none());
+        let key = ThreadKey {
+            peer: "peer".into(),
+            id: "thread".into(),
+        };
         pulse.live(
-            "peer:run",
-            "thread",
+            &key,
             Visible {
                 at: 12,
                 label: "tool",
             },
         );
-        pulse.gap("peer:run");
-        pulse.gap("peer:run");
+        pulse.gap("peer:run", &key);
+        pulse.gap("peer:run", &key);
         pulse.replayed("peer:run", 3, false);
         pulse.replayed("peer:run", 2, true);
         pulse.live(
-            "peer:run",
-            "thread",
+            &key,
             Visible {
                 at: 7,
                 label: "reply",
@@ -222,7 +276,7 @@ mod tests {
             pulse.entries[1],
             Entry::Gap {
                 recovered: 5,
-                closed: true,
+                ended: Some(_),
                 ..
             }
         ));

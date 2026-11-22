@@ -150,9 +150,11 @@ transmission. Acceptance discovered by response or catalog reconciles that ID;
 an uncertain submission offers an explicit same-ID retry. Restart does not
 resubmit work automatically. Steering/cancellation are sent once and are not
 idempotent retries; uncertain steering retains the draft and an incident notice.
-A rejected steering send refreshes the addressed run. A terminal snapshot puts
-the composer through its usual ended-run transition, with the draft available
-for an explicit follow-up.
+Send reads the daemon's current conversation head and uses its input state.
+A steering refusal that proves the update was never dispatched can trigger one
+follow-up through exact-predecessor admission. Uncertain dispatch stays with the
+draft. A queued OpenRouter update has its own receipt until the run records its
+incorporation or ends before applying it.
 When Antigravity reports that its prompt ended and a native background command
 remains open, the composer offers ordinary **Send** as soon as the daemon
 reports that the same session can take a fresh prompt. Late command updates
@@ -170,8 +172,11 @@ an unknown gauge.
 The **Live pulse** pane receives a bounded arrival-order projection of live
 run observations. Events read while catching up to a sampled journal frontier
 stay in the run replay. After a connection gap, the pulse records how many
-visible events replay caught up for that run. Watchlist event labels and ages
-use the same observation classification.
+visible events replay caught up for that run. Machine coverage counts current
+observers against the latest known active-run catalogs, within the 16-stream
+limit. Watchlist event labels and ages use the same observation classification.
+Pending request controls require an observer that has reached the sampled
+frontier and the exact request still present in that run's projection.
 
 While Claude Code owns an active anonymous run, Send can retain a held
 follow-up on that daemon. Each machine can append its own contributions.

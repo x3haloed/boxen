@@ -97,12 +97,9 @@ pub fn run(
                         let response = ui
                             .scope(|ui| {
                                 if row.request.is_some()
-                                    && !terminal(run)
                                     && !data.errors.contains_key(&key.peer)
-                                    && data
-                                        .watches
-                                        .get(&tag)
-                                        .is_some_and(|watch| watch.error.is_none())
+                                    && data.agents.error(key).is_none()
+                                    && crate::needs::replay_current(data, &tag, run)
                                 {
                                     crate::thread_view::backend_request(ui, row, key, id, actions);
                                 } else {

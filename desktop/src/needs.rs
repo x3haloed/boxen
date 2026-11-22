@@ -35,7 +35,7 @@ pub fn active_runs(data: &Data) -> impl Iterator<Item = Active<'_>> {
 }
 
 impl Active<'_> {
-    fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         self.run["record"]["spec"]["id"]
             .as_str()
             .unwrap_or_default()
@@ -46,22 +46,51 @@ impl Active<'_> {
             && (!self.resident || data.agents.error(&self.key).is_none())
     }
 
-    fn observed(&self, data: &Data, tag: &str) -> bool {
-        if !self.reachable(data) {
-            return false;
-        }
-        let frontier = data
-            .watches
-            .get(tag)
-            .filter(|watch| !watch.done && watch.error.is_none())
-            .and_then(|watch| watch.frontier);
-        data.transcripts.get(tag).is_some_and(|transcript| {
-            frontier.is_some_and(|frontier| {
-                let catalog = self.run["last_seq"].as_u64().unwrap_or(frontier);
-                transcript.seq >= frontier.max(catalog)
-            })
-        })
+    pub fn observed(&self, data: &Data, tag: &str) -> bool {
+        self.reachable(data) && replay_current(data, tag, self.run)
     }
+}
+
+pub fn replay_current(data: &Data, tag: &str, run: &Value) -> bool {
+    if terminal(run) {
+        return false;
+    }
+    let frontier = data
+        .watches
+        .get(tag)
+        .filter(|watch| !watch.done && watch.error.is_none())
+        .and_then(|watch| watch.frontier);
+    data.transcripts.get(tag).is_some_and(|transcript| {
+        frontier.is_some_and(|frontier| {
+            let catalog = run["last_seq"].as_u64().unwrap_or(frontier);
+            transcript.seq >= frontier.max(catalog)
+        })
+    })
+}
+
+#[derive(Default)]
+pub struct Coverage {
+    pub observed: usize,
+    pub total: usize,
+}
+
+pub fn coverage(data: &Data) -> std::collections::HashMap<&str, Coverage> {
+    let mut hosts = std::collections::HashMap::<&str, Coverage>::new();
+    for active in active_runs(data) {
+        let peer = data
+            .saved
+            .destinations
+            .iter()
+            .find(|host| host.key == active.key.peer)
+            .map(|host| host.key.as_str());
+        if let Some(peer) = peer {
+            let count = hosts.entry(peer).or_default();
+            count.total += 1;
+            let tag = run_key(peer, active.id());
+            count.observed += usize::from(active.observed(data, &tag));
+        }
+    }
+    hosts
 }
 
 pub fn toolbar(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
@@ -141,4 +170,53 @@ pub fn toolbar(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
                 }
             });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Observing, model::Destination};
+    use serde_json::json;
+    use std::time::Instant;
+
+    #[test]
+    fn reachable_host_can_have_partial_coverage() {
+        let mut data = Data::default();
+        let host = "fixture-host";
+        data.saved.destinations.push(Destination {
+            key: host.into(),
+            label: "Fixture host".into(),
+            address: String::new(),
+        });
+        let snapshot = |id| json!({"status":"waiting","last_seq":2,"record":{"spec":{"id":id,"thread_id":"thread"}}});
+        data.catalogs.insert(
+            host.into(),
+            crate::model::catalog(host, &[snapshot("old"), snapshot("head")]),
+        );
+        let tag = run_key(host, "head");
+        data.watches.insert(
+            tag.clone(),
+            Observing {
+                key: ThreadKey {
+                    peer: host.into(),
+                    id: "thread".into(),
+                },
+                epoch: 1,
+                stop: Default::default(),
+                retry: Instant::now(),
+                error: None,
+                done: false,
+                frontier: Some(2),
+            },
+        );
+        data.transcripts.entry(tag.clone()).or_default().seq = 1;
+        let hosts = coverage(&data);
+        assert_eq!((hosts[host].observed, hosts[host].total), (0, 2));
+        data.transcripts.get_mut(&tag).unwrap().seq = 2;
+        let hosts = coverage(&data);
+        assert_eq!((hosts[host].observed, hosts[host].total), (1, 2));
+        data.errors.insert(host.into(), "offline".into());
+        let hosts = coverage(&data);
+        assert_eq!((hosts[host].observed, hosts[host].total), (0, 2));
+    }
 }

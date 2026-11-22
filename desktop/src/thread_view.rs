@@ -916,10 +916,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     let compact = ui.available_height() < 170.;
     if compact
         && !data.errors.contains_key(&key.peer)
-        && data
-            .watches
-            .get(&live_tag)
-            .is_some_and(|watch| watch.error.is_none())
+        && last.is_some_and(|run| crate::needs::replay_current(data, &live_tag, run))
         && let Some(transcript) = data.transcripts.get(&live_tag)
     {
         for row in transcript.rows.iter().filter(|row| row.request.is_some()) {
@@ -978,12 +975,8 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                 let response = ui.push_id(&tag, |ui| {
                     view::run_divider(ui, run, &format!("Run {number}"));
                     let live = !compact
-                        && !terminal(run)
                         && !data.errors.contains_key(&key.peer)
-                        && data
-                            .watches
-                            .get(&tag)
-                            .is_some_and(|watch| watch.error.is_none());
+                        && crate::needs::replay_current(data, &tag, run);
                     if activity
                         && let Some(machine) = run["machine"].as_str().filter(|m| *m != key.peer)
                     {
@@ -1837,6 +1830,7 @@ mod tests {
             data.watches.insert(
                 tag.clone(),
                 crate::Observing {
+                    key: key.clone(),
                     epoch: 1,
                     stop: Default::default(),
                     retry: std::time::Instant::now(),
