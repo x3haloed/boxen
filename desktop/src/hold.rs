@@ -596,11 +596,7 @@ mod tests {
     #[test]
     #[ignore = "scripts/desktop-smoke.py supplies private paired daemons"]
     fn real_daemon_boundary_hold_release_and_edit_recovery() {
-        use crate::{
-            Saved,
-            client::{Bus, Client},
-            model::Destination,
-        };
+        use crate::{Saved, client::Client, model::Destination};
         use std::{
             path::PathBuf,
             time::{Duration, Instant},
@@ -619,31 +615,17 @@ mod tests {
         let home = daemon_home.join("release-fixture");
         std::fs::create_dir(&home).unwrap();
         let state_path = home.join("desktop.json");
-        let fixture = |client, saved| Desktop {
-            data: Data {
-                saved,
-                ..Default::default()
-            },
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            native_menu: None,
-            client: Some(client),
-            bus: Bus::new(egui::Context::default()),
-            home: home.clone(),
-            state_path: state_path.clone(),
-            origin: origin.clone(),
-            polls: Default::default(),
-            field: None,
-            palette: false,
-            palette_fresh: false,
-            query: String::new(),
-            choice: 0,
-            connection: false,
-            last_save: Instant::now(),
-            next_watch: 0,
-            next_discovery: Instant::now(),
-            delivery_cursor: 0,
-            ready: true,
-            extra: None,
+        let fixture = |client, saved| {
+            crate::fixture_desktop(
+                egui::Context::default(),
+                Data {
+                    saved,
+                    ..Default::default()
+                },
+                home.clone(),
+                origin.clone(),
+                Some(client),
+            )
         };
         let after = new_id();
         let key = ThreadKey {

@@ -1889,6 +1889,40 @@ impl Drop for Desktop {
         }
     }
 }
+
+#[cfg(test)]
+fn fixture_desktop(
+    ctx: egui::Context,
+    data: Data,
+    home: PathBuf,
+    origin: String,
+    client: Option<Client>,
+) -> Desktop {
+    Desktop {
+        data,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        native_menu: None,
+        client,
+        bus: Bus::new(ctx),
+        state_path: home.join("desktop.json"),
+        home,
+        origin,
+        polls: HashMap::new(),
+        field: None,
+        palette: false,
+        palette_fresh: false,
+        query: String::new(),
+        choice: 0,
+        connection: false,
+        last_save: Instant::now(),
+        next_watch: 0,
+        next_discovery: Instant::now(),
+        delivery_cursor: 0,
+        ready: true,
+        extra: None,
+    }
+}
+
 fn main() -> eframe::Result {
     let mut home = std::env::var_os("BOXEN_HOME")
         .map(PathBuf::from)

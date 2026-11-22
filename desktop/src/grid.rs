@@ -1133,23 +1133,59 @@ mod tests {
             columns: Grid::columns_for(2040.),
             ..Default::default()
         };
-        for id in ["a", "b", "c", "d"] {
-            grid.open(pane(id), true);
+        let names = ["first", "second", "third", "fourth"];
+        for name in names {
+            grid.open(pane(name), true);
         }
         let original: Vec<_> = grid.slots.iter().map(|slot| slot.home).collect();
-        grid.columns = Grid::columns_for(1600.);
-        assert!(
-            grid.slots[..3]
-                .iter()
-                .all(|slot| slot.home.fits(grid.columns))
+        let mut data = crate::Data::default();
+        data.saved.workspace.grid = Some(grid);
+
+        let ctx = egui::Context::default();
+        crate::console_style::install(&ctx);
+        let mut desktop = crate::fixture_desktop(
+            ctx.clone(),
+            data,
+            std::path::PathBuf::new(),
+            String::new(),
+            None,
         );
-        assert!(!grid.slots[3].home.fits(grid.columns));
-        grid.columns = Grid::columns_for(2040.);
-        assert!(grid.slots.iter().all(|slot| slot.home.fits(grid.columns)));
-        assert_eq!(
-            grid.slots.iter().map(|slot| slot.home).collect::<Vec<_>>(),
-            original
-        );
+        for (width, columns, shown) in [(2040., 4, 4), (1600., 3, 3), (2040., 4, 4)] {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 1000.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut actions = Vec::new();
+                    desktop.grid_workspace(ui, &mut actions);
+                    assert!(actions.is_empty());
+                },
+            );
+            let visible_text = |label: &str| {
+                output.shapes.iter().any(|shape| {
+                    matches!(&shape.shape, egui::Shape::Text(text)
+                        if text.galley.job.text == label && shape.clip_rect.contains(text.pos))
+                })
+            };
+            assert_eq!(desktop.grid().columns, columns);
+            assert_eq!(visible_text("Parked (1)"), shown == 3);
+            for (index, name) in names.iter().enumerate() {
+                assert_eq!(visible_text(&format!("Machine / {name}")), index < shown);
+            }
+            assert_eq!(
+                desktop
+                    .grid()
+                    .slots
+                    .iter()
+                    .map(|slot| slot.home)
+                    .collect::<Vec<_>>(),
+                original,
+            );
+        }
     }
 
     #[test]
