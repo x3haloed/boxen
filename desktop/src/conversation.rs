@@ -106,7 +106,7 @@ pub fn history(
     show: impl FnOnce(&mut egui::Ui, &mut Data),
 ) {
     let view = data.views.entry(key.clone()).or_default();
-    if !view.at_latest && view.visible.is_some() && ui.small_button("Jump to latest").clicked() {
+    if !view.at_latest && view.visible.is_some() && ui.button("Jump to latest").clicked() {
         view.latest = true;
         view.anchor = None;
     }
@@ -232,7 +232,7 @@ pub fn composer(
             let attach = ui
                 .add_enabled(
                     !working && files.len() < attachments::MAX_FILES,
-                    egui::Button::new(if working { "…" } else { "+" }).frame(false),
+                    crate::console_style::icon_button(if working { "…" } else { "+" }),
                 )
                 .on_hover_text("Attach files · or drop files onto the composer")
                 .clicked();
@@ -284,7 +284,7 @@ pub fn composer(
             let click = ui
                 .add_enabled_ui(valid, |ui| {
                     ui.add_sized(
-                        egui::vec2(send_width, 18.),
+                        egui::vec2(send_width, crate::console_style::MIN_TARGET),
                         egui::Button::new(RichText::new(&send_text).font(send_font).color(
                             if valid {
                                 ACCENT_HINT
@@ -323,7 +323,7 @@ pub fn composer(
             for error in &p.errors {
                 ui.label(error);
             }
-            if ui.small_button("Dismiss").clicked() {
+            if ui.button("Dismiss").clicked() {
                 p.errors.clear();
             }
         });
@@ -1154,9 +1154,9 @@ pub fn activity_rows(ui: &mut egui::Ui, rows: &[Row]) {
                 let mut header = state.show_header(ui, |ui| {
                     let outcome_width = if result.is_some() { 58. } else { 0. };
                     let width = (ui.available_width() - outcome_width).max(16.);
-                    let response = ui
+                    let area = ui
                         .allocate_ui_with_layout(
-                            egui::vec2(width, 18.),
+                            egui::vec2(width, crate::console_style::MIN_TARGET),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
                                 ui.add(
@@ -1168,9 +1168,11 @@ pub fn activity_rows(ui: &mut egui::Ui, rows: &[Row]) {
                                 )
                             },
                         )
-                        .inner
-                        .on_hover_text(&title);
-                    clicked = response.clicked();
+                        ;
+                    // The step title's whole row toggles the group, not only its glyphs.
+                    let row = area.response.interact(egui::Sense::click());
+                    clicked = area.inner.clicked() || row.clicked();
+                    row.on_hover_text(&title);
                     if let Some((result, color)) = &result {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(RichText::new(result).monospace().size(10.5).color(*color));

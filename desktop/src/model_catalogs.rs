@@ -160,7 +160,7 @@ impl Catalogs {
                 }
                 Some(Lookup::Failed(error)) => {
                     if ui
-                        .small_button("Retry model list")
+                        .button("Retry model list")
                         .on_hover_text(error)
                         .clicked()
                     {

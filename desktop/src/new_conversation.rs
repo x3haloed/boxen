@@ -114,7 +114,7 @@ pub fn dialog(ctx: &egui::Context, data: &mut Data, actions: &mut Vec<Action>) {
             for error in &preparation.errors {
                 ui.label(error);
             }
-            if !preparation.errors.is_empty() && ui.small_button("Dismiss").clicked() {
+            if !preparation.errors.is_empty() && ui.button("Dismiss").clicked() {
                 preparation.errors.clear();
             }
         }
@@ -262,7 +262,7 @@ fn settings(
 
             ui.label("Working directory");
             ui.add(
-                egui::TextEdit::singleline(&mut settings.cwd)
+                egui::TextEdit::singleline(&mut settings.cwd).margin(crate::console_style::FIELD_MARGIN)
                     .desired_width(width)
                     .hint_text("Automatic working area"),
             );
@@ -319,7 +319,7 @@ fn settings(
                 });
             } else {
                 ui.add(
-                    egui::TextEdit::singleline(&mut settings.model)
+                    egui::TextEdit::singleline(&mut settings.model).margin(crate::console_style::FIELD_MARGIN)
                         .desired_width(width)
                         .hint_text("Default model"),
                 );

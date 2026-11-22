@@ -1286,7 +1286,7 @@ impl Desktop {
             .default_width(620.)
             .show(ctx, |ui| {
                 let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
+                    egui::TextEdit::singleline(&mut self.query).margin(crate::console_style::FIELD_MARGIN)
                         .hint_text("Search commands and threads…")
                         .desired_width(f32::INFINITY),
                 );
@@ -1646,7 +1646,7 @@ impl TabViewer for Viewer<'_> {
                     let search_width =
                         (ui.available_width() - 28. - ui.spacing().item_spacing.x).max(24.);
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.data.filter)
+                        egui::TextEdit::singleline(&mut self.data.filter).margin(crate::console_style::FIELD_MARGIN)
                             .hint_text("Filter Watchlist…")
                             .desired_width(search_width),
                     );
@@ -1834,7 +1834,7 @@ impl eframe::App for Desktop {
             egui::Panel::bottom("statusbar").show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(&self.data.notice);
-                    if ui.small_button("Dismiss").clicked() {
+                    if ui.button("Dismiss").clicked() {
                         self.data.notice.clear();
                     }
                 });

@@ -489,7 +489,7 @@ pub fn toolbar(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
                                     Some(enter && previous_index == Some(position)),
                                 );
                             }
-                            if ui.small_button("Go to context (G)").clicked()
+                            if ui.button("Go to context (G)").clicked()
                                 || (open && previous_index == Some(position))
                             {
                                 actions.push(gate.open());

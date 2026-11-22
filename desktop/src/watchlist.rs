@@ -57,7 +57,9 @@ fn label(ui: &mut egui::Ui, rect: egui::Rect, text: &str, color: Color32) -> egu
     cell(
         ui,
         rect,
-        egui::Label::new(RichText::new(text).monospace().size(10.).color(color)).truncate(),
+        egui::Label::new(RichText::new(text).monospace().size(10.).color(color))
+            .truncate()
+            .selectable(false),
     )
 }
 
@@ -105,16 +107,22 @@ impl Row<'_> {
         } else {
             ui.visuals().text_color()
         });
-        let response = cell(
+        // The whole row, not only the name's glyphs, is the click target.
+        let response = ui.interact(
+            c.name.union(c.age),
+            ui.next_auto_id().with(("watchlist-row", self.title)),
+            egui::Sense::click(),
+        );
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, self.title));
+        cell(
             ui,
             c.name,
             egui::Label::new(title)
                 .truncate()
                 .halign(egui::Align::Min)
-                .sense(egui::Sense::click()),
+                .selectable(false),
         );
-        response
-            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, self.title));
         if let Some((key, runs)) = self.context {
             let mut mark =
                 ui.new_child(egui::UiBuilder::new().max_rect(c.mark.shrink2(egui::vec2(1., 4.))));
@@ -453,7 +461,7 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
                     anchor.clone(),
                 ));
             }
-            if ui.small_button("Open on grid").clicked() {
+            if ui.button("Open on grid").clicked() {
                 actions.push(open());
             }
         } else if ui
@@ -521,5 +529,14 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         };
         assert_eq!(frame(vec![enter]).1, Some(true));
+        // The AGE column, far from the name's glyphs, is part of the target.
+        let edge = |pressed| egui::Event::PointerButton {
+            pos: egui::pos2(270., pos.y),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(egui::pos2(270., pos.y)), edge(true)]);
+        assert_eq!(frame(vec![edge(false)]).1, Some(false));
     }
 }

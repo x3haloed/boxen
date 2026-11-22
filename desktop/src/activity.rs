@@ -47,7 +47,7 @@ pub fn earlier(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey) {
         .and_then(|r| r["record"]["spec"]["id"].as_str())
         .map(str::to_owned);
     let window = data.activity.entry(key.clone()).or_insert(Window { first });
-    if start > 0 && ui.small_button("Load earlier activity").clicked() {
+    if start > 0 && ui.button("Load earlier activity").clicked() {
         window.first = previous;
     }
 }

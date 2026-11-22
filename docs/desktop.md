@@ -49,6 +49,11 @@ builds include their SIL Open Font License notices. [Inter](https://github.com/r
 
 ## First interactions
 
+Every clickable control has at least Apple's macOS minimum 20 × 20 pt target.
+Glyph buttons such as attach, `···`, `+`, the gear and pane close reserve a
+20 pt square around the glyph. Watchlist rows, step-group titles and pane
+headings respond across their full width, not only on their text.
+
 - macOS and Windows use native menus. Linux uses the in-window menu.
   **File** offers **New Thread** and **Reconnect Daemon**. The app toolbar holds
   the finder field, the network's machines, and on the right the Parked and

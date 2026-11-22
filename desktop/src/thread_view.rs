@@ -87,7 +87,7 @@ fn next_run_settings(
             ui.checkbox(&mut change_directory, "Choose a working directory");
             if change_directory {
                 ui.add(
-                    egui::TextEdit::singleline(settings.cwd.get_or_insert_with(String::new))
+                    egui::TextEdit::singleline(settings.cwd.get_or_insert_with(String::new)).margin(crate::console_style::FIELD_MARGIN)
                         .hint_text("Automatic working area"),
                 );
             } else {
@@ -131,7 +131,7 @@ fn next_run_settings(
                 .inner
             } else {
                 ui.add(
-                    egui::TextEdit::singleline(settings.model.get_or_insert_with(String::new))
+                    egui::TextEdit::singleline(settings.model.get_or_insert_with(String::new)).margin(crate::console_style::FIELD_MARGIN)
                         .hint_text("Default model"),
                 );
                 true
@@ -899,7 +899,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             egui::containers::menu::MenuButton::from_button(
-                egui::Button::new(egui::RichText::new("···").size(13.)).frame(false),
+                crate::console_style::icon_button(egui::RichText::new("···").size(13.)),
             )
             .ui(ui, |ui| {
                 ui.set_min_width(220.);
@@ -1257,7 +1257,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             } else {
                 "Request acceptance is unconfirmed."
             });
-            if !sending && ui.small_button("Retry same request").clicked() {
+            if !sending && ui.button("Retry same request").clicked() {
                 actions.push(Action::Retry(*index));
             }
         });
@@ -1300,7 +1300,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             } else {
                 ui.weak("Awaiting runtime");
             }
-            if !data.active_steering.contains(key) && ui.small_button("Keep as draft").clicked() {
+            if !data.active_steering.contains(key) && ui.button("Keep as draft").clicked() {
                 actions.push(Action::RestoreSteer(steering));
             }
         });
@@ -1448,7 +1448,7 @@ fn antigravity_input(
             ui.monospace(crate::model::display(schema));
         });
         if let Some(content) = backend_json_input(ui, "Form values (JSON)")
-            && ui.small_button("Submit form").clicked()
+            && ui.button("Submit form").clicked()
         {
             actions.push(Action::Respond(
                 key.clone(),
@@ -1686,7 +1686,7 @@ fn command_approval(ui: &mut egui::Ui, params: &Value, mut first: Option<bool>) 
     ui.horizontal_wrapped(|ui| {
         ui.strong("Approval requested");
         if let Some(command) = command
-            && ui.small_button("Copy command").clicked()
+            && ui.button("Copy command").clicked()
         {
             ui.ctx().copy_text(command.to_owned());
         }

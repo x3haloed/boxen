@@ -509,7 +509,7 @@ pub fn panel(
                                 let mut draft =
                                     ui.data_mut(|memory| memory.get_temp::<String>(edit));
                                 ui.horizontal(|ui| {
-                                    if ui.small_button("Edit").clicked() {
+                                    if ui.button("Edit").clicked() {
                                         draft = Some(
                                             data.saved
                                                 .hold_drafts
@@ -550,7 +550,7 @@ pub fn panel(
                                             changed != text,
                                         ));
                                     }
-                                    if ui.small_button("Save edit").clicked() {
+                                    if ui.button("Save edit").clicked() {
                                         let mut contribution = own.clone();
                                         contribution.text = changed.clone();
                                         actions.push(Action::HoldChange(

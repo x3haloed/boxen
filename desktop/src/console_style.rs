@@ -3,6 +3,21 @@ use eframe::egui::{
     self, Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle,
 };
 
+/// Apple's macOS minimum control size, in points.
+pub const MIN_TARGET: f32 = 20.;
+
+/// Single-line field padding: one row of 12 pt body text plus 3 pt above and
+/// below reaches [`MIN_TARGET`]. egui's `TextEdit::min_size` ignores height.
+pub const FIELD_MARGIN: egui::Margin = egui::Margin::symmetric(4, 3);
+
+/// A borderless glyph button whose click target meets [`MIN_TARGET`] in both
+/// dimensions regardless of the glyph's width.
+pub fn icon_button<'a>(text: impl Into<egui::WidgetText>) -> egui::Button<'a> {
+    egui::Button::new(text)
+        .frame(false)
+        .min_size(egui::vec2(MIN_TARGET, MIN_TARGET))
+}
+
 pub const CANVAS: Color32 = Color32::from_rgb(11, 13, 16);
 pub const PANEL: Color32 = Color32::from_rgb(16, 19, 23);
 pub const FIELD: Color32 = Color32::from_rgb(21, 25, 32);
@@ -51,7 +66,7 @@ pub fn install(ctx: &egui::Context) {
     ctx.style_mut_of(egui::Theme::Dark, |style| {
         style.spacing.item_spacing = egui::vec2(5., 2.);
         style.spacing.button_padding = egui::vec2(5., 2.);
-        style.spacing.interact_size.y = 20.;
+        style.spacing.interact_size.y = MIN_TARGET;
         for (role, font) in [
             (TextStyle::Heading, FontId::proportional(14.)),
             (TextStyle::Body, FontId::proportional(12.)),
@@ -142,5 +157,33 @@ mod tests {
             missing
         });
         assert!(missing.is_empty(), "{missing:#?}");
+    }
+
+    #[test]
+    fn glyph_buttons_buttons_and_fields_meet_the_macos_minimum_target() {
+        let ctx = egui::Context::default();
+        super::install(&ctx);
+        let mut rects = Vec::new();
+        let mut text = String::new();
+        for _ in 0..2 {
+            rects.clear();
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                rects.push(("icon +", ui.add(super::icon_button("+")).rect));
+                rects.push(("button", ui.button("Dismiss").rect));
+                rects.push((
+                    "field",
+                    ui.add(egui::TextEdit::singleline(&mut text).margin(super::FIELD_MARGIN))
+                        .rect,
+                ));
+            });
+        }
+        for (name, rect) in &rects {
+            assert!(
+                rect.width() >= super::MIN_TARGET - 0.01
+                    && rect.height() >= super::MIN_TARGET - 0.01,
+                "{name} is {:?}",
+                rect.size()
+            );
+        }
     }
 }

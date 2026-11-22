@@ -115,7 +115,7 @@ impl Catalogs {
             Some(Lookup::Failed(error)) => {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Runtime list unavailable").on_hover_text(error);
-                    if ui.small_button("Retry").clicked() {
+                    if ui.button("Retry").clicked() {
                         actions.push(Action::LoadRuntimes(destination.clone()));
                     }
                 });

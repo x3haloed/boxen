@@ -261,7 +261,7 @@ impl State {
             });
         }
         ui.add(
-            egui::TextEdit::singleline(&mut self.filter)
+            egui::TextEdit::singleline(&mut self.filter).margin(crate::console_style::FIELD_MARGIN)
                 .hint_text("Filter work items…")
                 .desired_width(f32::INFINITY),
         );

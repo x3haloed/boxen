@@ -623,7 +623,7 @@ impl Desktop {
             let ui = &mut right;
             ui.spacing_mut().item_spacing.x = 10.;
             egui::containers::menu::MenuButton::from_button(
-                egui::Button::new(RichText::new("⚙").size(13.)).frame(false),
+                crate::console_style::icon_button(RichText::new("⚙").size(13.)),
             )
             .ui(ui, |ui| {
                 if ui.button("Settings…").clicked() {
@@ -721,11 +721,11 @@ impl Desktop {
                         });
                         ui.horizontal(|ui| {
                             let layout = self.grid_mut();
-                            if ui.small_button("Peek").clicked() {
+                            if ui.button("Peek").clicked() {
                                 layout.open(pane.clone(), false);
                                 ui.close();
                             }
-                            if ui.small_button("Place on grid…").clicked() {
+                            if ui.button("Place on grid…").clicked() {
                                 layout.open(pane.clone(), true);
                                 ui.close();
                             }
@@ -895,7 +895,7 @@ impl Desktop {
             if sidebar == Pane::Threads {
                 ui.strong("Watchlist");
             } else {
-                if ui.small_button("← Watchlist").clicked() {
+                if ui.button("← Watchlist").clicked() {
                     sidebar = Pane::Threads;
                 }
                 ui.strong(match sidebar {
@@ -906,7 +906,7 @@ impl Desktop {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 egui::containers::menu::MenuButton::from_button(
-                    egui::Button::new("···").frame(false),
+                    crate::console_style::icon_button("···"),
                 )
                 .ui(ui, |ui| {
                     for (pane, label) in [
@@ -923,7 +923,7 @@ impl Desktop {
                 .0
                 .on_hover_text("Sidebar views");
                 if ui
-                    .add(egui::Button::new("+").frame(false))
+                    .add(crate::console_style::icon_button("+"))
                     .on_hover_text("New thread")
                     .clicked()
                 {
@@ -973,13 +973,13 @@ impl Desktop {
                     .weak(),
                 );
                 ui.add_space(4.);
-                if ui.small_button("+ Open here").clicked() {
+                if ui.button("+ Open here").clicked() {
                     self.open_palette();
                     self.grid_mut().open_here = Some(hole);
                 }
                 let layout = self.grid_mut();
                 if let Some((pane, expanded)) = layout.neighbor(hole)
-                    && ui.small_button("Expand neighbor").clicked()
+                    && ui.button("Expand neighbor").clicked()
                 {
                     layout.install(pane, expanded);
                 }
@@ -1046,7 +1046,7 @@ impl Desktop {
                 ));
                 let (name, run) = pane_heading(&self.data, &slot.pane, title.text());
                 let width = (ui.available_width() - 75.).max(0.);
-                if ui
+                let heading = ui
                     .allocate_ui_with_layout(
                         egui::vec2(width, 20.),
                         egui::Layout::left_to_right(egui::Align::Center),
@@ -1074,9 +1074,10 @@ impl Desktop {
                             }
                             response
                         },
-                    )
-                    .inner
-                    .clicked()
+                    );
+                // The heading's full width focuses the pane, not only its glyphs.
+                if heading.inner.clicked()
+                    || heading.response.interact(egui::Sense::click()).clicked()
                 {
                     self.grid_mut().focus = Some(slot.pane.clone());
                     match &slot.pane {
@@ -1087,7 +1088,7 @@ impl Desktop {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close = ui.small_button("×").on_hover_text("Close pane").clicked();
+                    close = ui.add(crate::console_style::icon_button("×")).on_hover_text("Close pane").clicked();
                     let pane = slot.pane.clone();
                     ui.menu_button(format!("{}×{}", slot.home.width, slot.home.height), |ui| {
                         ui.set_min_width(240.);

@@ -729,18 +729,18 @@ pub fn message_title(data: &Data, key: &ThreadKey) -> String {
 pub fn inbox(ui: &mut egui::Ui, data: &mut Data, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.heading("Mail");
-        if ui.small_button("New message").clicked() {
+        if ui.button("New message").clicked() {
             actions.push(Action::Mail(MailAction::New));
         }
     });
     ui.add(
-        egui::TextEdit::singleline(&mut data.mail.filter)
+        egui::TextEdit::singleline(&mut data.mail.filter).margin(crate::console_style::FIELD_MARGIN)
             .hint_text("Filter messages…")
             .desired_width(f32::INFINITY),
     );
     ui.weak("Your network inbox · replies are optional");
     if !data.local_key.is_empty() {
-        ui.small_button("Copy mailbox address")
+        ui.button("Copy mailbox address")
             .on_hover_text("Other Boxen clients can use this same address.")
             .clicked()
             .then(|| {
@@ -981,7 +981,7 @@ pub fn details(ui: &mut egui::Ui, pane: &Pane, data: &mut Data, actions: &mut Ve
         }
         changed |= ui
             .add(
-                egui::TextEdit::singleline(&mut draft.subject)
+                egui::TextEdit::singleline(&mut draft.subject).margin(crate::console_style::FIELD_MARGIN)
                     .hint_text("Subject")
                     .desired_width(f32::INFINITY),
             )
@@ -1485,7 +1485,7 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
                                         .find(|(i, _)| i == parent)
                                         .map(|(_, (_, v))| snippet(v))
                                         .unwrap_or_else(|| "Earlier message".into());
-                                    if ui.small_button(format!("↳ {title}")).clicked() {
+                                    if ui.button(format!("↳ {title}")).clicked() {
                                         message_anchor = Some(parent.into());
                                     }
                                 }
@@ -1499,7 +1499,7 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
                                 );
                                 if !activity
                                     && latest_incoming == Some(id)
-                                    && ui.small_button("Show in Activity").clicked()
+                                    && ui.button("Show in Activity").clicked()
                                 {
                                     switch = Some(id.clone());
                                 }
@@ -1548,10 +1548,10 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
             .map(|(_, (_, m))| snippet(m))
             .unwrap_or_else(|| "Earlier message".into());
         ui.horizontal_wrapped(|ui| {
-            if ui.small_button(format!("Replying to: {title}")).clicked() {
+            if ui.button(format!("Replying to: {title}")).clicked() {
                 view::switch(data, key, activity, Some(parent.id.clone()));
             }
-            if ui.small_button("Remove reply").clicked() {
+            if ui.button("Remove reply").clicked() {
                 draft.parent = None;
             }
         });
