@@ -173,8 +173,11 @@ idempotent retries; uncertain steering retains the draft and an incident notice.
 Send reads the daemon's current conversation head and uses its input state.
 A steering refusal that proves the update was never dispatched can trigger one
 follow-up through exact-predecessor admission. Uncertain dispatch stays with the
-draft. A queued OpenRouter update has its own receipt until the run records its
-incorporation or ends before applying it.
+draft. The originating desktop keeps the exact link between the refused update
+and its submitted successor. Once the daemon confirms that run, the accepted
+prompt shows `refused → started run` in the timeline, including after restart
+and replay. A queued OpenRouter update has its own receipt until the run records
+its incorporation or ends before applying it.
 When Antigravity reports that its prompt ended and a native background command
 remains open, the composer offers ordinary **Send** as soon as the daemon
 reports that the same session can take a fresh prompt. Late command updates

@@ -57,6 +57,7 @@ struct Saved {
     activity_views: HashSet<ThreadKey>,
     steering: Vec<thread_view::Steering>,
     pending: Vec<Pending>,
+    refused_followups: HashMap<String, String>,
     answers: Vec<AnswerAttempt>,
     reply_watches: HashMap<String, HashSet<String>>,
     thread_replies: Vec<needs::ThreadReply>,
@@ -69,6 +70,18 @@ struct Saved {
     work_added: bool,
     work: work::Saved,
 }
+
+impl Saved {
+    fn remember_refused_followup(&mut self, pending: &Pending) {
+        if let (Some(update), Some(run)) =
+            (&pending.refused_update, pending.spec["id"].as_str())
+        {
+            self.refused_followups
+                .insert(run_key(&pending.destination.key, run), update.clone());
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct AnswerAttempt {
     id: String,
@@ -99,7 +112,6 @@ struct Data {
     fresh_steering: HashSet<String>,
     fallback_inflight: HashSet<String>,
     send_checking: HashSet<ThreadKey>,
-    followup_after_refusal: HashMap<ThreadKey, String>,
     hold_pending: HashSet<ThreadKey>,
     moving: HashSet<ThreadKey>,
     preparing_followups: HashMap<String, thread_view::SendIntent>,
@@ -522,6 +534,7 @@ impl Desktop {
                         continue;
                     }
                     let transcript = self.data.transcripts.entry(id.clone()).or_default();
+                    transcript.see_accepted_input(&batch["snapshot"]["record"]["spec"]);
                     if transcript.execution.is_none()
                         && let Some(selected) = batch["snapshot"]["record"]["execution"].as_object()
                     {
@@ -643,9 +656,10 @@ impl Desktop {
                 Update::Followup(previous, result) => {
                     let intent = self.data.preparing_followups.remove(&previous);
                     match result {
-                        Ok(pending) => {
-                            if let Some(id) = intent.and_then(|intent| intent.refused_id) {
-                                self.retire_refused_steer(&id);
+                        Ok(mut pending) => {
+                            pending.refused_update = intent.and_then(|intent| intent.refused_id);
+                            if let Some(id) = &pending.refused_update {
+                                self.retire_refused_steer(id);
                             }
                             self.submit(pending);
                         }
@@ -653,10 +667,10 @@ impl Desktop {
                             if let Some(intent) = intent {
                                 self.restore_send_intent(&intent);
                                 let key = intent.key;
-                                self.data.followup_after_refusal.remove(&key);
+                                let receipt = thread_view::draft_receipt(intent.refused_id.is_some());
                                 self.data
                                     .thread_issues
-                                    .insert(key, format!("Returned to draft · {error}"));
+                                    .insert(key, format!("{receipt} · {error}"));
                             }
                         }
                     }
@@ -777,7 +791,6 @@ impl Desktop {
                                     id: p.spec["thread_id"].as_str().unwrap_or("").into(),
                                 };
                                 if p.after.is_some() && safe_to_edit {
-                                    self.data.followup_after_refusal.remove(&key);
                                     self.restore_thread_draft(
                                         &key,
                                         p.spec["prompt"].as_str().unwrap_or(""),
@@ -790,7 +803,7 @@ impl Desktop {
                                     self.persist();
                                 }
                                 let receipt = if safe_to_edit {
-                                    "Returned to draft"
+                                    thread_view::draft_receipt(p.refused_update.is_some())
                                 } else {
                                     "? not confirmed · draft kept"
                                 };
@@ -812,6 +825,7 @@ impl Desktop {
         if let Some(run) = p.spec["id"].as_str() {
             self.data.saved.reply_watches.entry(p.destination.key.clone()).or_default().insert(run.into());
         }
+        self.data.saved.remember_refused_followup(p);
         if self.is_new_thread_request(p.spec["id"].as_str().unwrap_or_default()) {
             self.open_queued_thread(key.clone());
         }
@@ -820,15 +834,7 @@ impl Desktop {
             p.spec["prompt"].as_str().unwrap_or(""),
             &attachments::FileRef::parse(&p.spec["attachments"]),
         );
-        let id = p.spec["id"].as_str().unwrap_or("");
-        if p.after.is_some() && self.data.followup_after_refusal.remove(&key).as_deref() == Some(id) {
-            self.data.thread_issues.insert(
-                key.clone(),
-                format!("Refused → started run {}", id.chars().take(8).collect::<String>()),
-            );
-        } else {
-            self.data.thread_issues.remove(&key);
-        }
+        self.data.thread_issues.remove(&key);
         if p.after.is_some() {
             self.data
                 .saved

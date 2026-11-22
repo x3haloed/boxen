@@ -5,6 +5,7 @@
 """
 import argparse
 from smoke_helpers import fake_codex, python_launcher
+import http.server
 import json
 import os
 import pathlib
@@ -12,6 +13,7 @@ import secrets
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -159,7 +161,35 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
         assert operation(query)['dirty'] is True
         env['BOXEN_GUI_TEST_INSPECTOR_RUN'] = inspector_run
         env['BOXEN_GUI_TEST_RESPONSE_RACE'] = json.dumps({'run': gate_run, 'local_attempt': contender})
-        subprocess.run(['cargo','test','--locked','--manifest-path',str(ROOT/'desktop/Cargo.toml'),'real_daemon_boundary','--','--ignored','--nocapture'],env=env,check=True)
+        dropped = []
+
+        class DropResponseAcknowledgment(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                message = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                request = message['request']
+                if (self.path != '/api/operation' or message['peer'] != keys[1]
+                        or request['op'] != 'respond_attempt'):
+                    self.send_error(400)
+                    return
+                # Relay the attempt to the real paired daemon and receive its acknowledgment.
+                # Close the client connection before writing any HTTP response.
+                result = operation(request)
+                dropped.append((request['attempt_id'], result['accepted']))
+                self.close_connection = True
+
+            def log_message(self, *_args):
+                pass
+
+        with http.server.HTTPServer(('127.0.0.1', 0), DropResponseAcknowledgment) as proxy:
+            thread = threading.Thread(target=proxy.serve_forever)
+            thread.start()
+            try:
+                env['BOXEN_GUI_TEST_DROP_RESPONSE_URL'] = f'http://127.0.0.1:{proxy.server_port}'
+                subprocess.run(['cargo','test','--locked','--manifest-path',str(ROOT/'desktop/Cargo.toml'),'real_daemon_boundary','--','--ignored','--nocapture'],env=env,check=True)
+                assert len(dropped) == 1 and dropped[0][1], dropped
+            finally:
+                proxy.shutdown()
+                thread.join()
         if args.interactive:
             # Seed the human inbox through real resident tools, never fabricated journal rows.
             for name,subject,body in [('Resident demo','Project review','The review is ready. There are two questions worth discussing.'),('Worker instance','Workload status','The requested workload has finished. Its execution record remains available.')]:

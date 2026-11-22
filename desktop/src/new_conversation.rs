@@ -364,6 +364,7 @@ impl Desktop {
             destination,
             spec,
             after: None,
+            refused_update: None,
         });
     }
 

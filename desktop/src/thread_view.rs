@@ -174,6 +174,14 @@ pub struct SendIntent {
     pub refused_id: Option<String>,
 }
 
+pub(super) fn draft_receipt(after_refusal: bool) -> &'static str {
+    if after_refusal {
+        "↩ refused · back to draft"
+    } else {
+        "Returned to draft"
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum SendRoute {
     Steer,
@@ -206,6 +214,15 @@ pub fn active(last: Option<&Value>) -> Option<&str> {
 
 fn prompt_ended(run: &Value) -> bool {
     matches!(run["native_prompt"].as_str(), Some("ended" | "ready"))
+}
+
+fn start_receipt(ui: &mut egui::Ui, number: usize, refused_update: Option<&str>) {
+    if let Some(update) = refused_update {
+        ui.weak(format!("refused → started run {number}"))
+            .on_hover_text(format!("Original steering attempt {update}"));
+    } else if number > 1 {
+        ui.weak(format!("✓ started run {number}"));
+    }
 }
 
 impl Desktop {
@@ -393,10 +410,18 @@ impl Desktop {
                         .or_default()
                         .insert(run.clone());
                 }
-                if let Some(transcript) = self.data.transcripts.remove(&run_key(&key.peer, &run)) {
+                let old_tag = run_key(&key.peer, &run);
+                let new_tag = run_key(machine, &run);
+                if let Some(update) = self.data.saved.refused_followups.remove(&old_tag) {
+                    self.data
+                        .saved
+                        .refused_followups
+                        .insert(new_tag.clone(), update);
+                }
+                if let Some(transcript) = self.data.transcripts.remove(&old_tag) {
                     self.data
                         .transcripts
-                        .entry(run_key(machine, &run))
+                        .entry(new_tag)
                         .or_insert(transcript);
                 }
             }
@@ -516,9 +541,10 @@ impl Desktop {
             Ok(head) => head,
             Err(error) => {
                 self.restore_send_intent(&intent);
+                let receipt = draft_receipt(after_refusal);
                 self.data
                     .thread_issues
-                    .insert(key, format!("Returned to draft · {error}"));
+                    .insert(key, format!("{receipt} · {error}"));
                 return;
             }
         };
@@ -527,9 +553,10 @@ impl Desktop {
             || self.data.saved.moves.iter().any(|entry| entry.key == key)
         {
             self.restore_send_intent(&intent);
+            let receipt = draft_receipt(after_refusal);
             self.data
                 .thread_issues
-                .insert(key, "Returned to draft · conversation route changed".into());
+                .insert(key, format!("{receipt} · conversation route changed"));
             return;
         }
         let (Some(run), Some(client)) =
@@ -545,7 +572,7 @@ impl Desktop {
                 self.data.thread_issues.insert(
                     key,
                     if after_refusal {
-                        "Refused · back to draft".into()
+                        draft_receipt(true).into()
                     } else {
                         "Returned to draft · the conversation cannot take input yet".into()
                     },
@@ -555,11 +582,6 @@ impl Desktop {
             SendRoute::Followup => {
                 let settings = settings_for(&self.data, &key);
                 let id = new_id();
-                if after_refusal {
-                    self.data
-                        .followup_after_refusal
-                        .insert(key.clone(), id.clone());
-                }
                 self.data
                     .preparing_followups
                     .insert(run_key(&dest.key, run), intent);
@@ -1010,9 +1032,44 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                             });
                         ui.weak(label);
                     }
-                    let rows = data
-                        .transcripts
-                        .get(&tag)
+                    let transcript = data.transcripts.get(&tag);
+                    let initial_message = transcript.and_then(|t| t.initial_message.as_deref());
+                    let refused_update = data.saved.refused_followups.get(&tag).map(String::as_str);
+                    let spec = &run["record"]["spec"];
+                    let (prompt, mut files) = transcript
+                        .and_then(|transcript| transcript.accepted_input.as_ref())
+                        .map(|(prompt, files)| (prompt.as_str(), files.clone()))
+                        .unwrap_or_else(|| {
+                            (
+                                spec["prompt"].as_str().unwrap_or(""),
+                                FileRef::parse(&spec["attachments"]),
+                            )
+                        });
+                    if initial_message.is_none()
+                        && run["record"]["imported"].is_null()
+                        && (!prompt.is_empty() || !files.is_empty())
+                    {
+                        view::message_row(
+                            ui,
+                            run["record"]["created_at"].as_u64(),
+                            view::MessageAuthor::You,
+                            prompt,
+                            false,
+                            |ui| {
+                                view::chips(
+                                    ui,
+                                    &mut files,
+                                    &dest,
+                                    false,
+                                    &mut data.file_previews,
+                                    actions,
+                                );
+                                start_receipt(ui, number, refused_update);
+                            },
+                        );
+                        ui.add_space(2.);
+                    }
+                    let rows = transcript
                         .map(|t| t.rows.as_slice())
                         .unwrap_or_default();
                     let mut group_start = 0;
@@ -1052,17 +1109,16 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                                                 actions,
                                             );
                                             if let Some(update) = &row.update_id {
-                                                let was_queued =
-                                                    data.transcripts.get(&tag).is_some_and(|t| {
-                                                        t.queued_updates.contains(update)
-                                                    });
+                                                let was_queued = transcript.is_some_and(|t| {
+                                                    t.queued_updates.contains(update)
+                                                });
                                                 ui.weak(if was_queued {
                                                     format!("✓ incorporated into run {number}")
                                                 } else {
                                                     format!("✓ steered into run {number}")
                                                 });
-                                            } else if outgoing && number > 1 {
-                                                ui.weak(format!("✓ started run {number}"));
+                                            } else if initial_message == Some(row.id.as_str()) {
+                                                start_receipt(ui, number, refused_update);
                                             }
                                             if !activity
                                                 && latest_reply.as_ref() == Some(&anchor)
@@ -1103,34 +1159,10 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                         &mut data.views,
                         actions,
                     );
-                    if rows.is_empty() {
-                        let spec = &run["record"]["spec"];
-                        let mut files = FileRef::parse(&spec["attachments"]);
-                        if run["record"]["imported"].is_null()
-                            && (!spec["prompt"].as_str().unwrap_or("").is_empty()
-                                || !files.is_empty())
-                        {
-                            view::message_row(
-                                ui,
-                                run["record"]["created_at"].as_u64(),
-                                view::MessageAuthor::You,
-                                spec["prompt"].as_str().unwrap_or(""),
-                                false,
-                                |ui| {
-                                    view::chips(
-                                        ui,
-                                        &mut files,
-                                        &dest,
-                                        false,
-                                        &mut data.file_previews,
-                                        actions,
-                                    );
-                                },
-                            );
-                        }
-                        if run["last_seq"].as_u64().unwrap_or(0) != 0 {
-                            ui.weak("Loading retained conversation…");
-                        }
+                    if rows.is_empty()
+                        && transcript.map_or(0, |t| t.seq) < run["last_seq"].as_u64().unwrap_or(0)
+                    {
+                        ui.weak("Loading retained conversation…");
                     }
                     if index + 2 >= runs.len()
                         && let Some(hold) = data
@@ -1195,10 +1227,14 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                 .get(&tag)
                 .is_some_and(|t| t.queued_updates.contains(&steering.id));
             if queued {
-                ui.weak(format!(
-                    "◌ queued for run {}",
-                    steering.run.chars().take(8).collect::<String>()
-                ));
+                if let Some(index) = runs
+                    .iter()
+                    .position(|run| run["record"]["spec"]["id"] == steering.run)
+                {
+                    ui.weak(format!("◌ queued for run {}", index + 1));
+                } else {
+                    ui.weak("◌ queued");
+                }
             } else if data.active_steering.contains(key) {
                 ui.weak("Sending…");
             } else if running.as_deref() != Some(&steering.run)
@@ -1680,6 +1716,79 @@ mod tests {
         })
     }
 
+    #[test]
+    fn a_refused_followup_receipt_stays_with_the_accepted_prompt_on_replay() {
+        let key = ThreadKey {
+            peer: "fixture-peer".into(),
+            id: "fixture-thread".into(),
+        };
+        let pending = crate::Pending {
+            destination: crate::Destination {
+                key: key.peer.clone(),
+                label: "Fixture".into(),
+                address: String::new(),
+            },
+            spec: json!({"id":"successor","thread_id":key.id,"backend":"codex","prompt":"Accepted follow-up"}),
+            after: Some("predecessor".into()),
+            refused_update: Some("refused-update".into()),
+        };
+        let mut saved = crate::Saved {
+            pending: vec![pending],
+            ..Default::default()
+        };
+        saved.workspace.enable_grid();
+        let mut saved: crate::Saved =
+            serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        let pending = saved.pending.pop().unwrap();
+        // The run catalog can confirm this exact ID after restart with no submit reply.
+        saved.remember_refused_followup(&pending);
+        let mut data = Data {
+            saved: serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap(),
+            ..Default::default()
+        };
+        let runs = [
+            json!({"record":{"spec":{"id":"predecessor","thread_id":key.id,"backend":"codex"}},"status":"completed"}),
+            json!({"record":{"spec":{"id":"successor","thread_id":key.id,"backend":"codex"}},"status":"completed","last_seq":2}),
+        ];
+        data.catalogs
+            .insert(key.peer.clone(), crate::model::catalog(&key.peer, &runs));
+        let ctx = egui::Context::default();
+        for has_initial_message in [false, true] {
+            let mut transcript = Transcript::default();
+            transcript.see_accepted_input(&pending.spec);
+            if has_initial_message {
+                transcript.apply(&json!({
+                    "seq":1,"kind":"user_message","data":{"text":"Accepted follow-up"}
+                })).unwrap();
+            } else {
+                transcript.apply(&json!({"seq":1,"kind":"status","data":{"status":"running"}})).unwrap();
+            }
+            transcript.apply(&json!({
+                "seq":2,"kind":"assistant_message","data":{"id":"reply","text":"Reply after replay"}
+            })).unwrap();
+            data.transcripts
+                .insert(run_key(&key.peer, "successor"), transcript);
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0., 0.), vec2(800., 600.))),
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut actions = vec![];
+                    panel(ui, &mut data, &key, &mut actions);
+                    assert!(actions.is_empty());
+                },
+            );
+            let prompt_count = output.shapes.iter().filter(|shape| {
+                matches!(&shape.shape, egui::epaint::Shape::Text(text)
+                    if text.galley.job.text == "Accepted follow-up")
+            }).count();
+            assert_eq!(prompt_count, 1);
+            assert!(visible_text(&output, "refused → started run 2").is_some());
+            assert!(visible_text(&output, "Reply after replay").is_some());
+        }
+    }
+
     fn click(
         mut frame: impl FnMut(Vec<Event>) -> (FullOutput, Vec<Action>),
         position: Pos2,
@@ -1933,6 +2042,72 @@ mod tests {
                 json!({"action":expected,"content":if expected == "accept" {Some(json!({}))} else {None}})
             );
         }
+    }
+
+    #[test]
+    #[ignore = "scripts/desktop-smoke.py supplies private paired daemons"]
+    fn real_daemon_boundary_lost_answer_acknowledgment() {
+        use crate::client::{Bus, Client, Update};
+        use crate::model::AnswerState;
+        use std::{
+            sync::{Arc, atomic::AtomicBool},
+            time::{Duration, Instant},
+        };
+
+        let home = std::path::PathBuf::from(std::env::var_os("BOXEN_GUI_TEST_HOME").unwrap());
+        let client = Client::new(std::env::var("BOXEN_GUI_TEST_URL").unwrap(), &home).unwrap();
+        let drop_ack = Client::new(
+            std::env::var("BOXEN_GUI_TEST_DROP_RESPONSE_URL").unwrap(),
+            &home,
+        ).unwrap();
+        let destination: crate::Destination =
+            serde_json::from_str(&std::env::var("BOXEN_GUI_TEST_DEST").unwrap()).unwrap();
+        let id = crate::new_id();
+        client.operation(&destination, json!({
+            "op":"start","spec":{"id":id,"thread_id":id,"backend":"codex","prompt":"ATTRIBUTED_GATE_FIXTURE"}
+        })).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while client.operation(&destination, json!({"op":"get","id":id})).unwrap()["status"] != "waiting" {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let attempt = crate::new_id();
+        let bus = Bus::new(egui::Context::default());
+        drop_ack.respond(destination.clone(), json!({
+            "op":"respond_attempt","id":id,"request_id":0,
+            "attempt_id":attempt,"result":{"decision":"decline"}
+        }), bus.publisher());
+        let Update::AnswerSubmitted(response_id, Err(_)) =
+            bus.rx.recv_timeout(Duration::from_secs(12)).unwrap()
+        else {
+            panic!("The client expected an acknowledgment and saw a transport failure");
+        };
+        assert_eq!(response_id, attempt);
+        client.watch(destination, id, 0, 1, bus.publisher(), Arc::new(AtomicBool::new(false)));
+        let mut transcript = Transcript::default();
+        let mut writes = 0;
+        loop {
+            let Update::Batch(_, 1, batch) = bus.rx.recv_timeout(Duration::from_secs(12)).unwrap()
+            else {
+                panic!("Replay could not reach the run");
+            };
+            for event in batch["events"].as_array().unwrap() {
+                if event["kind"] == "response_write_started" {
+                    writes += 1;
+                }
+                transcript.apply(event).unwrap();
+            }
+            if batch["done"] == true {
+                break;
+            }
+        }
+        assert_eq!(writes, 1);
+        transcript.decorate_answers(|answer| answer.yours = answer.attempt_id == attempt);
+        let gate = transcript.rows.iter().find(|row| row.answer.is_some()).unwrap();
+        let answer = gate.answer.as_ref().unwrap();
+        assert!(gate.request.is_none() && answer.yours);
+        assert_eq!(answer.state, AnswerState::Written);
+        assert_eq!(answer.decision, "Decline");
     }
 
     #[test]

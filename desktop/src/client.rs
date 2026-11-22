@@ -26,6 +26,8 @@ pub struct Pending {
     pub spec: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_update: Option<String>,
 }
 #[derive(Debug)]
 pub struct SubmitError {
@@ -333,6 +335,7 @@ impl Client {
                         destination,
                         spec,
                         after: Some(previous),
+                        refused_update: None,
                     })
                 });
             publisher.send(Update::Followup(tag, result));

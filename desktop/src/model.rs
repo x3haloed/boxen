@@ -239,6 +239,8 @@ fn context_amounts(used: &Value, limit: &Value) -> Option<(u64, u64)> {
 
 #[derive(Default)]
 pub struct Transcript {
+    pub accepted_input: Option<(String, Vec<crate::attachments::FileRef>)>,
+    pub initial_message: Option<String>,
     pub seq: u64,
     pub execution: Option<Value>,
     pub status: Option<Value>,
@@ -264,6 +266,18 @@ pub struct Transcript {
     event_at: Option<u64>,
 }
 impl Transcript {
+    pub fn see_accepted_input(&mut self, spec: &Value) {
+        if self.initial_message.is_none()
+            && self.accepted_input.is_none()
+            && let Some(prompt) = spec["prompt"].as_str()
+        {
+            self.accepted_input = Some((
+                prompt.to_owned(),
+                crate::attachments::FileRef::parse(&spec["attachments"]),
+            ));
+        }
+    }
+
     fn measure_context(&mut self, measure: Option<ContextMeasure>) {
         self.context = measure;
         self.context_at = measure.and(self.event_at);
@@ -551,6 +565,13 @@ impl Transcript {
                 let row = &mut self.rows[self.positions[&id]];
                 row.attachments = crate::attachments::FileRef::parse(&data["attachments"]);
                 row.update_id = data["update_id"].as_str().map(str::to_owned);
+                if self.initial_message.is_none()
+                    && data["historical"] != true
+                    && row.update_id.is_none()
+                {
+                    self.initial_message = Some(id);
+                    self.accepted_input = None;
+                }
             },
             "assistant_delta" | "reasoning_delta" | "assistant_message" => self.put(
                 text("id"),
