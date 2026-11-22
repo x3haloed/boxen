@@ -3084,6 +3084,14 @@ impl Jobs {
             .ok_or_else(|| "Conversation is unavailable".into())
     }
 
+    pub fn probe_repo(&self, id: &str) -> Result<Value> {
+        let run = self.operator_run(id)?;
+        if self.run_machine(id)? != self.machine_id() {
+            return Err("Repository observation belongs to the executing machine".into());
+        }
+        crate::repo_probe::observe(&run)
+    }
+
     pub fn operator_run(&self, id: &str) -> Result<Arc<Run>> {
         valid_id(id)?;
         self.runs

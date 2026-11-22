@@ -248,6 +248,15 @@ Older fixed-choice events provide a `choices` list and take a result with an
 offered `option_id`. An invalid response leaves the request pending. The
 [Antigravity runtime guide](antigravity.md) describes setup and native session behavior.
 
+## Repository observations
+
+An authenticated operator can use `{"op":"repo_probe","id":"RUN_ID"}` on
+the machine that executed the run. The probe takes its working directory and
+account from that accepted run. The result carries the probe time, branch,
+commit, dirty status and any reported upstream divergence. The worktree
+reading excludes submodules. Output and execution time are bounded.
+The probe produces a current observation without adding a run journal entry.
+
 ## Mail activation input receipts
 
 A resident inbox message's `activation_input` carries the assigned run ID.

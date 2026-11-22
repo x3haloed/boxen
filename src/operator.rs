@@ -224,6 +224,10 @@ pub fn operation(jobs: &Arc<Jobs>, actor: &str, request: &Value) -> Result<Value
             "thread_move" => return jobs.thread_move(request),
             "thread_move_receive" => return jobs.receive_thread_move(actor, request),
             "thread_placement" => return jobs.thread_placement(request),
+            "repo_probe" => {
+                let id = request["id"].as_str().ok_or("Run ID required")?;
+                return jobs.probe_repo(id);
+            }
             "thread_head" => {
                 let id = request["thread_id"].as_str().ok_or("Conversation ID required")?;
                 return Ok(serde_json::to_value(jobs.thread_head(id)?)?);

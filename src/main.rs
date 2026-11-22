@@ -35,6 +35,7 @@ mod network;
 mod operator;
 mod platform;
 mod protocol;
+mod repo_probe;
 mod reasoning;
 mod resident_bridge;
 mod resident_definitions;
