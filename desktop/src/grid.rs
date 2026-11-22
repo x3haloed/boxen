@@ -470,6 +470,7 @@ impl Desktop {
                 }
                 ui.weak(format!("{columns} × 2"));
                 crate::needs::toolbar(ui, &self.data, actions);
+                ui.menu_button("Receipts", receipt_key);
                 if ui.small_button("Live pulse").clicked() {
                     self.grid_mut().open(Pane::LivePulse, true);
                 }
@@ -890,6 +891,134 @@ impl Desktop {
     }
 }
 
+fn receipt_key(ui: &mut egui::Ui) {
+    let groups: [(&str, &[(&str, &str)]); 4] = [
+        (
+            "Thread message",
+            &[
+                (
+                    "Steered into run",
+                    "The runtime took the message into the active turn.",
+                ),
+                ("Queued for run", "OpenRouter retained the queued update."),
+                (
+                    "Incorporated into run",
+                    "The run recorded the queued update as a user message.",
+                ),
+                (
+                    "Refused → started run",
+                    "Steering was refused and the daemon admitted a new run.",
+                ),
+                (
+                    "Refused · back to draft",
+                    "The attempted follow-up went back to the draft.",
+                ),
+                (
+                    "Not confirmed · draft kept",
+                    "Delivery remains uncertain. Boxen leaves the draft for you.",
+                ),
+            ],
+        ),
+        (
+            "Held follow-up · Claude Code",
+            &[
+                (
+                    "Held after run",
+                    "The daemon retained one hold for the predecessor.",
+                ),
+                (
+                    "Appended",
+                    "An additional contribution joined the same hold.",
+                ),
+                (
+                    "Started run",
+                    "The predecessor completed and the daemon admitted the held follow-up.",
+                ),
+                (
+                    "Back to draft",
+                    "The hold was released or the follow-up could not start.",
+                ),
+                (
+                    "Edit kept as draft",
+                    "The hold changed before the edit was saved.",
+                ),
+            ],
+        ),
+        (
+            "Gate answer",
+            &[
+                (
+                    "Your answer queued",
+                    "The journal retained your attempt ID and decision.",
+                ),
+                (
+                    "Your answer written",
+                    "The adapter recorded the write under your attempt ID.",
+                ),
+                (
+                    "Answered by another client",
+                    "The journal attributes the written decision to their attempt.",
+                ),
+                (
+                    "Closed · no answer recorded",
+                    "The request ended with no recorded answer.",
+                ),
+                (
+                    "Write uncertain",
+                    "Replay could not settle whether the write occurred.",
+                ),
+            ],
+        ),
+        (
+            "Resident mail",
+            &[
+                (
+                    "Saved in outbox",
+                    "The sending daemon retained the message for delivery.",
+                ),
+                (
+                    "Accepted by mailbox",
+                    "The destination retained the message. It can wait for activation.",
+                ),
+                (
+                    "Presented in activation",
+                    "The message appeared in the recorded activation input batch.",
+                ),
+                (
+                    "Auto-activation off",
+                    "Queued mail waits for an activation, such as a manual one.",
+                ),
+                (
+                    "Reading and replies",
+                    "Reading, understanding and answering require separate evidence.",
+                ),
+            ],
+        ),
+    ];
+    let width = ui.ctx().content_rect().width();
+    let columns = if width >= 970. { 4 } else { 2 };
+    ui.set_width((width - 48.).clamp(250., 940.));
+    ui.strong("What each receipt establishes");
+    ui.separator();
+    egui::ScrollArea::vertical()
+        .max_height(410.)
+        .show(ui, |ui| {
+            for row in groups.chunks(columns) {
+                ui.columns(columns, |uis| {
+                    for (column, (heading, receipts)) in uis.iter_mut().zip(row) {
+                        column.label(RichText::new(*heading).monospace().size(10.5).strong());
+                        for (label, explanation) in *receipts {
+                            column.label(RichText::new(*label).strong());
+                            column.weak(*explanation);
+                            column.add_space(4.);
+                        }
+                    }
+                });
+                ui.add_space(8.);
+            }
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,6 +1029,46 @@ mod tests {
             peer: "fixture-peer".into(),
             id: id.into(),
         })
+    }
+
+    #[test]
+    fn receipt_key_uses_four_columns_when_the_viewport_can_fit_them() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200., 750.),
+                )),
+                ..Default::default()
+            },
+            receipt_key,
+        );
+        let positions: Vec<_> = [
+            "Thread message",
+            "Held follow-up · Claude Code",
+            "Gate answer",
+            "Resident mail",
+        ]
+        .map(|heading| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| {
+                    let egui::Shape::Text(text) = &shape.shape else {
+                        return None;
+                    };
+                    (text.galley.job.text == heading && shape.clip_rect.contains(text.pos))
+                        .then_some(text.pos)
+                })
+                .unwrap()
+        })
+        .into();
+        assert!(
+            positions
+                .windows(2)
+                .all(|pair| pair[0].x < pair[1].x && pair[0].y == pair[1].y)
+        );
     }
 
     #[test]

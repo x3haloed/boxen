@@ -180,6 +180,8 @@ and its submitted successor. Once the daemon confirms that run, the accepted
 prompt shows `refused → started run` in the timeline, including after restart
 and replay. A queued OpenRouter update has its own receipt until the run records
 its incorporation or ends before applying it.
+The workspace's **Receipts** menu explains what each thread, held follow-up,
+gate answer and resident mail receipt establishes.
 When Antigravity reports that its prompt ended and a native background command
 remains open, the composer offers ordinary **Send** as soon as the daemon
 reports that the same session can take a fresh prompt. Late command updates
@@ -217,7 +219,9 @@ follow-up on that daemon. Each machine can append its own contributions.
 The held row edits or releases an exact contribution at the displayed
 revision. Successful predecessor completion can start one combined follow-up.
 Other terminal outcomes return the retained contribution to the originating
-desktop draft when it reconnects. See [held follow-up API](client-api.md).
+desktop draft when it reconnects. If a hold changes while you are editing it,
+the unsubmitted edit stays in your conversation draft. See
+[held follow-up API](client-api.md).
 
 ## Verification
 

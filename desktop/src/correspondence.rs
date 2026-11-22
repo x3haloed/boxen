@@ -1671,6 +1671,11 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
+        let operator = client.operation(&dest, json!({"op":"resident_inbox","id":id,"after":0})).unwrap();
+        let all_mail = operator["messages"].as_array().unwrap();
+        assert!(all_mail.iter().any(|message| message["body"] == "AUTOMATION_NOT_HUMAN"));
+        let all_mail_record = all_mail.iter().find(|message| message["id"] == mail_id).unwrap();
+        assert!(all_mail_record["activation_input"]["seq"].is_u64());
         for _ in 0..2 {
             // A fresh viewer starts at original journals again after restart.
             let bus = crate::client::Bus::new(egui::Context::default());
@@ -1702,6 +1707,7 @@ mod tests {
                             m["id"] == mail_id
                                 && m["sender"]["machine"] == dest.key
                                 && m["sender"]["id"] == dest.key
+                                && m["activation_input"] == all_mail_record["activation_input"]
                         });
                     }
                     Update::Mail(MailUpdate::HumanInbox { inbox, .. }) => {

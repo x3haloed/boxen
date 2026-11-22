@@ -1164,13 +1164,15 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                     {
                         ui.weak("Loading retained conversation…");
                     }
-                    if index + 2 >= runs.len()
-                        && let Some(hold) = data
+                    if let Some(hold) = data
                             .transcripts
                             .get(&tag)
                             .and_then(|transcript| transcript.hold.as_ref())
                     {
-                        crate::hold::panel(ui, data, key, id, number, hold, actions);
+                        let successor = runs.iter().position(|run| {
+                            run["record"]["spec"]["id"] == hold["run_id"]
+                        }).map(|index| index + 1);
+                        crate::hold::panel(ui, data, key, id, (number, successor), hold, actions);
                     }
                 });
                 if let Some(layout) = layout

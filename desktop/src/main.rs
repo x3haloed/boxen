@@ -63,6 +63,7 @@ struct Saved {
     thread_replies: Vec<needs::ThreadReply>,
     holds: Vec<hold::Contribution>,
     hold_edits: Vec<hold::Contribution>,
+    hold_drafts: Vec<hold::Draft>,
     hold_releases: Vec<hold::Release>,
     mail: correspondence::SavedMail,
     correspondence_added: bool,
@@ -158,6 +159,7 @@ enum Action {
     Send(ThreadKey),
     RestoreSteer(thread_view::Steering),
     HoldChange(hold::Contribution, u64, hold::Mutation),
+    HoldDraft(hold::Contribution, u64, bool),
     Cancel(ThreadKey),
     Retry(usize),
     Split(Pane, egui_dock::Split),
@@ -934,8 +936,7 @@ impl Desktop {
                 }
             }
         }
-        for release in &self.data.saved.hold_releases {
-            let entry = &release.contribution;
+        for entry in hold::unsettled_changes(&self.data.saved) {
             if let Some(thread) = find_thread(&self.data, &entry.key)
                 && let Some(run) = thread
                     .runs
@@ -979,9 +980,9 @@ impl Desktop {
             let seq = self.data.transcripts.get(&tag).map_or(0, |t| t.seq);
             let last = run["last_seq"].as_u64().unwrap_or(0);
             if terminal(&run) && seq >= last {
-                if self.data.saved.hold_releases.iter().any(|release| {
-                    release.contribution.key == key && release.contribution.after == id
-                }) {
+                if hold::unsettled_changes(&self.data.saved)
+                    .any(|entry| entry.key == key && entry.after == id)
+                {
                     self.reconcile_hold(&tag);
                 }
                 replies_changed |= needs::settle_reply(&mut self.data, &key, &run);
@@ -1216,6 +1217,9 @@ impl Desktop {
             ),
             Action::HoldChange(entry, revision, mutation) => {
                 self.mutate_hold(entry, Some(revision), mutation)
+            }
+            Action::HoldDraft(entry, revision, changed) => {
+                self.save_hold_draft(entry, revision, changed);
             }
             Action::Retry(index) => {
                 if let Some(p) = self.data.saved.pending.get(index).cloned() {

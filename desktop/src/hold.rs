@@ -28,6 +28,20 @@ pub struct Release {
     pub revision: u64,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Draft {
+    contribution: Contribution,
+    revision: u64,
+}
+
+pub(super) fn unsettled_changes(saved: &crate::Saved) -> impl Iterator<Item = &Contribution> {
+    saved
+        .hold_releases
+        .iter()
+        .map(|release| &release.contribution)
+        .chain(saved.hold_drafts.iter().map(|draft| &draft.contribution))
+}
+
 impl Release {
     fn observed(&self, hold: &Value) -> bool {
         hold["revision"]
@@ -58,8 +72,16 @@ pub struct Reply {
 impl Desktop {
     pub fn restore_interrupted_hold_edits(&mut self) {
         let interrupted = std::mem::take(&mut self.data.saved.hold_edits);
-        if interrupted.is_empty() {
+        let drafts = std::mem::take(&mut self.data.saved.hold_drafts);
+        if interrupted.is_empty() && drafts.is_empty() {
             return;
+        }
+        for draft in drafts {
+            self.restore_held_draft(&draft.contribution);
+            self.data.thread_issues.insert(
+                draft.contribution.key,
+                "Unsubmitted hold edit restored to the draft".into(),
+            );
         }
         for entry in interrupted {
             self.restore_held_draft(&entry);
@@ -67,6 +89,22 @@ impl Desktop {
                 entry.key,
                 "A previous hold edit is unconfirmed. The text is in the draft.".into(),
             );
+        }
+        self.persist();
+    }
+
+    pub fn save_hold_draft(&mut self, contribution: Contribution, revision: u64, changed: bool) {
+        self.data
+            .saved
+            .hold_drafts
+            .retain(|draft| draft.contribution.id != contribution.id);
+        if changed {
+            let tag = run_key(&contribution.key.peer, &contribution.after);
+            self.data.saved.hold_drafts.push(Draft {
+                contribution,
+                revision,
+            });
+            self.reconcile_hold(&tag);
         }
         self.persist();
     }
@@ -113,12 +151,24 @@ impl Desktop {
             return;
         }
         if mutation == Mutation::Edit {
+            let draft = self
+                .data
+                .saved
+                .hold_drafts
+                .iter()
+                .position(|draft| draft.contribution.id == contribution.id)
+                .map(|position| self.data.saved.hold_drafts.remove(position));
             self.data
                 .saved
                 .hold_edits
                 .retain(|entry| entry.id != contribution.id);
             self.data.saved.hold_edits.push(contribution.clone());
             if !self.persist() {
+                self.data
+                    .saved
+                    .hold_edits
+                    .retain(|entry| entry.id != contribution.id);
+                self.data.saved.hold_drafts.extend(draft);
                 self.data.hold_pending.remove(&contribution.key);
                 return;
             }
@@ -259,6 +309,30 @@ impl Desktop {
         else {
             return;
         };
+        let phase = hold["phase"].as_str().unwrap_or("");
+        let mut stale_drafts = Vec::new();
+        self.data.saved.hold_drafts.retain(|draft| {
+            let stale = run_key(&draft.contribution.key.peer, &draft.contribution.after) == tag
+                && hold["revision"]
+                    .as_u64()
+                    .is_some_and(|revision| revision > draft.revision);
+            if stale {
+                stale_drafts.push(draft.contribution.clone());
+            }
+            !stale
+        });
+        for entry in &stale_drafts {
+            self.restore_held_draft(entry);
+            self.data.thread_issues.insert(
+                entry.key.clone(),
+                if phase == "started" {
+                    "Follow-up started before the edit was saved · edit kept as draft"
+                } else {
+                    "Held follow-up changed · edit kept as draft"
+                }
+                .into(),
+            );
+        }
         let released: Vec<_> = self
             .data
             .saved
@@ -270,7 +344,7 @@ impl Desktop {
             .filter(|release| release.observed(&hold))
             .map(|release| release.contribution.clone())
             .collect();
-        let mut changed = !released.is_empty();
+        let mut changed = !released.is_empty() || !stale_drafts.is_empty();
         for entry in released {
             self.restore_held_draft(&entry);
             self.data
@@ -282,7 +356,6 @@ impl Desktop {
                 .thread_issues
                 .insert(entry.key, "Released to draft".into());
         }
-        let phase = hold["phase"].as_str().unwrap_or("");
         let accepted: Vec<_> = self
             .data
             .saved
@@ -313,11 +386,14 @@ impl Desktop {
                 }
             }
             if phase == "returned" {
-                self.restore_held_draft(&entry);
+                if !stale_drafts.iter().any(|draft| draft.id == entry.id) {
+                    self.restore_held_draft(&entry);
+                    self.data.thread_issues.insert(
+                        entry.key.clone(),
+                        "Held message returned to the draft.".into(),
+                    );
+                }
                 self.data.saved.holds.retain(|saved| saved.id != entry.id);
-                self.data
-                    .thread_issues
-                    .insert(entry.key, "Held message returned to the draft.".into());
                 changed = true;
             } else {
                 if !entry.accepted {
@@ -383,11 +459,12 @@ pub fn panel(
     data: &Data,
     key: &ThreadKey,
     after: &str,
-    number: usize,
+    run_numbers: (usize, Option<usize>),
     hold: &Value,
     actions: &mut Vec<Action>,
 ) {
     use crate::console_style;
+    let (number, successor) = run_numbers;
     match hold["phase"].as_str() {
         Some("held" | "claimed") => {
             let row = egui::Frame::new()
@@ -399,12 +476,20 @@ pub fn panel(
                         console_style::WARN,
                         format!("Held after run {number} · starts after successful completion"),
                     );
-                    for entry in hold["contributions"].as_array().into_iter().flatten() {
+                    for (position, entry) in hold["contributions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                    {
                         let input = &entry["input"];
                         let id = input["id"].as_str().unwrap_or("");
                         let text = input["text"].as_str().unwrap_or("");
                         let own = data.saved.holds.iter().find(|item| item.id == id);
                         ui.push_id(id, |ui| {
+                            if position > 0 {
+                                ui.weak("Appended to this hold");
+                            }
                             if let Some(machine) = entry["machine"].as_str()
                                 && let Some(destination) = data
                                     .saved
@@ -425,9 +510,27 @@ pub fn panel(
                                     ui.data_mut(|memory| memory.get_temp::<String>(edit));
                                 ui.horizontal(|ui| {
                                     if ui.small_button("Edit").clicked() {
-                                        draft = Some(text.into());
+                                        draft = Some(
+                                            data.saved
+                                                .hold_drafts
+                                                .iter()
+                                                .find(|saved| {
+                                                    saved.contribution.id == id
+                                                        && saved.revision == revision
+                                                })
+                                                .map_or_else(
+                                                    || text.into(),
+                                                    |saved| saved.contribution.text.clone(),
+                                                ),
+                                        );
                                     }
-                                    if ui.small_button("Release to draft").clicked() {
+                                    if ui
+                                        .add_enabled(
+                                            draft.is_none(),
+                                            egui::Button::new("Release to draft").small(),
+                                        )
+                                        .clicked()
+                                    {
                                         let mut contribution = own.clone();
                                         contribution.text = text.into();
                                         actions.push(Action::HoldChange(
@@ -438,7 +541,15 @@ pub fn panel(
                                     }
                                 });
                                 if let Some(changed) = &mut draft {
-                                    ui.text_edit_multiline(changed);
+                                    if ui.text_edit_multiline(changed).changed() {
+                                        let mut contribution = own.clone();
+                                        contribution.text = changed.clone();
+                                        actions.push(Action::HoldDraft(
+                                            contribution,
+                                            revision,
+                                            changed != text,
+                                        ));
+                                    }
                                     if ui.small_button("Save edit").clicked() {
                                         let mut contribution = own.clone();
                                         contribution.text = changed.clone();
@@ -447,6 +558,8 @@ pub fn panel(
                                             revision,
                                             Mutation::Edit,
                                         ));
+                                        draft = None;
+                                        ui.data_mut(|memory| memory.remove::<String>(edit));
                                     }
                                 }
                                 if let Some(draft) = draft {
@@ -464,7 +577,10 @@ pub fn panel(
             ui.weak("Held message returned to draft");
         }
         Some("started") => {
-            ui.weak("Held follow-up started");
+            ui.weak(successor.map_or_else(
+                || "Held follow-up started".into(),
+                |number| format!("✓ held follow-up started run {number}"),
+            ));
         }
         Some("uncertain") => {
             ui.weak("Held follow-up acceptance is uncertain");
@@ -479,7 +595,7 @@ mod tests {
 
     #[test]
     #[ignore = "scripts/desktop-smoke.py supplies private paired daemons"]
-    fn real_daemon_boundary_lost_hold_release_acknowledgment() {
+    fn real_daemon_boundary_hold_release_and_edit_recovery() {
         use crate::{
             Saved,
             client::{Bus, Client},
@@ -625,6 +741,86 @@ mod tests {
                 json!({"op":"control","id":after,"action":{"type":"cancel"}}),
             )
             .unwrap();
+
+        let after = new_id();
+        let key = ThreadKey {
+            peer: destination.key.clone(),
+            id: after.clone(),
+        };
+        let predecessor = client.operation(&destination, json!({
+            "op":"start","spec":{"id":after,"thread_id":key.id,"backend":"claude","prompt":"HELD_FOLLOWUP_GATE"}
+        })).unwrap();
+        let id = new_id();
+        let held = client
+            .operation(
+                &destination,
+                json!({
+                    "op":"held_followup","id":after,"action":"append","expected_revision":0,
+                    "contribution":{"id":id,"text":"Accepted held input"}
+                }),
+            )
+            .unwrap();
+        let revision = held["hold"]["revision"].as_u64().unwrap();
+        let actual = Contribution {
+            key: key.clone(),
+            after: after.clone(),
+            id,
+            text: "Accepted held input".into(),
+            files: vec![],
+            accepted: true,
+        };
+        let mut edited = actual.clone();
+        edited.text = "Unsubmitted edit".into();
+        restarted.data.saved.holds.push(actual);
+        restarted.action(Action::HoldDraft(edited, revision, true));
+        let saved: Saved = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(saved.hold_drafts[0].contribution.text, "Unsubmitted edit");
+        restarted.data.catalogs.insert(
+            key.peer.clone(),
+            crate::model::catalog(&key.peer, std::slice::from_ref(&predecessor)),
+        );
+        restarted.observe();
+        let cwd = predecessor["record"]["spec"]["cwd"].as_str().unwrap();
+        std::fs::write(PathBuf::from(cwd).join("release-held-followup"), "").unwrap();
+        let tag = run_key(&key.peer, &after);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            restarted.updates();
+            if restarted
+                .data
+                .transcripts
+                .get(&tag)
+                .and_then(|t| t.hold.as_ref())
+                .is_some_and(|hold| hold["phase"] == "started")
+            {
+                break;
+            }
+            let snapshot = client
+                .operation(&destination, json!({"op":"get","id":after}))
+                .unwrap();
+            restarted.replace_snapshot(&key.peer, snapshot);
+            // A terminal watch can end before the daemon journals the settled hold.
+            // Keep this predecessor selected as an open conversation would.
+            restarted.data.saved.workspace.open(key.clone(), true);
+            restarted.observe();
+            assert!(
+                Instant::now() < deadline,
+                "held successor did not reach desktop replay"
+            );
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        let saved: Saved = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert!(saved.hold_drafts.is_empty());
+        assert!(saved.drafts.contains(&(key, "Unsubmitted edit".into())));
+        let successor = client
+            .operation(
+                &destination,
+                json!({
+                    "op":"get","id":held["hold"]["run_id"]
+                }),
+            )
+            .unwrap();
+        assert_eq!(successor["record"]["spec"]["prompt"], "Accepted held input");
     }
 
     #[test]
