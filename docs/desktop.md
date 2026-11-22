@@ -190,12 +190,16 @@ line is a Boxen estimate. Claude Code shows the latest main-session input token
 count, including cached input. Antigravity uses its reported session token
 counts. OpenRouter shows the selected bytes and the selectable budget after
 reservations. Missing samples and incomplete replay show an unknown gauge.
+The context popover shows the exact reading, source time and validity. After a
+machine move the previous host's measurement stays in history while the gauge
+waits for a reading from the new host.
 
 A reported compaction clears the prior measurement and appears in the timeline.
 Claude Code can report a trigger and before-token count; a later usage sample
 has its own timestamp. OpenRouter records actual projections and run-stopping
 shortages. The pane and Watchlist surface recent consequences for 30 minutes.
-The latest event remains available in the retained timeline.
+The Watchlist prioritizes a shortage over the warning line and the warning line
+over a recent compaction. Routine projections remain in the retained timeline.
 
 The **Live pulse** pane receives a bounded arrival-order projection of live
 run observations. Events read while catching up to a sampled journal frontier

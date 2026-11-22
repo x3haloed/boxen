@@ -478,6 +478,156 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "scripts/desktop-smoke.py supplies private paired daemons"]
+    fn real_daemon_boundary_lost_hold_release_acknowledgment() {
+        use crate::{
+            Saved,
+            client::{Bus, Client},
+            model::Destination,
+        };
+        use std::{
+            path::PathBuf,
+            time::{Duration, Instant},
+        };
+
+        let daemon_home = PathBuf::from(std::env::var_os("BOXEN_GUI_TEST_HOME").unwrap());
+        let origin = std::env::var("BOXEN_GUI_TEST_URL").unwrap();
+        let client = Client::new(origin.clone(), &daemon_home).unwrap();
+        let drop_ack = Client::new(
+            std::env::var("BOXEN_GUI_TEST_DROP_RESPONSE_URL").unwrap(),
+            &daemon_home,
+        )
+        .unwrap();
+        let destination: Destination =
+            serde_json::from_str(&std::env::var("BOXEN_GUI_TEST_DEST").unwrap()).unwrap();
+        let home = daemon_home.join("release-fixture");
+        std::fs::create_dir(&home).unwrap();
+        let state_path = home.join("desktop.json");
+        let fixture = |client, saved| Desktop {
+            data: Data {
+                saved,
+                ..Default::default()
+            },
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            native_menu: None,
+            client: Some(client),
+            bus: Bus::new(egui::Context::default()),
+            home: home.clone(),
+            state_path: state_path.clone(),
+            origin: origin.clone(),
+            polls: Default::default(),
+            field: None,
+            palette: false,
+            palette_fresh: false,
+            query: String::new(),
+            choice: 0,
+            connection: false,
+            last_save: Instant::now(),
+            next_watch: 0,
+            next_discovery: Instant::now(),
+            delivery_cursor: 0,
+            ready: true,
+            extra: None,
+        };
+        let after = new_id();
+        let key = ThreadKey {
+            peer: destination.key.clone(),
+            id: after.clone(),
+        };
+        client.operation(&destination, json!({
+            "op":"start","spec":{"id":after,"thread_id":key.id,"backend":"claude","prompt":"INTERRUPT"}
+        })).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while client
+            .operation(&destination, json!({"op":"get","id":after}))
+            .unwrap()["status"]
+            != "running"
+        {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let id = new_id();
+        let text = "Exact held input";
+        let held = client
+            .operation(
+                &destination,
+                json!({
+                    "op":"held_followup","id":after,"action":"append","expected_revision":0,
+                    "contribution":{"id":id,"text":text}
+                }),
+            )
+            .unwrap();
+        let contribution = Contribution {
+            key: key.clone(),
+            after: after.clone(),
+            id,
+            text: text.into(),
+            files: vec![],
+            accepted: true,
+        };
+        let mut saved = Saved {
+            destinations: vec![destination.clone()],
+            holds: vec![contribution.clone()],
+            drafts: vec![(key.clone(), "Newer draft".into())],
+            ..Default::default()
+        };
+        saved.workspace.enable_grid();
+        let mut sender = fixture(drop_ack, saved);
+        sender.mutate_hold(
+            contribution,
+            held["hold"]["revision"].as_u64(),
+            Mutation::Release,
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sender.data.hold_pending.contains(&key) {
+            sender.updates();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert!(sender.data.thread_issues[&key].contains("unconfirmed"));
+        assert_eq!(sender.data.saved.hold_releases.len(), 1);
+        drop(sender);
+
+        let saved = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        let snapshot = client
+            .operation(&destination, json!({"op":"get","id":after}))
+            .unwrap();
+        let mut restarted = fixture(client.clone(), saved);
+        restarted.data.catalogs.insert(
+            key.peer.clone(),
+            crate::model::catalog(&key.peer, &[snapshot]),
+        );
+        restarted.observe();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !restarted.data.saved.hold_releases.is_empty() {
+            restarted.updates();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        restarted.reconcile_hold(&run_key(&key.peer, &after));
+        assert_eq!(restarted.data.thread_issues[&key], "Released to draft");
+        let recovered: Saved =
+            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            recovered.drafts,
+            [(key, "Exact held input\n\nNewer draft".into())]
+        );
+        assert!(recovered.holds.is_empty() && recovered.hold_releases.is_empty());
+        assert_eq!(
+            client
+                .operation(&destination, json!({"op":"get","id":after}))
+                .unwrap()["status"],
+            "running"
+        );
+        client
+            .operation(
+                &destination,
+                json!({"op":"control","id":after,"action":{"type":"cancel"}}),
+            )
+            .unwrap();
+    }
+
+    #[test]
     fn a_release_needs_a_newer_revision_without_its_exact_contribution() {
         let release = Release {
             contribution: Contribution {

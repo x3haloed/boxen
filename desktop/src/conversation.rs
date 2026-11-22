@@ -588,6 +588,7 @@ struct ContextReading {
     measure: Option<ContextMeasure>,
     measured_at: Option<u64>,
     change: Option<(ContextChange, u64)>,
+    current: bool,
 }
 
 impl ContextReading {
@@ -595,13 +596,33 @@ impl ContextReading {
         self.measure.is_some_and(ContextMeasure::past_warning_line)
     }
 
-    fn recent(&self) -> Option<(ContextChange, u64)> {
+    fn recent_consequence(&self) -> Option<(ContextChange, u64)> {
         const RECENT_MS: u64 = 30 * 60 * 1000;
-        self.change.filter(|(_, at)| {
-            crate::pulse::now()
-                .checked_sub(*at)
-                .is_some_and(|age| age <= RECENT_MS)
+        self.change.filter(|(change, at)| {
+            *change != ContextChange::Projection
+                && crate::pulse::now()
+                    .checked_sub(*at)
+                    .is_some_and(|age| age <= RECENT_MS)
         })
+    }
+
+    fn mark(&self) -> Option<(egui::Color32, String)> {
+        let recent = self.recent_consequence();
+        if let Some((ContextChange::Shortage, at)) = recent {
+            Some((
+                console_style::ERROR,
+                format!("Context shortage · {} UTC", utc_minute(at)),
+            ))
+        } else if self.warning() {
+            Some((console_style::WARN, "Past Boxen’s 85% warning line".into()))
+        } else {
+            recent.map(|(change, at)| {
+                (
+                    console_style::SECONDARY,
+                    format!("{} · {} UTC", change.label(), utc_minute(at)),
+                )
+            })
+        }
     }
 }
 
@@ -609,6 +630,13 @@ fn context_reading(data: &Data, key: &ThreadKey, runs: &[Value]) -> ContextReadi
     let Some(run) = runs.last() else {
         return ContextReading::default();
     };
+    // Imported run history can still carry measurements from its original host.
+    if run["machine"]
+        .as_str()
+        .is_some_and(|machine| machine != key.peer)
+    {
+        return ContextReading::default();
+    }
     let caught_up = |run: &Value| -> Option<&Transcript> {
         let id = run["record"]["spec"]["id"].as_str()?;
         let tag = crate::client::run_key(&key.peer, id);
@@ -648,44 +676,77 @@ fn context_reading(data: &Data, key: &ThreadKey, runs: &[Value]) -> ContextReadi
         measure: current.context,
         measured_at: current.context_at,
         change: current.context_change.or_else(previous_change),
+        current: true,
     }
 }
 
 fn context_details(ui: &mut egui::Ui, backend: &str, reading: &ContextReading) {
+    ui.strong("Context");
+    ui.separator();
+    ui.weak("READING");
     if let Some(measure) = reading.measure {
-        ui.label(measure.description());
+        ui.label(measure.detail());
         if let Some(at) = reading.measured_at {
-            let source = if backend == "openrouter" {
-                "Boxen context plan"
-            } else {
-                backend
+            let source = match backend {
+                "codex" => "Codex reported · latest exchange",
+                "claude" => "Claude Code reported · latest exchange",
+                "antigravity" => "Antigravity reported · session usage",
+                "openrouter" => "Boxen context plan",
+                _ => "Run journal",
             };
             ui.weak(format!("{source} · {} UTC", utc_minute(at)));
         }
     } else {
-        ui.weak("Context reading unknown");
+        ui.label("Context reading unknown");
     }
-    if reading.warning() {
-        ui.colored_label(context_warning_color(), "Past Boxen’s 85% warning line");
+    if backend == "codex" {
+        ui.weak("LINE");
+        if reading.warning() {
+            ui.colored_label(context_warning_color(), "Past Boxen’s 85% warning line");
+        } else {
+            ui.label("Boxen’s warning line is 85% of the reported window");
+        }
+        ui.weak("Codex controls compaction and its threshold is unknown.");
     }
-    ui.weak(match backend {
-        "codex" => "Codex controls compaction. Its threshold is unknown.",
-        "claude" => {
-            "Claude Code reports compaction boundaries and the before-token count when available."
-        }
-        "openrouter" => "Boxen records changes to history selection and shortages as they occur.",
-        "antigravity" => {
-            "Antigravity reports session usage when available. Compaction evidence is unknown."
-        }
-        _ => "Runtime context evidence is unknown.",
-    });
+    ui.weak("VALIDITY");
+    ui.label("Until the next reading");
+    ui.weak("A new session, model change, or machine move clears the reading.");
+    ui.weak("EVENTS");
     if let Some((change, at)) = reading.change {
-        ui.label(format!(
-            "Last observed event · {} · {} UTC",
-            change.label(),
-            utc_minute(at)
-        ));
+        ui.label(format!("{} · {} UTC", change.label(), utc_minute(at)));
+    } else if reading.current {
+        ui.label("No context event observed");
+    } else {
+        ui.label("Context events unknown");
     }
+    ui.separator();
+    ui.weak("WHAT EACH RUNTIME GIVES BOXEN");
+    for (runtime, measure, evidence) in [
+        (
+            "Codex",
+            "% of model window",
+            "Native compaction when Codex reports it",
+        ),
+        (
+            "Claude Code",
+            "Last-turn input tokens",
+            "Compaction boundary, trigger, and tokens before when reported",
+        ),
+        (
+            "OpenRouter",
+            "KiB of selectable budget",
+            "Recorded projections, including masking, and run-stopping shortages",
+        ),
+        (
+            "Antigravity",
+            "Session usage when reported",
+            "Compaction consequence unknown",
+        ),
+    ] {
+        ui.label(format!("{runtime} · {measure}"));
+        ui.weak(evidence);
+    }
+    ui.weak("Missed events and missing samples stay unknown.");
 }
 
 pub fn context_label(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, runs: &[Value]) {
@@ -703,7 +764,7 @@ pub fn context_label(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, runs: &[Va
             .size(10.5)
             .weak(),
         |ui| {
-            ui.set_max_width(320.);
+            ui.set_max_width(425.);
             context_details(ui, backend, &reading);
         },
     );
@@ -711,8 +772,13 @@ pub fn context_label(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, runs: &[Va
         ui.colored_label(context_warning_color(), "past 85% line")
             .on_hover_text("Boxen's warning line. Codex controls its own compaction.");
     }
-    if let Some((change, at)) = reading.recent() {
-        ui.weak(format!("{} {}", change.label(), utc_minute(at)))
+    if let Some((change, at)) = reading.recent_consequence() {
+        let color = if change == ContextChange::Shortage {
+            console_style::ERROR
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        ui.colored_label(color, format!("{} {}", change.label(), utc_minute(at)))
             .on_hover_text("Recorded context event · UTC");
     }
 }
@@ -740,14 +806,8 @@ fn context_icon(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
 
 pub fn context_mark(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, runs: &[Value]) {
     let reading = context_reading(data, key, runs);
-    if reading.warning() {
-        context_icon(ui, context_warning_color()).on_hover_text("Past Boxen’s 85% warning line");
-    } else if let Some((change, at)) = reading.recent() {
-        context_icon(ui, ui.visuals().weak_text_color()).on_hover_text(format!(
-            "{} · {} UTC",
-            change.label(),
-            utc_minute(at),
-        ));
+    if let Some((color, label)) = reading.mark() {
+        context_icon(ui, color).on_hover_text(label);
     } else {
         ui.allocate_space(egui::vec2(8., 12.));
     }
@@ -972,6 +1032,54 @@ pub fn activity_row(ui: &mut egui::Ui, row: &Row) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_uses_the_current_machine_and_keeps_the_warning_below_85_percent() {
+        let key = ThreadKey {
+            peer: "fixture-machine".into(),
+            id: "thread".into(),
+        };
+        let mut data = Data::default();
+        let mut transcript = Transcript::default();
+        transcript
+            .apply(&serde_json::json!({
+                "seq": 1, "at": 4000, "kind":"backend",
+                "data":{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{
+                    "last":{"totalTokens":849},"modelContextWindow":1000
+                }}}
+            }))
+            .unwrap();
+        data.transcripts
+            .insert(crate::client::run_key(&key.peer, "run"), transcript);
+        let mut run = serde_json::json!({
+            "last_seq": 1, "machine":key.peer,"record":{"spec":{"id":"run","backend":"codex"}}
+        });
+        let reading = context_reading(&data, &key, std::slice::from_ref(&run));
+        assert_eq!(reading.measure.unwrap().label(), "ctx 84%");
+        assert!(!reading.warning());
+        run["machine"] = serde_json::json!("old-fixture-machine");
+        let stale = context_reading(&data, &key, &[run]);
+        assert!(stale.measure.is_none() && stale.change.is_none() && !stale.current);
+    }
+
+    #[test]
+    fn context_mark_prioritizes_shortage_and_skips_routine_projections() {
+        let now = crate::pulse::now();
+        let mut reading = ContextReading {
+            change: Some((ContextChange::Projection, now)),
+            ..Default::default()
+        };
+        assert!(reading.mark().is_none());
+        reading.change = Some((ContextChange::Compaction, now));
+        assert_eq!(reading.mark().unwrap().0, console_style::SECONDARY);
+        reading.measure = Some(ContextMeasure::Codex {
+            tokens: 88,
+            window: 100,
+        });
+        assert_eq!(reading.mark().unwrap().0, console_style::WARN);
+        reading.change = Some((ContextChange::Shortage, now));
+        assert_eq!(reading.mark().unwrap().0, console_style::ERROR);
+    }
 
     #[test]
     fn focused_composer_inserts_shift_enter_and_sends_on_plain_enter() {

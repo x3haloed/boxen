@@ -167,14 +167,21 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
             def do_POST(self):
                 message = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 request = message['request']
+                response = request['op'] == 'respond_attempt'
+                release = request['op'] == 'held_followup' and request.get('action') == 'release'
                 if (self.path != '/api/operation' or message['peer'] != keys[1]
-                        or request['op'] != 'respond_attempt'):
+                        or not (response or release)):
                     self.send_error(400)
                     return
                 # Relay the attempt to the real paired daemon and receive its acknowledgment.
                 # Close the client connection before writing any HTTP response.
                 result = operation(request)
-                dropped.append((request['attempt_id'], result['accepted']))
+                if response:
+                    assert result['accepted']
+                else:
+                    assert result['hold']['phase'] == 'released'
+                    assert result['hold']['revision'] == request['expected_revision'] + 1
+                dropped.append(request['op'])
                 self.close_connection = True
 
             def log_message(self, *_args):
@@ -186,7 +193,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-desktop-') as temporary:
             try:
                 env['BOXEN_GUI_TEST_DROP_RESPONSE_URL'] = f'http://127.0.0.1:{proxy.server_port}'
                 subprocess.run(['cargo','test','--locked','--manifest-path',str(ROOT/'desktop/Cargo.toml'),'real_daemon_boundary','--','--ignored','--nocapture'],env=env,check=True)
-                assert len(dropped) == 1 and dropped[0][1], dropped
+                assert sorted(dropped) == ['held_followup', 'respond_attempt'], dropped
             finally:
                 proxy.shutdown()
                 thread.join()

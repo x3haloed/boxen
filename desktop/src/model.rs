@@ -178,16 +178,18 @@ impl ContextMeasure {
     pub fn label(self) -> String {
         match self {
             Self::Codex { tokens, window } => {
-                format!("ctx {:.0}%", tokens as f64 * 100.0 / window as f64)
+                format!("ctx {}%", context_percent(tokens, window))
             }
-            Self::Claude { input_tokens } => format!("{input_tokens} tok in, last turn"),
-            Self::Antigravity { tokens, window } => format!("ctx {tokens} / {window} tok"),
+            Self::Claude { input_tokens } => format!("{} in, last turn", token_amount(input_tokens)),
+            Self::Antigravity { tokens, window } => {
+                format!("{} of {} used", token_amount(tokens), token_amount(window))
+            }
             Self::Selection {
                 selected,
                 available,
             } => {
                 format!(
-                    "ctx {:.0}/{:.0} KiB selectable",
+                    "{:.0}/{:.0} KiB selectable",
                     selected as f64 / 1024.0,
                     available as f64 / 1024.0
                 )
@@ -199,22 +201,43 @@ impl ContextMeasure {
         matches!(self, Self::Codex { tokens, window } if u128::from(tokens) * 100 >= u128::from(window) * 85)
     }
 
-    pub fn description(self) -> &'static str {
+    pub fn detail(self) -> String {
         match self {
-            Self::Codex { .. } => {
-                "Codex last reported exchange tokens against its model window. Boxen marks 85% as a warning. Codex controls its own compaction."
+            Self::Codex { tokens, window } => {
+                format!(
+                    "{}% of window · {tokens} / {window} tokens",
+                    context_percent(tokens, window)
+                )
             }
-            Self::Claude { .. } => {
-                "Input tokens from Claude Code’s latest main-session model exchange, including cached input."
+            Self::Claude { input_tokens } => {
+                format!("{input_tokens} input tokens · last main-session exchange, including cached input")
             }
-            Self::Antigravity { .. } => {
-                "Antigravity reported current session tokens and window size."
+            Self::Antigravity { tokens, window } => {
+                format!("{tokens} / {window} session tokens")
             }
-            Self::Selection { .. } => {
-                "Selected history bytes against the space available for selection after reservations."
+            Self::Selection { selected, available } => {
+                format!("{selected} / {available} selectable bytes after reservations")
             }
         }
     }
+}
+
+fn context_percent(tokens: u64, window: u64) -> u128 {
+    u128::from(tokens) * 100 / u128::from(window)
+}
+
+fn token_amount(tokens: u64) -> String {
+    for (scale, suffix) in [(1_000_000, "M"), (1_000, "k")] {
+        if tokens >= scale {
+            let value = tokens as f64 / scale as f64;
+            return if value.fract() == 0. {
+                format!("{value:.0}{suffix}")
+            } else {
+                format!("{value:.1}{suffix}")
+            };
+        }
+    }
+    tokens.to_string()
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextChange {
@@ -536,8 +559,8 @@ impl Transcript {
             "context_shortage" => {
                 self.measure_context(None);
                 let description = match (data["protected_bytes"].as_u64(), data["available_bytes"].as_u64()) {
-                    (Some(protected), Some(available)) => format!("OpenRouter context shortage · {protected} B required · {available} B available"),
-                    _ => "OpenRouter context shortage".into(),
+                    (Some(protected), Some(available)) => format!("Context shortage stopped this run · {protected} B required · {available} B available"),
+                    _ => "Context shortage stopped this run".into(),
                 };
                 self.context_changed(seq, ContextChange::Shortage, description);
             }
@@ -552,7 +575,7 @@ impl Transcript {
                     let omitted = count.saturating_sub(selected.len() as u64);
                     if !masked.is_empty() || omitted != 0 {
                         self.context_changed(seq, ContextChange::Projection, format!(
-                            "OpenRouter history selection · {} projected · {omitted} omitted", masked.len()
+                            "OpenRouter history selection · {} changed · {omitted} omitted", masked.len()
                         ));
                     }
                 }
@@ -898,9 +921,24 @@ mod tests {
         })).unwrap();
         assert_eq!(
             transcript.context.unwrap().label(),
-            "ctx 74/160 KiB selectable"
+            "74/160 KiB selectable"
         );
         assert!(!transcript.context.unwrap().past_warning_line());
+        transcript.apply(&json!({
+            "seq":4,"at":4000,"kind":"context_boundary","data":{
+                "selected":["one","two"],"masked":["one"],"source_count":3
+            }
+        })).unwrap();
+        assert_eq!(transcript.context_change, Some((ContextChange::Projection, 4000)));
+        assert!(transcript.rows[0].text.ends_with("1 changed · 1 omitted"));
+        transcript.apply(&json!({
+            "seq":5,"at":5000,"kind":"context_shortage","data":{
+                "protected_bytes":196700,"available_bytes":163840
+            }
+        })).unwrap();
+        assert!(transcript.context.is_none());
+        assert_eq!(transcript.context_change, Some((ContextChange::Shortage, 5000)));
+        assert_eq!(transcript.rows[1].text, "Context shortage stopped this run · 196700 B required · 163840 B available");
     }
 
     #[test]
@@ -916,6 +954,7 @@ mod tests {
         assert_eq!(transcript.rows[0].text, "Claude Code compacted · auto · 162000 tok before");
         apply(&mut transcript, 3, "backend_usage", json!({"backend":"claude","input_tokens":41000}));
         assert_eq!(transcript.context, Some(ContextMeasure::Claude { input_tokens: 41000 }));
+        assert_eq!(transcript.context.unwrap().label(), "41k in, last turn");
         assert_eq!(transcript.context_at, Some(3000));
         assert_eq!(transcript.context_change, Some((ContextChange::Compaction, 2000)));
         apply(&mut transcript, 4, "backend_thread", json!({"id":"replacement","backend":"claude"}));
