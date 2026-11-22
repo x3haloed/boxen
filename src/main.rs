@@ -80,7 +80,7 @@ boxen [--data-dir PATH] identity\n\
 boxen [--data-dir PATH] trust PUBLIC_KEY LABEL [--address HOST:PORT]\n\
 boxen [--data-dir PATH] untrust PUBLIC_KEY\n\
 boxen [--data-dir PATH] peers\n\
-boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--antigravity PATH] [--claude PATH] [--openrouter-key-file PATH]\n\
+boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--antigravity auto|PATH] [--claude PATH] [--openrouter-key-file PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
 boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|antigravity|claude|openrouter] [--require CAPABILITY,...] [--complete-on-handoff JSON] [--context JSON] [--reasoning-effort LEVEL]\n\
 boxen [--data-dir PATH] request HOST:PORT PUBLIC_KEY JSON\n\
@@ -212,7 +212,8 @@ Workloads use managed CLIs or the built-in OpenRouter runtime with Full access o
                 .or_else(|| env::var("BOXEN_CODEX").ok())
                 .unwrap_or_else(|| "codex".into());
             let antigravity = take_option(&mut args, "--antigravity")?
-                .or_else(|| env::var("BOXEN_ANTIGRAVITY").ok());
+                .or_else(|| env::var("BOXEN_ANTIGRAVITY").ok())
+                .unwrap_or_else(|| "auto".into());
             let claude = take_option(&mut args, "--claude")?
                 .or_else(|| env::var("BOXEN_CLAUDE").ok())
                 .or_else(|| claude::discover(state.directory()))

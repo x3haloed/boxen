@@ -2,6 +2,7 @@
 use crate::{
     Result,
     acp_form::Form,
+    execution::Execution,
     jobs::{Control, History, Jobs, Run, RunOutcome},
     logging::{self, Context, Level, Target},
     resident_bridge::Bridge,
@@ -11,7 +12,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     io::{BufRead, BufReader, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
@@ -20,6 +21,43 @@ use std::{
 const MAX_LINE: u64 = 4 * 1024 * 1024;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+pub const UNAVAILABLE: &str = "Antigravity is unavailable on the executing machine";
+
+pub fn executable(configured: &str, account: Option<&Execution>) -> Option<PathBuf> {
+    if configured != "auto" {
+        return Some(configured.into());
+    }
+    let windows = crate::platform::host_os() == "windows";
+    let name = if windows { "agy.exe" } else { "agy" };
+    let search = std::env::var_os("PATH");
+    let home = account.map(|account| Path::new(&account.home));
+    let install_dir = if windows {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| home.map(|home| home.join("AppData/Local")))
+            .map(|path| path.join("agy/bin"))
+    } else {
+        home.map(|home| home.join(".local/bin"))
+    };
+    search
+        .as_deref()
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .chain(install_dir)
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join(name))
+        .find(|path| {
+            std::fs::metadata(path).is_ok_and(|metadata| {
+                #[cfg(unix)]
+                if !windows {
+                    use std::os::unix::fs::PermissionsExt;
+                    return metadata.is_file() && metadata.permissions().mode() & 0o111 != 0;
+                }
+                metadata.is_file()
+            })
+        })
+}
 
 #[derive(Clone)]
 enum Scope {
@@ -824,7 +862,7 @@ pub(crate) struct SessionAdmission {
 pub(crate) struct SessionSlot(pub Mutex<SessionAdmission>);
 
 pub fn execute(
-    binary: &str,
+    configured: &str,
     resume: Option<String>,
     run: Arc<Run>,
     controls: mpsc::Receiver<Control>,
@@ -834,16 +872,22 @@ pub fn execute(
 ) -> Result<Option<RunOutcome>> {
     let record = run.snapshot().record;
     let spec = &record.spec;
+    let scope = Scope::Run(run.clone());
+    let binary = executable(configured, record.execution.as_ref());
+    scope.diagnostic(Level::Info, "antigravity.executable", || {
+        json!({"available":binary.is_some(),"automatic":configured == "auto"})
+    });
+    let binary = binary.ok_or(UNAVAILABLE)?;
     let resident = record.resident.as_ref();
     let bridge = match resident {
         Some(resident) => Bridge::start(jobs.clone(), run.clone(), resident.clone())?,
         None => Bridge::start_work(jobs.clone(), run.clone())?,
     };
     let command = record.execution.as_ref().map_or_else(
-        || Command::new(binary),
-        |execution| execution.command(binary),
+        || Command::new(&binary),
+        |execution| execution.command(&binary),
     );
-    let (_process, mut rpc) = Rpc::launch(command, Path::new(&spec.cwd), Scope::Run(run.clone()))?;
+    let (_process, mut rpc) = Rpc::launch(command, Path::new(&spec.cwd), scope)?;
     let prepared = (|| -> Result<(String, Value, Option<String>)> {
         let capabilities = rpc.initialize(Instant::now() + SETUP_TIMEOUT)?;
         let mut setup = json!({"cwd":spec.cwd,"mcpServers":[bridge.acp_config()]});

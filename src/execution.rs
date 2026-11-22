@@ -55,9 +55,9 @@ fn output(command: &mut Command) -> Result<String> {
 }
 
 impl Execution {
-    pub fn host_info(home: &Path) -> Value {
+    pub fn host_info(workload: &Result<Self>) -> Value {
         json!({"daemon":Self::inherited().map(|context| json!(context)).unwrap_or_else(|error| json!({"error":error.to_string()})),
-            "workload":Self::capture(home).map(|context| json!(context)).unwrap_or_else(|error| json!({"error":error.to_string()}))})
+            "workload":workload.as_ref().map(|context| json!(context)).unwrap_or_else(|error| json!({"error":error.to_string()}))})
     }
     pub fn capture(home: &Path) -> Result<Self> {
         let policy = match fs::File::open(home.join("execution.json")) {

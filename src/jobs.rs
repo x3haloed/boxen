@@ -1442,6 +1442,13 @@ impl History {
     }
 }
 
+struct AntigravityCatalog {
+    execution: crate::execution::Execution,
+    binary: PathBuf,
+    fetched: Instant,
+    models: Value,
+}
+
 pub struct Jobs {
     pub tool_approvals: crate::tool_approvals::Store,
     pub attachments: crate::attachments::Store,
@@ -1450,11 +1457,11 @@ pub struct Jobs {
     runs: Mutex<HashMap<String, Arc<Run>>>,
     codex_path: String,
     codex_catalog: Mutex<()>,
-    antigravity_path: Option<String>,
+    antigravity_path: String,
     claude_path: Option<String>,
     claude_catalog: Mutex<Option<(crate::execution::Execution, Instant, Value)>>,
     antigravity_sessions: Mutex<HashMap<String, Arc<crate::antigravity::SessionSlot>>>,
-    antigravity_catalog: Mutex<Option<(crate::execution::Execution, Instant, Value)>>,
+    antigravity_catalog: Mutex<Option<AntigravityCatalog>>,
     pub inference: crate::inference::Config,
     _lock: File,
     pub residents: Arc<Residents>,
@@ -2095,26 +2102,33 @@ impl Jobs {
 
     pub fn antigravity_models(&self, owner: &str) -> Result<Value> {
         let result = (|| -> Result<Value> {
-            let binary = self
-                .antigravity_path
-                .as_ref()
-                .ok_or("Antigravity is unavailable on the executing machine")?;
             let mut cached = self
                 .antigravity_catalog
                 .try_lock()
                 .map_err(|_| "An Antigravity model lookup is already running on this machine")?;
             let home = self.runtime_home().ok_or("run directory has no home")?;
             let execution = crate::execution::Execution::capture(home)?;
+            let binary = crate::antigravity::executable(&self.antigravity_path, Some(&execution));
+            logging::record(
+                Level::Info,
+                Target::Runtime,
+                "antigravity.executable",
+                Context::peer(owner),
+                || json!({"available":binary.is_some(),"automatic":self.antigravity_path == "auto"}),
+                || Value::Null,
+            );
+            let binary = binary.ok_or(crate::antigravity::UNAVAILABLE)?;
             if execution.desktop_available == Some(false)
                 && execution.mode == crate::execution::Mode::UserSession
             {
                 return Err("Antigravity model lookup becomes available when the configured account has a macOS login session".into());
             }
-            if let Some((account, fetched, catalog)) = &*cached
-                && *account == execution
-                && fetched.elapsed() < Duration::from_secs(60)
+            if let Some(catalog) = &*cached
+                && catalog.execution == execution
+                && catalog.binary == binary
+                && catalog.fetched.elapsed() < Duration::from_secs(60)
             {
-                return Ok(catalog.clone());
+                return Ok(catalog.models.clone());
             }
             let cwd = home.canonicalize()?.join("antigravity-model-catalog");
             if fs::symlink_metadata(&cwd).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -2122,9 +2136,14 @@ impl Jobs {
             }
             state::private_dir(&cwd)?;
             execution.own_managed_path(&cwd)?;
-            let catalog = crate::antigravity::models(execution.command(binary), &cwd, owner)?;
-            *cached = Some((execution, Instant::now(), catalog.clone()));
-            Ok(catalog)
+            let models = crate::antigravity::models(execution.command(&binary), &cwd, owner)?;
+            *cached = Some(AntigravityCatalog {
+                execution,
+                binary,
+                fetched: Instant::now(),
+                models: models.clone(),
+            });
+            Ok(models)
         })();
         logging::record(
             if result.is_ok() {
@@ -2194,26 +2213,35 @@ impl Jobs {
         result
     }
 
-    fn describe_backend(&self, backend: Backend) -> Value {
+    fn describe_backend(
+        &self,
+        backend: Backend,
+        execution: Option<&crate::execution::Execution>,
+    ) -> Value {
         backend.describe(match backend {
             Backend::Codex => true,
             Backend::OpenRouter => self.inference.ready().is_ok(),
-            Backend::Antigravity => self.antigravity_path.is_some(),
+            Backend::Antigravity => {
+                crate::antigravity::executable(&self.antigravity_path, execution).is_some()
+            }
             Backend::Claude => self.claude_path.is_some(),
         })
     }
 
     pub fn runtime_info(&self) -> Value {
-        let backends = Backend::ALL.map(|backend| self.describe_backend(backend));
+        let execution = self
+            .runtime_home()
+            .ok_or_else(|| "run directory has no home".into())
+            .and_then(crate::execution::Execution::capture);
+        let backends =
+            Backend::ALL.map(|backend| self.describe_backend(backend, execution.as_ref().ok()));
         let mut info = json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304}});
         info["backends"] = json!(backends);
         info["checked_requests"] = json!({"start":"start_checked","resident_activate":"resident_activate_checked","completion_handoff":"start_until_handoff"});
         info["platform"] =
             json!({"os":crate::platform::host_os(),"architecture":std::env::consts::ARCH});
         info["agent_work"] = json!({"tools":["boxen_machines","boxen_work","boxen_thread_files"],"transport":"existing_authenticated_peer_operations","native_registration":"per_run_mcp"});
-        if let Some(home) = self.directory.parent() {
-            info["execution"] = crate::execution::Execution::host_info(home);
-        }
+        info["execution"] = crate::execution::Execution::host_info(&execution);
         info
     }
 
@@ -2238,7 +2266,11 @@ impl Jobs {
             "observed":observed,
         });
         drop(inner);
-        info["declared"] = self.describe_backend(backend);
+        let execution = self
+            .runtime_home()
+            .filter(|_| backend == Backend::Antigravity && self.antigravity_path == "auto")
+            .and_then(|home| crate::execution::Execution::capture(home).ok());
+        info["declared"] = self.describe_backend(backend, execution.as_ref());
         Ok(info)
     }
 
@@ -2257,14 +2289,21 @@ impl Jobs {
                 .ok_or("runs parent required")?
                 .join("credentials/openrouter.key"),
         };
-        Self::open_with_runtimes(directory, codex_path, machine_id, config, None, None)
+        Self::open_with_runtimes(
+            directory,
+            codex_path,
+            machine_id,
+            config,
+            "auto".into(),
+            None,
+        )
     }
     pub fn open_with_runtimes(
         directory: PathBuf,
         codex_path: String,
         machine_id: String,
         inference: crate::inference::Config,
-        antigravity_path: Option<String>,
+        antigravity_path: String,
         claude_path: Option<String>,
     ) -> Result<Arc<Self>> {
         logging::record(
@@ -3466,9 +3505,6 @@ impl Jobs {
             Backend::Claude if self.claude_path.is_none() => {
                 return Err("Claude Code is unavailable on the executing machine".into());
             }
-            Backend::Antigravity if self.antigravity_path.is_none() => {
-                return Err("Antigravity is unavailable on the executing machine".into());
-            }
             Backend::OpenRouter
                 if activation.is_none() || !spec.required_capabilities.is_empty() =>
             {
@@ -3650,6 +3686,20 @@ impl Jobs {
         )?;
         let home = self.directory.parent().ok_or("run directory has no home")?;
         let execution = crate::execution::Execution::capture(home)?;
+        if backend == Backend::Antigravity
+            && !reuses_live_session
+            && crate::antigravity::executable(&self.antigravity_path, Some(&execution)).is_none()
+        {
+            logging::record(
+                Level::Info,
+                Target::Runtime,
+                "antigravity.submission_unavailable",
+                Context::run(&spec.id, &spec.thread_id, owner),
+                || Value::Null,
+                || Value::Null,
+            );
+            return Err(crate::antigravity::UNAVAILABLE.into());
+        }
         if reuses_live_session
             && head.and_then(|prior| prior.record.execution.as_ref()) != Some(&execution)
         {
@@ -3791,7 +3841,7 @@ impl Jobs {
                     )
                     .map(Some),
                     Backend::Antigravity => crate::antigravity::execute(
-                        antigravity.as_deref().ok_or("Antigravity is unavailable")?,
+                        &antigravity,
                         resume,
                         run.clone(),
                         receiver,

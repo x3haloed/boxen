@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Antigravity ACP contract through two authenticated daemons and the ordinary CLI."""
 import json
+import os
 import pathlib
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -44,6 +46,29 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
         return subprocess.check_output(command + ['--data-dir', str(paths[index]), *args], text=True, timeout=15).strip()
 
     keys = [cli(i, 'identity') for i in range(2)]
+    home = path / 'runtime-home'
+    install_dir = home / '.local' / 'bin'
+    install_dir.mkdir(parents=True)
+    search_dir = path / 'path-bin'
+    search_dir.mkdir()
+    loader_dir = path / 'loader-bin'
+    loader_dir.mkdir()
+    if binary.suffix == '.com':
+        # A cold APE interpreter needs shell utilities even with an isolated PATH.
+        for tool in ('uname', 'mkdir', 'dd', 'gzip', 'chmod', 'mv', 'cc'):
+            if executable := shutil.which(tool):
+                (loader_dir / tool).symlink_to(executable)
+    env = os.environ.copy()
+    env.pop('BOXEN_ANTIGRAVITY', None)
+    env.update(HOME=str(home), USERPROFILE=str(home), LOCALAPPDATA=str(home / 'AppData' / 'Local'))
+    env['PATH'] = os.pathsep.join(map(str, (search_dir, loader_dir)))
+    client_env = dict(env, PATH=str(loader_dir), HOME=str(path), USERPROFILE=str(path), LOCALAPPDATA=str(path))
+    if os.name != 'nt':
+        (search_dir / 'python3').symlink_to(sys.executable)
+        # A non-executable PATH entry must not hide the standard installation.
+        (search_dir / 'agy').write_text('unusable fixture')
+    for data in paths:
+        (data / 'execution.json').write_text('{"mode":"inherit"}')
     dest = [f'127.0.0.1:{p}' for p in peer_ports]
     remote = [dest[1], keys[1]]
 
@@ -93,26 +118,49 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
     try:
         for i in range(2):
             cli(i, 'trust', keys[1-i], 'Paired fixture', '--address', dest[1-i])
-            args = ['--antigravity', str(fixture)] if i else []
+            args = ['--antigravity', str(fixture)] if i and os.name == 'nt' else []
             process = subprocess.Popen(
                 command + ['--data-dir', str(paths[i]), 'serve', '--listen', dest[i],
                            '--ui', f'127.0.0.1:{interface_ports[i]}', *args],
-                stdout=subprocess.PIPE, stderr=logs[i], text=True)
+                env=env if i else client_env, stdout=subprocess.PIPE, stderr=logs[i], text=True)
             processes.append(process)
             lines = PipeLines(process.stdout)
-            for _ in range(3):
-                line = lines.get()
+            try:
+                for _ in range(3):
+                    line = lines.get()
+            except AssertionError as error:
+                logs[i].seek(0)
+                raise AssertionError(f'Fixture daemon {i} failed to start: {logs[i].read()}') from error
             assert 'Local controls:' in line
             tokens.append(line.strip().split('#')[1])
 
         runtime = lambda **kw: next(b for b in api({'op': 'runtime_info'}, **kw)['backends'] if b['id'] == 'antigravity')
-        assert runtime()['configured'] and not runtime(local=True)['configured']
+        assert not runtime(local=True)['configured']
+        if os.name != 'nt':
+            assert not runtime()['configured']
+            rejected({'op': 'antigravity_models'}, 'Antigravity is unavailable')
+            missing_id = uid()
+            rejected({'op': 'start', 'spec': {'id': missing_id, 'thread_id': missing_id,
+                      'backend': 'antigravity', 'cwd': str(workspaces[0]), 'prompt': 'Fixture'}},
+                     'Antigravity is unavailable')
+            rejected({'op': 'get', 'id': missing_id}, 'not found')
+            (install_dir / 'agy').symlink_to(fixture)
+        assert runtime()['configured']
+        assert not runtime(local=True)['configured']
         expected_models = {'models': [{'model': name, 'label': name}
                                       for name in ('fixture-default', 'fixture-model')]}
         assert api({'op': 'antigravity_models'}) == expected_models
         assert api({'op': 'antigravity_models'}) == expected_models
         assert (paths[1] / 'antigravity-model-catalog' / 'catalog-opened').read_text() == 'open\n'
         assert (paths[1] / 'antigravity-model-catalog' / 'catalog-closed').read_text() == 'close\n'
+        if os.name != 'nt':
+            (search_dir / 'agy').unlink()
+            (search_dir / 'agy').symlink_to(fixture)
+            assert api({'op': 'antigravity_models'}) == expected_models
+            assert (paths[1] / 'antigravity-model-catalog' / 'catalog-opened').read_text() == 'open\nopen\n'
+            (install_dir / 'agy').unlink()
+            assert runtime()['configured']
+            print('PASS running daemon discovers the standard installation and prefers a usable PATH entry')
         assert api({'op': 'list'}) == []
         print('PASS authenticated Antigravity catalog, grouped models, native close, cache and no accepted run')
         request_id = uid()
