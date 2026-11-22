@@ -52,7 +52,6 @@ struct Saved {
     thread_settings: Vec<(ThreadKey, thread_view::RunSettings)>,
     moves: Vec<thread_view::PendingMove>,
     activity_views: HashSet<ThreadKey>,
-    draft_runs: Vec<(ThreadKey, String)>,
     steering: Vec<thread_view::Steering>,
     pending: Vec<Pending>,
     answers: Vec<AnswerAttempt>,
@@ -89,9 +88,13 @@ struct Data {
     file_previews: HashMap<String, Option<Result<attachments::Preview, String>>>,
     thread_issues: HashMap<ThreadKey, String>,
     active_steering: HashSet<ThreadKey>,
+    fresh_steering: HashSet<String>,
+    fallback_inflight: HashSet<String>,
+    send_checking: HashSet<ThreadKey>,
+    followup_after_refusal: HashMap<ThreadKey, String>,
     hold_pending: HashSet<ThreadKey>,
     moving: HashSet<ThreadKey>,
-    preparing_followups: HashMap<String, ThreadKey>,
+    preparing_followups: HashMap<String, thread_view::SendIntent>,
     local_key: String,
     new_thread_dialog: bool,
     show_new_thread_settings: bool,
@@ -130,6 +133,7 @@ enum Action {
     Open(ThreadKey, bool),
     Pin(ThreadKey),
     Send(ThreadKey),
+    RestoreSteer(thread_view::Steering),
     HoldChange(hold::Contribution, u64, hold::Mutation),
     Cancel(ThreadKey),
     Retry(usize),
@@ -605,19 +609,32 @@ impl Desktop {
                         && w.epoch == epoch
                     {
                         self.data.pulse.gap(&id);
+                        for steering in &self.data.saved.steering {
+                            if run_key(&steering.key.peer, &steering.run) == id {
+                                self.data.fresh_steering.remove(&steering.id);
+                            }
+                        }
                         w.error = Some(error);
                         w.retry = Instant::now() + Duration::from_secs(2);
                     }
                 }
                 Update::Followup(previous, result) => {
-                    let key = self.data.preparing_followups.remove(&previous);
+                    let intent = self.data.preparing_followups.remove(&previous);
                     match result {
-                        Ok(pending) => self.submit(pending),
+                        Ok(pending) => {
+                            if let Some(id) = intent.and_then(|intent| intent.refused_id) {
+                                self.retire_refused_steer(&id);
+                            }
+                            self.submit(pending);
+                        }
                         Err(error) => {
-                            if let Some(key) = key {
+                            if let Some(intent) = intent {
+                                self.restore_send_intent(&intent);
+                                let key = intent.key;
+                                self.data.followup_after_refusal.remove(&key);
                                 self.data
                                     .thread_issues
-                                    .insert(key, format!("Could not prepare follow-up: {error}"));
+                                    .insert(key, format!("Returned to draft · {error}"));
                             }
                         }
                     }
@@ -625,14 +642,11 @@ impl Desktop {
                 Update::Files(update) => self.file_update(update),
                 Update::Moved(key, result) => self.moved(key, result),
                 Update::Held(reply) => self.hold_reply(reply),
+                Update::SendChecked(intent, destination, result) => {
+                    self.send_checked(intent, destination, result)
+                }
                 Update::Steered(key, update, result, sent) => {
                     self.steered(key, update, result, sent)
-                }
-                Update::SteeringRun(destination, snapshot) => {
-                    let current = conversation::destination(&self.data, &destination.key);
-                    if current.address == destination.address {
-                        self.replace_snapshot(&destination.key, snapshot);
-                    }
                 }
                 Update::AnswerSubmitted(id, result) => {
                     if let Err(error) = result
@@ -720,6 +734,7 @@ impl Desktop {
                             self.new_thread_failed(&id, error);
                         }
                         Err(error) => {
+                            let safe_to_edit = error.safe_to_edit;
                             let error = error.detail;
                             if let Some(p) = self
                                 .data
@@ -733,21 +748,27 @@ impl Desktop {
                                     peer: p.destination.key.clone(),
                                     id: p.spec["thread_id"].as_str().unwrap_or("").into(),
                                 };
-                                let directory_rejected = error.starts_with("HTTP 422:") && (
-                                    error.ends_with("working directory must exist on the executing machine and be absolute")
-                                    || error.ends_with("automatic working directory cannot be a symbolic link"));
-                                let stale = error.starts_with("HTTP 422:")
-                                    && error.ends_with(
-                                        "follow-up source is no longer the latest anonymous run",
+                                if p.after.is_some() && safe_to_edit {
+                                    self.data.followup_after_refusal.remove(&key);
+                                    self.restore_thread_draft(
+                                        &key,
+                                        p.spec["prompt"].as_str().unwrap_or(""),
+                                        &attachments::FileRef::parse(&p.spec["attachments"]),
                                     );
-                                if p.after.is_some() && (directory_rejected || stale) {
                                     self.data
                                         .saved
                                         .pending
                                         .retain(|request| request.spec["id"] != id);
                                     self.persist();
                                 }
-                                self.data.thread_issues.insert(key, error);
+                                let receipt = if safe_to_edit {
+                                    "Returned to draft"
+                                } else {
+                                    "? not confirmed · draft kept"
+                                };
+                                self.data
+                                    .thread_issues
+                                    .insert(key, format!("{receipt} · {error}"));
                             }
                         }
                     }
@@ -768,7 +789,20 @@ impl Desktop {
             p.spec["prompt"].as_str().unwrap_or(""),
             &attachments::FileRef::parse(&p.spec["attachments"]),
         );
-        self.data.thread_issues.remove(&key);
+        if p.after.is_some() {
+            let id = p.spec["id"].as_str().unwrap_or("");
+            let label = if self.data.followup_after_refusal.remove(&key).as_deref() == Some(id) {
+                "Refused → started run"
+            } else {
+                "✓ started run"
+            };
+            self.data.thread_issues.insert(
+                key.clone(),
+                format!("{label} {}", id.chars().take(8).collect::<String>()),
+            );
+        } else {
+            self.data.thread_issues.remove(&key);
+        }
         if p.after.is_some() {
             self.data
                 .saved
@@ -803,7 +837,6 @@ impl Desktop {
         if draft == text && attached == files {
             self.data.saved.drafts.retain(|(k, _)| k != key);
             self.data.saved.thread_files.retain(|(k, _)| k != key);
-            self.data.saved.draft_runs.retain(|(k, _)| k != key);
         }
     }
     fn replace_snapshot(&mut self, peer: &str, mut snapshot: Value) {
@@ -1088,6 +1121,11 @@ impl Desktop {
             }
             Action::Pin(key) => self.data.saved.workspace.pin(&key),
             Action::Send(key) => self.send(key),
+            Action::RestoreSteer(steering) => self.return_steer(
+                steering,
+                false,
+                "original delivery may still be uncertain".into(),
+            ),
             Action::HoldChange(entry, revision, mutation) => {
                 self.mutate_hold(entry, Some(revision), mutation)
             }

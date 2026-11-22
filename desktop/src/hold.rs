@@ -160,6 +160,7 @@ impl Desktop {
                 if reply.mutation == Mutation::Release {
                     self.restore_held_draft(&entry);
                     self.data.saved.holds.retain(|saved| saved.id != entry.id);
+                    self.restore_held_draft(&entry);
                 } else if reply.mutation == Mutation::Edit
                     && let Some(saved) = self
                         .data
@@ -260,35 +261,34 @@ impl Desktop {
     }
 
     fn restore_held_draft(&mut self, entry: &Contribution) {
+        self.restore_thread_draft(&entry.key, &entry.text, &entry.files);
+    }
+
+    pub fn restore_thread_draft(&mut self, target: &ThreadKey, text: &str, files: &[FileRef]) {
         let saved = &mut self.data.saved;
-        if !entry.text.is_empty() {
-            if let Some((_, current)) = saved.drafts.iter_mut().find(|(key, _)| key == &entry.key) {
-                if *current != entry.text {
+        if !text.is_empty() {
+            if let Some((_, current)) = saved.drafts.iter_mut().find(|(key, _)| key == target) {
+                if *current != text {
                     *current = if current.is_empty() {
-                        entry.text.clone()
+                        text.to_owned()
                     } else {
-                        format!("{}\n\n{}", entry.text, current)
+                        format!("{}\n\n{}", text, current)
                     };
                 }
             } else {
-                saved.drafts.push((entry.key.clone(), entry.text.clone()));
+                saved.drafts.push((target.clone(), text.to_owned()));
             }
         }
-        if !entry.files.is_empty() {
-            if let Some((_, current)) = saved
-                .thread_files
-                .iter_mut()
-                .find(|(key, _)| key == &entry.key)
+        if !files.is_empty() {
+            if let Some((_, current)) = saved.thread_files.iter_mut().find(|(key, _)| key == target)
             {
-                for file in &entry.files {
+                for file in files {
                     if !current.contains(file) {
                         current.push(file.clone());
                     }
                 }
             } else {
-                saved
-                    .thread_files
-                    .push((entry.key.clone(), entry.files.clone()));
+                saved.thread_files.push((target.clone(), files.to_vec()));
             }
         }
     }

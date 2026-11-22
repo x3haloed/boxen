@@ -44,6 +44,14 @@ For catalog refresh, pass each response's `next_after` back as `summary_page.aft
 
 Control acceptance means delivery to the runtime control queue, not confirmed execution of the action. Observe retained control outcomes and the terminal status. Steering and backend responses are not idempotent submissions; do not blindly resend after losing their response. An uncertain earlier run remains `interrupted`; a new message can continue the same thread. The new run records `recovery_notice`, and Boxen passes the uncertainty to the runtime without replaying the earlier work or requiring an acknowledgment ceremony.
 
+An operator can read the executing daemon’s current anonymous conversation
+head with `{"op":"thread_head","thread_id":"THREAD_ID"}`. This returns one
+run snapshot, including its current native-prompt state when available. A
+moved conversation and an identity-bearing conversation reject this request.
+The lookup does not reserve a turn. Follow-up admission checks its exact
+`after` run again. A steering `control_error` can carry `dispatch:"not_sent"`
+when the adapter refused the update before a backend write.
+
 An operator can submit an attributed response with
 `{"op":"respond_attempt","id":"RUN_ID","request_id":0,"attempt_id":"ATTEMPT_ID","result":{}}`.
 The attempt ID is a fresh lowercase 64-character hex ID. The run journals

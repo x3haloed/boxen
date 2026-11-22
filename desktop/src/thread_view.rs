@@ -166,6 +166,39 @@ pub struct Steering {
     pub text: String,
     pub files: Vec<FileRef>,
 }
+#[derive(Clone)]
+pub struct SendIntent {
+    pub key: ThreadKey,
+    pub text: String,
+    pub files: Vec<FileRef>,
+    pub refused_id: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SendRoute {
+    Steer,
+    Followup,
+    Hold,
+    Draft,
+}
+
+fn send_route(head: &Value, after_refusal: bool) -> SendRoute {
+    if terminal(head) || head["native_prompt"] == "ready" {
+        SendRoute::Followup
+    } else if after_refusal || head["native_prompt"] == "ended" || head["status"] == "cancelling" {
+        SendRoute::Draft
+    } else if head["record"]["spec"]["backend"] == "claude" {
+        SendRoute::Hold
+    } else if matches!(
+        head["record"]["spec"]["backend"].as_str(),
+        Some("codex" | "antigravity" | "openrouter")
+    ) {
+        SendRoute::Steer
+    } else {
+        SendRoute::Draft
+    }
+}
+
 pub fn active(last: Option<&Value>) -> Option<&str> {
     last.filter(|r| !terminal(r))
         .and_then(|r| r["record"]["spec"]["id"].as_str())
@@ -175,17 +208,6 @@ fn prompt_ended(run: &Value) -> bool {
     matches!(run["native_prompt"].as_str(), Some("ended" | "ready"))
 }
 
-fn stale_steering_reason(reason: &str) -> bool {
-    reason.starts_with("Antigravity steering requires an active prompt")
-        || reason.starts_with("Antigravity's prompt ended;")
-}
-pub fn capture(data: &mut Data, key: &ThreadKey, run: Option<&str>) {
-    if let Some(run) = run
-        && !data.saved.draft_runs.iter().any(|(k, _)| k == key)
-    {
-        data.saved.draft_runs.push((key.clone(), run.into()));
-    }
-}
 impl Desktop {
     pub fn move_conversation(&mut self, key: ThreadKey, settings: RunSettings) {
         let Some(target) = settings.target.as_deref() else {
@@ -393,22 +415,32 @@ impl Desktop {
     }
 
     pub fn send(&mut self, key: ThreadKey) {
-        if self.data.saved.moves.iter().any(|m| m.key == key) {
+        if self.data.saved.moves.iter().any(|m| m.key == key)
+            || self.data.hold_pending.contains(&key)
+            || self
+                .data
+                .saved
+                .steering
+                .iter()
+                .any(|message| message.key == key)
+            || self
+                .data
+                .preparing_followups
+                .values()
+                .any(|intent| intent.key == key)
+            || self.data.saved.pending.iter().any(|message| {
+                message.destination.key == key.peer && message.spec["thread_id"] == key.id
+            })
+        {
             return;
         }
-        let Some(last) = find_thread(&self.data, &key)
-            .and_then(|t| t.runs.last())
-            .cloned()
-        else {
-            return;
-        };
         let text = self
             .data
             .saved
             .drafts
             .iter()
             .find(|(k, _)| k == &key)
-            .map(|(_, d)| d.clone())
+            .map(|(_, text)| text.clone())
             .unwrap_or_default();
         let files = self
             .data
@@ -416,108 +448,177 @@ impl Desktop {
             .thread_files
             .iter()
             .find(|(k, _)| k == &key)
-            .map(|(_, f)| f.clone())
+            .map(|(_, files)| files.clone())
             .unwrap_or_default();
         if (text.trim().is_empty() && files.is_empty()) || text.len() > 256 * 1024 {
             return;
         }
-        let dest = view::destination(&self.data, &key.peer);
-        let running = active(Some(&last));
-        if let Some(run) = running
-            && last["record"]["spec"]["backend"] == "claude"
+        if !self.persist() {
+            return;
+        }
+        self.check_send(SendIntent {
+            key,
+            text,
+            files,
+            refused_id: None,
+        });
+    }
+
+    fn check_send(&mut self, intent: SendIntent) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if !self.data.send_checking.insert(intent.key.clone()) {
+            return;
+        }
+        let destination = view::destination(&self.data, &intent.key.peer);
+        let publisher = self.bus.publisher();
+        std::thread::spawn(move || {
+            let head = client.conversation_head(&destination, &intent.key.id);
+            publisher.send(Update::SendChecked(intent, destination, head));
+        });
+    }
+
+    pub fn send_checked(
+        &mut self,
+        intent: SendIntent,
+        dest: crate::Destination,
+        head: Result<Value, String>,
+    ) {
+        let SendIntent {
+            key,
+            text,
+            files,
+            refused_id,
+        } = intent.clone();
+        let after_refusal = refused_id.is_some();
+        self.data.send_checking.remove(&key);
+        let head = match head {
+            Ok(head) => head,
+            Err(error) => {
+                self.restore_send_intent(&intent);
+                self.data
+                    .thread_issues
+                    .insert(key, format!("Returned to draft · {error}"));
+                return;
+            }
+        };
+        if view::destination(&self.data, &key.peer).address != dest.address
+            || head["record"]["spec"]["thread_id"] != key.id
+            || self.data.saved.moves.iter().any(|entry| entry.key == key)
         {
-            self.hold_message(key, run.into(), text, files);
+            self.restore_send_intent(&intent);
+            self.data
+                .thread_issues
+                .insert(key, "Returned to draft · conversation route changed".into());
             return;
         }
-        if running.is_some() && last["native_prompt"] == "ended" {
+        let (Some(run), Some(client)) =
+            (head["record"]["spec"]["id"].as_str(), self.client.clone())
+        else {
+            self.restore_send_intent(&intent);
             return;
-        }
-        if let Some((_, intended)) = self.data.saved.draft_runs.iter().find(|(k, _)| k == &key)
-            && running != Some(intended)
-        {
-            self.data.thread_issues.insert(
-                key,
-                "The intended run ended. The draft is ready to send as a separate request.".into(),
-            );
-            return;
-        }
+        };
         self.data.thread_issues.remove(&key);
-        if let Some(run) = running.filter(|_| !prompt_ended(&last)) {
-            if self.data.active_steering.contains(&key)
-                || self.data.saved.steering.iter().any(|s| s.key == key)
-            {
-                return;
+        match send_route(&head, after_refusal) {
+            SendRoute::Draft => {
+                self.restore_send_intent(&intent);
+                self.data.thread_issues.insert(
+                    key,
+                    if after_refusal {
+                        "Refused · back to draft".into()
+                    } else {
+                        "Returned to draft · the conversation cannot take input yet".into()
+                    },
+                );
             }
-            let Some(client) = self.client.clone() else {
-                return;
-            };
-            let steer = Steering {
-                key: key.clone(),
-                run: run.into(),
-                id: new_id(),
-                text,
-                files,
-            };
-            self.data.saved.steering.push(steer.clone());
-            if !self.persist() {
-                self.data.saved.steering.retain(|s| s.id != steer.id);
-                return;
-            }
-            self.data.active_steering.insert(key);
-            let publisher = self.bus.publisher();
-            std::thread::spawn(move || {
-                let files = json!(steer.files);
-                let (result, attempted) = match client.copy_files(&dest,&files) {
-                    Err(e) => (Err(e),false),
-                    Ok(()) => (client.operation(&dest,json!({"op":"control","id":steer.run,"action":{"type":"steer","text":steer.text,"attachments":files,"update_id":steer.id}})),true)
-                };
-                publisher.send(Update::Steered(steer.key, steer.id, result, attempted));
-            });
-        } else {
-            if self
-                .data
-                .saved
-                .pending
-                .iter()
-                .any(|p| p.destination.key == key.peer && p.spec["thread_id"] == key.id)
-            {
-                return;
-            }
-            let Some(previous) = last["record"]["spec"]["id"].as_str() else {
-                return;
-            };
-            if self
-                .data
-                .preparing_followups
-                .values()
-                .any(|target| target == &key)
-            {
-                return;
-            }
-            let settings = settings_for(&self.data, &key);
-            if let Some(client) = &self.client {
+            SendRoute::Hold => self.hold_message(key, run.into(), text, files),
+            SendRoute::Followup => {
+                let settings = settings_for(&self.data, &key);
+                let id = new_id();
+                if after_refusal {
+                    self.data
+                        .followup_after_refusal
+                        .insert(key.clone(), id.clone());
+                }
                 self.data
                     .preparing_followups
-                    .insert(run_key(&dest.key, previous), key);
+                    .insert(run_key(&dest.key, run), intent);
                 client.followup(
                     dest,
-                    previous.into(),
-                    new_id(),
+                    run.into(),
+                    id,
                     text,
                     files,
                     settings,
                     self.bus.publisher(),
                 );
             }
+            SendRoute::Steer => {
+                let steer = Steering {
+                    key: key.clone(),
+                    run: run.into(),
+                    id: new_id(),
+                    text,
+                    files,
+                };
+                self.data.saved.steering.push(steer.clone());
+                if !self.persist() {
+                    self.data
+                        .saved
+                        .steering
+                        .retain(|message| message.id != steer.id);
+                    return;
+                }
+                self.data.fresh_steering.insert(steer.id.clone());
+                self.data.active_steering.insert(key);
+                let publisher = self.bus.publisher();
+                std::thread::spawn(move || {
+                    let files = json!(steer.files);
+                    let (result, attempted) = match client.copy_files(&dest, &files) {
+                        Err(error) => (Err(error), false),
+                        Ok(()) => (client.operation(&dest, json!({"op":"control","id":steer.run,
+                            "action":{"type":"steer","text":steer.text,"attachments":files,"update_id":steer.id}})), true),
+                    };
+                    publisher.send(Update::Steered(steer.key, steer.id, result, attempted));
+                });
+            }
         }
     }
-    fn refresh_steering_run(&self, key: &ThreadKey, run: &str) {
-        if let Some(client) = &self.client {
-            client.refresh_steering_run(
-                view::destination(&self.data, &key.peer),
-                run.into(),
-                self.bus.publisher(),
-            );
+
+    pub fn retire_refused_steer(&mut self, id: &str) {
+        self.data.saved.steering.retain(|entry| entry.id != id);
+        self.data.fallback_inflight.remove(id);
+    }
+
+    pub fn restore_send_intent(&mut self, intent: &SendIntent) {
+        self.restore_thread_draft(&intent.key, &intent.text, &intent.files);
+        if let Some(id) = &intent.refused_id {
+            self.retire_refused_steer(id);
+        }
+        self.persist();
+    }
+
+    pub fn return_steer(&mut self, steering: Steering, can_followup: bool, reason: String) {
+        if self.data.fallback_inflight.contains(&steering.id) {
+            return;
+        }
+        self.data.active_steering.remove(&steering.key);
+        let authorizes_fallback = self.data.fresh_steering.remove(&steering.id);
+        let intent = SendIntent {
+            key: steering.key,
+            text: steering.text,
+            files: steering.files,
+            refused_id: Some(steering.id.clone()),
+        };
+        if can_followup && authorizes_fallback && self.client.is_some() {
+            self.data.fallback_inflight.insert(steering.id);
+            self.check_send(intent);
+        } else {
+            self.restore_send_intent(&intent);
+            self.data
+                .thread_issues
+                .insert(intent.key, format!("Returned to draft · {reason}"));
         }
     }
 
@@ -534,38 +635,35 @@ impl Desktop {
             .steering
             .iter()
             .find(|s| s.id == update && s.key == key)
+            .cloned()
         else {
             return;
         };
         self.data.active_steering.remove(&key);
         if let Err(error) = result {
             if !attempted || error.starts_with("HTTP 422:") {
-                if attempted && error.trim_end() == "HTTP 422: run is no longer active" {
-                    self.refresh_steering_run(&key, &steering.run);
-                    self.data.thread_issues.insert(
-                        key.clone(),
-                        "The run ended before it could take the update. The draft is still here."
-                            .into(),
-                    );
-                } else {
-                    self.data
-                        .thread_issues
-                        .insert(key.clone(), format!("Update was not sent: {error}"));
-                }
-                self.data.saved.steering.retain(|s| s.id != update);
+                let ended = attempted && error.trim_end() == "HTTP 422: run is no longer active";
+                self.return_steer(steering, ended, error);
             } else {
-                self.data.thread_issues.insert(
-                    key.clone(),
-                    format!("Update delivery is unconfirmed: {error}"),
-                );
+                self.data.fresh_steering.remove(&update);
+                self.data
+                    .thread_issues
+                    .insert(key, "? not confirmed · draft kept".into());
             }
-            self.persist();
         }
     }
+
     pub fn reconcile_steering(&mut self, tag: &str) {
         let Some(transcript) = self.data.transcripts.get(tag) else {
             return;
         };
+        let frontier_reached = self
+            .data
+            .watches
+            .get(tag)
+            .and_then(|watch| watch.frontier)
+            .is_some_and(|frontier| transcript.seq >= frontier);
+        let run_terminal = frontier_reached && transcript.status.as_ref().is_some_and(terminal);
         let done: Vec<_> = self
             .data
             .saved
@@ -576,56 +674,41 @@ impl Desktop {
                 if transcript
                     .rows
                     .iter()
-                    .any(|r| r.update_id.as_deref() == Some(&s.id))
+                    .any(|row| row.update_id.as_deref() == Some(&s.id))
                 {
                     Some((s.clone(), Ok(())))
+                } else if let Some(refusal) = transcript.rejected_updates.get(&s.id) {
+                    Some((s.clone(), Err(refusal.clone())))
+                } else if run_terminal && transcript.queued_updates.contains(&s.id) {
+                    Some((
+                        s.clone(),
+                        Err((
+                            "Run ended before the queued message was incorporated".into(),
+                            false,
+                        )),
+                    ))
                 } else {
-                    transcript
-                        .rejected_updates
-                        .get(&s.id)
-                        .map(|reason| (s.clone(), Err(reason.clone())))
+                    None
                 }
             })
             .collect();
-        for (s, outcome) in &done {
-            self.data.saved.steering.retain(|p| p.id != s.id);
-            self.data.active_steering.remove(&s.key);
-            if outcome.is_ok() {
-                self.clear_submitted_draft(&s.key, &s.text, &s.files);
-                self.data.thread_issues.remove(&s.key);
-            } else if let Err(reason) = outcome
-                && find_thread(&self.data, &s.key).is_none_or(|thread| {
-                    !thread
-                        .runs
-                        .iter()
-                        .any(|run| run["record"]["spec"]["id"] == s.run && terminal(run))
-                })
-            {
-                self.refresh_steering_run(&s.key, &s.run);
-                if stale_steering_reason(reason)
-                    && find_thread(&self.data, &s.key).is_some_and(|thread| {
-                        thread
-                            .runs
-                            .iter()
-                            .any(|run| run["record"]["spec"]["id"] == s.run && prompt_ended(run))
-                    })
-                {
-                    self.data.thread_issues.remove(&s.key);
-                    continue;
+        for (steering, outcome) in done {
+            match outcome {
+                Ok(()) => {
+                    self.data
+                        .saved
+                        .steering
+                        .retain(|entry| entry.id != steering.id);
+                    self.data.active_steering.remove(&steering.key);
+                    self.data.fresh_steering.remove(&steering.id);
+                    self.clear_submitted_draft(&steering.key, &steering.text, &steering.files);
+                    self.data.thread_issues.remove(&steering.key);
+                    self.persist();
                 }
-                let reason = if reason.is_empty() {
-                    "The runtime rejected the update"
-                } else {
-                    reason
-                };
-                self.data.thread_issues.insert(
-                    s.key.clone(),
-                    format!("{}. The draft is still here.", reason.trim_end_matches('.')),
-                );
+                Err((reason, confirmed_not_sent)) => {
+                    self.return_steer(steering, confirmed_not_sent, reason)
+                }
             }
-        }
-        if !done.is_empty() {
-            self.persist();
         }
     }
 }
@@ -639,8 +722,6 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     let last = runs.last();
     let running = active(last).map(str::to_owned);
     let native_ended = running.is_some() && last.is_some_and(prompt_ended);
-    let claude_running =
-        running.is_some() && last.is_some_and(|run| run["record"]["spec"]["backend"] == "claude");
     let accepts_followup = last.is_some_and(|run| run["native_prompt"] == "ready");
     let moving = data.saved.moves.iter().any(|m| &m.key == key);
     let pending = data
@@ -671,12 +752,6 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         .map(|(_, f)| std::mem::take(f))
         .unwrap_or_default();
     let mut switched = None;
-    let mut stale = data
-        .saved
-        .draft_runs
-        .iter()
-        .find(|(k, _)| k == key)
-        .is_some_and(|(_, id)| Some(id.as_str()) != running.as_deref());
     ui.horizontal_wrapped(|ui| {
         next_run_settings(
             ui,
@@ -689,7 +764,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                 && !data
                     .preparing_followups
                     .values()
-                    .any(|target| target == key),
+                    .any(|intent| &intent.key == key),
             last.and_then(|run| run["record"]["spec"]["backend"].as_str())
                 .unwrap_or("codex"),
             actions,
@@ -844,14 +919,13 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         view::switch(data, key, activity, Some(source));
     }
     let extra = errors
-        + usize::from(stale)
         + usize::from(waiting.is_some())
         + usize::from(pending.is_some())
         + usize::from(data.thread_issues.contains_key(key))
         + usize::from(
             data.preparing_followups
                 .values()
-                .any(|target| target == key),
+                .any(|intent| &intent.key == key),
         );
     view::history(
         ui,
@@ -937,6 +1011,17 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                                             &mut data.file_previews,
                                             actions,
                                         );
+                                        if let Some(update) = &row.update_id {
+                                            let was_queued = data
+                                                .transcripts
+                                                .get(&tag)
+                                                .is_some_and(|t| t.queued_updates.contains(update));
+                                            ui.weak(if was_queued {
+                                                "✓ incorporated into run"
+                                            } else {
+                                                "✓ steered into run"
+                                            });
+                                        }
                                         if !activity
                                             && latest_reply.as_ref() == Some(&anchor)
                                             && ui.small_button("Show in Activity").clicked()
@@ -1035,54 +1120,39 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
     if data
         .preparing_followups
         .values()
-        .any(|target| target == key)
+        .any(|intent| &intent.key == key)
     {
         ui.weak("Preparing follow-up…");
     }
-    if let Some(issue) = data.thread_issues.get(key)
-        && !(native_ended && stale_steering_reason(issue))
-    {
+    if data.send_checking.contains(key) {
+        ui.weak("Checking which run owns input…");
+    }
+    if let Some(issue) = data.thread_issues.get(key) {
         ui.label(issue);
     }
     if let Some(steering) = waiting {
         ui.horizontal_wrapped(|ui| {
-            if data.active_steering.contains(key) {
-                ui.label("Sending update…");
+            let tag = run_key(&key.peer, &steering.run);
+            let queued = data
+                .transcripts
+                .get(&tag)
+                .is_some_and(|t| t.queued_updates.contains(&steering.id));
+            if queued {
+                ui.weak(format!(
+                    "◌ queued for run {}",
+                    steering.run.chars().take(8).collect::<String>()
+                ));
+            } else if data.active_steering.contains(key) {
+                ui.weak("Sending…");
             } else if running.as_deref() != Some(&steering.run)
                 || data.thread_issues.contains_key(key)
             {
-                ui.label("Update outcome is unconfirmed. It will not be sent again automatically.");
-                if ui.small_button("Keep as draft").clicked() {
-                    data.saved.steering.retain(|s| s.key != *key);
-                    data.thread_issues.remove(key);
-                }
+                ui.weak("? not confirmed · draft kept");
             } else {
-                ui.label("Waiting for the runtime to take the update…");
-                if ui
-                    .small_button("Keep as draft")
-                    .on_hover_text("The runtime may still take the earlier update.")
-                    .clicked()
-                {
-                    data.saved.steering.retain(|s| s.key != *key);
-                }
+                ui.weak("Awaiting runtime");
             }
-        });
-    }
-    if stale {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("The run this draft was written for ended.");
-            if ui
-                .small_button(if running.is_some() {
-                    "Use current run"
-                } else {
-                    "Prepare as follow-up"
-                })
-                .clicked()
-            {
-                data.saved.draft_runs.retain(|(k, _)| k != key);
-                capture(data, key, running.as_deref());
-                data.thread_issues.remove(key);
-                stale = false;
+            if !data.active_steering.contains(key) && ui.small_button("Keep as draft").clicked() {
+                actions.push(Action::RestoreSteer(steering));
             }
         });
     }
@@ -1096,17 +1166,27 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             crate::hold::panel(ui, data, key, after, hold, actions);
         }
     }
-    if claude_running {
-        ui.weak("Message held until this run completes");
+    let hint = last.map(|run| match send_route(run, false) {
+        SendRoute::Hold => "→ held until run completes",
+        SendRoute::Followup => "→ new turn",
+        SendRoute::Steer if run["record"]["spec"]["backend"] == "openrouter" => {
+            "→ queued for next step"
+        }
+        SendRoute::Steer => "→ steers active run",
+        SendRoute::Draft => "→ waiting for a sendable run",
+    });
+    if let Some(hint) = hint {
+        ui.weak(hint);
     }
     let frozen = moving
+        || data.send_checking.contains(key)
         || data.hold_pending.contains(key)
         || pending.is_some()
         || data.saved.steering.iter().any(|s| s.key == *key)
         || data
             .preparing_followups
             .values()
-            .any(|target| target == key);
+            .any(|intent| &intent.key == key);
     let compose = view::composer(
         ui,
         data,
@@ -1114,36 +1194,14 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             text: &mut draft,
             files: &mut files,
             target,
-            label: if running.is_some() && !native_ended && !claude_running {
-                "Send update"
-            } else {
-                "Send"
-            },
+            label: "Send",
             limit: 256 * 1024,
-            blocked: frozen || stale || last.is_none() || (native_ended && !accepts_followup),
+            blocked: frozen || last.is_none(),
         },
         actions,
     );
     if compose.changed && (!draft.is_empty() || !files.is_empty()) {
-        capture(
-            data,
-            key,
-            if claude_running {
-                None
-            } else {
-                running.as_deref()
-            },
-        );
         actions.push(Action::Pin(key.clone()));
-    }
-    if draft.is_empty()
-        && files.is_empty()
-        && !data
-            .preparing
-            .get(&Target::Thread(key.clone()))
-            .is_some_and(|p| p.working)
-    {
-        data.saved.draft_runs.retain(|(k, _)| k != key);
     }
     data.saved.drafts.retain(|(k, _)| k != key);
     data.saved.thread_files.retain(|(k, _)| k != key);
@@ -1597,8 +1655,37 @@ mod tests {
     }
 
     #[test]
+    fn send_follows_current_input_owner_and_cannot_steer_twice() {
+        for backend in ["codex", "antigravity", "openrouter", "claude"] {
+            let mut head = json!({"status":"running","record":{"spec":{"backend":backend}}});
+            assert_eq!(
+                send_route(&head, false),
+                if backend == "claude" {
+                    SendRoute::Hold
+                } else {
+                    SendRoute::Steer
+                }
+            );
+            assert_eq!(send_route(&head, true), SendRoute::Draft);
+            if backend == "antigravity" {
+                head["native_prompt"] = json!("ended");
+                assert_eq!(send_route(&head, false), SendRoute::Draft);
+                head["native_prompt"] = json!("ready");
+                assert_eq!(send_route(&head, false), SendRoute::Followup);
+                assert_eq!(send_route(&head, true), SendRoute::Followup);
+            }
+            head["status"] = json!("completed");
+            assert_eq!(send_route(&head, false), SendRoute::Followup);
+            assert_eq!(send_route(&head, true), SendRoute::Followup);
+        }
+    }
+
+    #[test]
     fn ended_antigravity_prompt_exposes_ordinary_send_for_background_work() {
-        for (state, can_send) in [("ready", true), ("ended", false)] {
+        for (state, hint) in [
+            ("ready", "→ new turn"),
+            ("ended", "→ waiting for a sendable run"),
+        ] {
             let ctx = egui::Context::default();
             let key = ThreadKey {
                 peer: "fixture-peer".into(),
@@ -1634,22 +1721,14 @@ mod tests {
             let (output, _) = frame(vec![]);
             assert!(visible_text(&output, "Running").is_none());
             assert!(visible_text(&output, "Send update").is_none());
-            assert!(
-                visible_text(
-                    &output,
-                    "Antigravity steering requires an active prompt. The draft is still here."
-                )
-                .is_none()
-            );
+            assert!(visible_text(&output, hint).is_some());
             let send = visible_text(&output, "Send").expect("ordinary send button");
             let (_, actions) = click(&mut frame, send);
-            assert_eq!(
+            assert!(
                 actions
                     .iter()
-                    .any(|action| matches!(action, Action::Send(target) if *target == key)),
-                can_send
+                    .any(|action| matches!(action, Action::Send(target) if *target == key))
             );
-            assert_eq!(data.saved.drafts[0].1, "A new prompt");
         }
     }
 

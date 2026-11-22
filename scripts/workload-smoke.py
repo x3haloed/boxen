@@ -188,6 +188,22 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
                     break
         assert any(e["kind"] == "backend_prompt_ended" and e["data"]["pending_tools"] == 1 for e in seen)
         assert not request({"op": "thread_result", "id": late["id"]})["done"]
+        head = request({"op":"thread_head","thread_id":late["thread_id"]})
+        assert head["record"]["spec"]["id"] == late["id"] and head["status"] == "running"
+        late_update = secrets.token_hex(32)
+        request({"op":"control","id":late["id"],"action":{
+            "type":"steer","text":"The native prompt already ended","update_id":late_update}})
+        with request({"id":late["id"],"after":seen[-1]["seq"]}, watch=True) as stream:
+            for line in stream:
+                batch = json.loads(line)
+                seen.extend(batch["events"])
+                if any(e["kind"] == "control_error"
+                       and e["data"].get("update", {}).get("update_id") == late_update
+                       and e["data"].get("dispatch") == "not_sent" for e in batch["events"]):
+                    break
+            else:
+                raise AssertionError("Missing authoritative non-dispatch receipt")
+        assert not any(e["kind"] == "user_message" and e["data"].get("update_id") == late_update for e in seen)
         (pathlib.Path(temporary) / "release-late-fixture").touch()
         replay, settled = collect(late["id"], seen[-1]["seq"])
         assert settled["status"] == "completed"

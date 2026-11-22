@@ -215,7 +215,8 @@ pub struct Transcript {
     pub hold: Option<Value>,
     pub latest_visible: Option<(u64, crate::pulse::Visible)>,
     pub rows: Vec<Row>,
-    pub rejected_updates: BTreeMap<String, String>,
+    pub rejected_updates: BTreeMap<String, (String, bool)>,
+    pub queued_updates: HashSet<String>,
     answer_attempts: BTreeMap<String, AnswerReceipt>,
     positions: BTreeMap<String, usize>,
     imported: bool,
@@ -408,6 +409,11 @@ impl Transcript {
                     details.failed = data["success"] == false || data["result"]["exit_code"].as_i64().is_some_and(|n|n!=0);
                 }
             }
+            "control" if data["type"] == "steer_queued" => {
+                if let Some(id) = data["message"]["update_id"].as_str() {
+                    self.queued_updates.insert(id.to_owned());
+                }
+            }
             "control" if data["type"] == "steer" => self.put(
                 format!("event-{seq}"),
                 "You · steering",
@@ -549,7 +555,7 @@ impl Transcript {
             ),
             "control_error" => {
                 if let Some(id) = data["update"]["update_id"].as_str() {
-                    self.rejected_updates.insert(id.into(), text("message"));
+                    self.rejected_updates.insert(id.into(), (text("message"), data["dispatch"] == "not_sent"));
                 }
                 self.put(format!("event-{seq}"), "Incident", display(data), false);
             }

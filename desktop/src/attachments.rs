@@ -227,13 +227,6 @@ impl Desktop {
                 if self.data.preparing.get(&target).is_some_and(|p| p.working) {
                     return;
                 }
-                if let Target::Thread(key) = &target {
-                    let run = crate::thread_view::active(
-                        crate::find_thread(&self.data, key).and_then(|t| t.runs.last()),
-                    )
-                    .map(str::to_owned);
-                    crate::thread_view::capture(&mut self.data, key, run.as_deref());
-                }
                 self.data.preparing.insert(
                     target.clone(),
                     Preparation {

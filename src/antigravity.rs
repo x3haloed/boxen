@@ -727,7 +727,7 @@ impl Turn {
                         || self.cancel_sent.is_some()
                         || !self.steering.is_empty()
                     {
-                        self.run.append("control_error",json!({"message":"Antigravity steering requires an active prompt and no pending steer or cancellation","update":{"update_id":update_id}}))?;
+                        self.run.append("control_error",json!({"message":"Antigravity steering requires an active prompt and no pending steer or cancellation","dispatch":"not_sent","update":{"update_id":update_id}}))?;
                     } else {
                         let id = rpc.call("session/prompt", json!({"sessionId":self.session,"prompt":prompt_parts(&text,&file_context)}))?;
                         let update = json!({"text":text,"attachments":attachments,"steering":true,"update_id":update_id});
@@ -1062,6 +1062,7 @@ fn drive_session(
                         Ok(Control::Steer { update_id, .. }) => {
                             turn.run.append("control_error",json!({
                                 "message":"Antigravity's prompt ended; the native command remains outstanding",
+                                "dispatch":"not_sent",
                                 "update":{"update_id":update_id}
                             }))?;
                         }

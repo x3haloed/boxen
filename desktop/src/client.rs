@@ -47,7 +47,11 @@ pub enum Update {
     Mail(crate::correspondence::MailUpdate),
     Files(crate::attachments::FileUpdate),
     Steered(crate::model::ThreadKey, String, Result<Value, String>, bool),
-    SteeringRun(Destination, Value),
+    SendChecked(
+        crate::thread_view::SendIntent,
+        Destination,
+        Result<Value, String>,
+    ),
     Moved(crate::model::ThreadKey, Result<Value, String>),
     Discovered(Result<Value, String>),
     Catalog(Destination, Result<Vec<Value>, String>),
@@ -91,22 +95,27 @@ impl Publisher {
     }
 }
 impl Client {
-    pub fn refresh_steering_run(
+    pub fn conversation_head(
         &self,
-        destination: Destination,
-        run: String,
-        publisher: Publisher,
-    ) {
-        let client = self.clone();
-        std::thread::spawn(move || {
-            if let Ok(snapshot) = client.operation(&destination, json!({"op":"get","id":run}))
-                && snapshot["record"]["spec"]["id"] == run
-                && crate::model::terminal(&snapshot)
-            {
-                publisher.send(Update::SteeringRun(destination, snapshot));
+        destination: &Destination,
+        thread: &str,
+    ) -> Result<Value, String> {
+        match self.operation(destination, json!({"op":"thread_head","thread_id":thread})) {
+            Err(error) if error.trim_end().ends_with("unknown peer operation") => {
+                let rows = self.run_catalog(destination, &AtomicBool::new(false))?;
+                let threads = crate::model::catalog(&destination.key, &rows);
+                let head = threads
+                    .iter()
+                    .find(|entry| entry.key.id == thread)
+                    .and_then(|entry| entry.runs.last())
+                    .and_then(|run| run["record"]["spec"]["id"].as_str())
+                    .ok_or("Conversation is unavailable")?;
+                self.operation(destination, json!({"op":"get","id":head}))
             }
-        });
+            result => result,
+        }
     }
+
     pub fn runtimes(&self, destination: Destination, serial: u64, publisher: Publisher) {
         let client = self.clone();
         std::thread::spawn(move || {
@@ -308,6 +317,7 @@ impl Client {
                         // The first submission's effort initializes the thread. Later
                         // runs inherit the effort saved on the executing daemon.
                         spec.remove("reasoning_effort");
+                        spec.remove("completion_handoff");
                     }
                     spec["id"] = json!(id);
                     spec["prompt"] = json!(text);
@@ -417,7 +427,17 @@ impl Client {
                 .copy_files(&pending.destination, &pending.spec["attachments"])
                 .map_err(|detail| SubmitError { detail, safe_to_edit: !retry })
                 .and_then(|_| {
-                    let mut request = json!({"op":"start","spec":pending.spec});
+                    let operation = if pending.spec["completion_handoff"].is_object() {
+                        "start_until_handoff"
+                    } else if pending.spec["required_capabilities"]
+                        .as_array()
+                        .is_some_and(|capabilities| !capabilities.is_empty())
+                    {
+                        "start_checked"
+                    } else {
+                        "start"
+                    };
+                    let mut request = json!({"op":operation,"spec":pending.spec});
                     if let Some(after) = pending.after {
                         request["after"] = json!(after);
                     }
@@ -430,7 +450,9 @@ impl Client {
                                 | "this prototype allows eight active runs per machine"
                                 | "OpenRouter credential file is unavailable on the executing machine"
                                 | "OpenRouter credential is not UTF-8"
-                                | "OpenRouter credential file contains no single valid key")
+                                | "OpenRouter credential file contains no single valid key"
+                                | "follow-up source is no longer the latest anonymous run"
+                                | "thread already has an active run; another request is accepted after it ends, and steering is a separate control operation")
                         });
                         SubmitError { detail, safe_to_edit }
                     })
@@ -727,14 +749,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(rejected.trim_end(), "HTTP 422: run is no longer active");
-        let refresh = Bus::new(egui::Context::default());
-        client.refresh_steering_run(dest.clone(), id.clone(), refresh.publisher());
-        let Update::SteeringRun(machine, settled) =
-            refresh.rx.recv_timeout(Duration::from_secs(12)).unwrap()
-        else {
-            panic!("Expected the settled run snapshot after rejection")
-        };
-        assert_eq!(machine.key, dest.key);
+        let settled = client.conversation_head(&dest, &id).unwrap();
         assert_eq!(settled["record"]["spec"]["id"], id);
         assert_eq!(settled["status"], "completed");
         assert_eq!(settled["last_seq"], transcript.seq);
@@ -849,6 +864,8 @@ mod tests {
             .find(|thread| thread.key.id == id)
             .unwrap();
         assert_eq!(reopened.runs.len(), 2);
+        let head = client.conversation_head(&dest, &id).unwrap();
+        assert_eq!(head["record"]["spec"]["id"], next);
         let retained = client
             .operation(
                 &dest,

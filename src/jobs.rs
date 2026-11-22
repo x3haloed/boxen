@@ -3030,6 +3030,36 @@ impl Jobs {
         let next_after = page.last().filter(|_| has_more).map(|(cursor, _)| cursor);
         Ok(json!({"summaries":summaries,"next_after":next_after}))
     }
+    pub(crate) fn thread_head(&self, id: &str) -> Result<Snapshot> {
+        valid_id(id)?;
+        if let Some(placement) = self.placement(id)?
+            && placement.target != self.machine_id()
+        {
+            return Err("Conversation execution has moved to another machine".into());
+        }
+        let runs = self.runs.lock().unwrap();
+        let mut newest: Option<((u64, String), Arc<Run>)> = None;
+        for run in runs.values() {
+            let inner = run.inner.lock().unwrap();
+            let record = &inner.snapshot.record;
+            if record.spec.thread_id != id {
+                continue;
+            }
+            if record.resident.is_some() || record.spec.resident_id.is_some() {
+                return Err("Identity-bearing conversations receive mailbox messages".into());
+            }
+            let order = (record.created_at, &record.spec.id);
+            if newest.as_ref().is_none_or(|(known, _)| {
+                (order.0, order.1.as_str()) > (known.0, known.1.as_str())
+            }) {
+                newest = Some(((order.0, order.1.clone()), Arc::clone(run)));
+            }
+        }
+        newest
+            .map(|(_, run)| run.snapshot())
+            .ok_or_else(|| "Conversation is unavailable".into())
+    }
+
     pub fn operator_run(&self, id: &str) -> Result<Arc<Run>> {
         valid_id(id)?;
         self.runs

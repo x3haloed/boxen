@@ -249,7 +249,7 @@ impl Rpc {
                     } else {
                         self.run.append(
                             "control_error",
-                            json!({"message":"Steering requires an active Codex turn","update":{"update_id":update_id}}),
+                            json!({"message":"Steering requires an active Codex turn","dispatch":"not_sent","update":{"update_id":update_id}}),
                         )?;
                     }
                 }
