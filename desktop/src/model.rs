@@ -165,6 +165,7 @@ pub struct ToolDetail {
     pub output: String,
     pub result: Option<String>,
     pub failed: bool,
+    pub finished: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextMeasure {
@@ -573,6 +574,9 @@ impl Transcript {
                     details.output.push_str(&text("text"));
                 } else if matches!(kind,"tool_result" | "resident_tool_result") {
                     details.result = Some(display(&data["result"]));
+                    details.finished = data["success"] == true
+                        || data["status"] == "completed"
+                        || data["result"]["exit_code"].is_number();
                     details.failed = data["success"] == false || data["result"]["exit_code"].as_i64().is_some_and(|n|n!=0);
                 }
             }
@@ -639,6 +643,8 @@ impl Transcript {
                                 }
                                 self.rows[self.positions[&id]].tool = Some(ToolDetail {
                                     result:item["exitCode"].as_i64().map(|n| format!("Exit code {n}")),
+                                    finished: item["status"] == "completed"
+                                        || item["exitCode"].is_number(),
                                     failed:matches!(item["status"].as_str(),Some("failed"|"declined")) || item["exitCode"].as_i64().is_some_and(|n|n!=0),
                                     ..Default::default()
                                 });

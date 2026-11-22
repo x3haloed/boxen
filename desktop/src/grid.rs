@@ -415,6 +415,11 @@ impl Desktop {
         let mut sidebar = layout.sidebar.clone();
         let has_holes = !layout.holes().is_empty();
         let mut tidy_preview = None;
+        ui.painter().rect_filled(
+            ui.available_rect_before_wrap(),
+            0.,
+            crate::console_style::CANVAS,
+        );
 
         ui.horizontal(|ui| {
             if ui.button("Find…   ⌘K").clicked() {
@@ -446,7 +451,13 @@ impl Desktop {
                         ui.visuals().text_color(),
                     )
                 };
-                ui.label(RichText::new(label).monospace().small().color(color))
+                let dot = if catalogued && !down && observed == total {
+                    crate::console_style::OK
+                } else {
+                    color
+                };
+                crate::console_style::dot(ui, dot);
+                ui.label(RichText::new(label).monospace().size(10.5).color(color))
                     .on_hover_text(if down {
                         "Machine unreachable · active total last observed"
                     } else {
@@ -527,6 +538,13 @@ impl Desktop {
             )
         };
         ui.allocate_rect(workspace, egui::Sense::hover());
+        ui.painter()
+            .rect_filled(sidebar_rect, 0., crate::console_style::PANEL);
+        ui.painter().vline(
+            sidebar_rect.right(),
+            sidebar_rect.y_range(),
+            egui::Stroke::new(1., crate::console_style::RULE),
+        );
         let mut sidebar_ui = ui.new_child(
             egui::UiBuilder::new()
                 .id_salt("watchlist")
@@ -556,12 +574,7 @@ impl Desktop {
         let holes = self.grid().holes();
         for hole in holes {
             let bounds = rect(hole).shrink(2.);
-            ui.painter().rect_stroke(
-                bounds,
-                0.,
-                egui::Stroke::new(1., ui.visuals().widgets.noninteractive.bg_stroke.color),
-                egui::StrokeKind::Inside,
-            );
+            crate::console_style::dashed_rect(ui, bounds, crate::console_style::RULE);
             let mut empty = ui.new_child(
                 egui::UiBuilder::new()
                     .id_salt(("empty", hole.column, hole.row))
@@ -605,7 +618,18 @@ impl Desktop {
                 ),
                 egui::StrokeKind::Inside,
             );
-            let inner = bounds.shrink(6.);
+            let title_strip =
+                egui::Rect::from_min_size(bounds.min, egui::vec2(bounds.width(), 29.));
+            ui.painter()
+                .rect_filled(title_strip.shrink(1.), 0., crate::console_style::PANEL);
+            if focus {
+                ui.painter().hline(
+                    bounds.x_range(),
+                    bounds.top(),
+                    egui::Stroke::new(2., crate::console_style::ACCENT),
+                );
+            }
+            let inner = bounds.shrink(5.);
             let mut pane_ui = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(inner));
             pane_ui.set_clip_rect(inner);
             let mut close = false;
@@ -615,20 +639,36 @@ impl Desktop {
                     actions,
                 }
                 .title(&mut slot.pane);
-                ui.dnd_drag_source(id.with("drag"), slot.pane.clone(), |ui| {
-                    ui.label("⠿").on_hover_text("Move pane");
-                });
+                ui.dnd_drag_source(
+                    id.with("drag"),
+                    slot.pane.clone(),
+                    crate::console_style::drag_grip,
+                );
                 ui.weak(format!(
                     "{}",
                     slot.home.column + 1 + slot.home.row * columns
                 ));
+                let name = match &slot.pane {
+                    Pane::Thread(key) | Pane::Chat(key) | Pane::Activity(key) => {
+                        let host = crate::conversation::destination(&self.data, &key.peer);
+                        format!("{} / {}", host.label, title.text())
+                    }
+                    _ => title.text().to_owned(),
+                };
+                let width = (ui.available_width() - 75.).max(0.);
                 if ui
-                    .add_sized(
-                        [(ui.available_width() - 75.).max(0.), 20.],
-                        egui::Label::new(title)
-                            .truncate()
-                            .sense(egui::Sense::click()),
+                    .allocate_ui_with_layout(
+                        egui::vec2(width, 20.),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(name).monospace().size(10.5))
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                            )
+                        },
                     )
+                    .inner
                     .clicked()
                 {
                     self.grid_mut().focus = Some(slot.pane.clone());

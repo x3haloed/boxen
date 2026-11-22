@@ -14,11 +14,19 @@ if sys.platform == 'darwin':
     parser.add_argument('--bundle', type=pathlib.Path, default=root / 'work/Boxen.app')
 args = parser.parse_args()
 binary = build_executable(root, root / 'desktop', 'boxen-desktop')
+font_licenses = sorted((root / 'desktop/assets/fonts').glob('*-OFL.txt'))
+
+def include_font_licenses(directory):
+    directory.mkdir(parents=True, exist_ok=True)
+    for license_file in font_licenses:
+        shutil.copy2(license_file, directory / license_file.name)
+
 if sys.platform == 'darwin':
     app = args.bundle
     contents = app / 'Contents'
     (contents / 'MacOS').mkdir(parents=True, exist_ok=True)
     shutil.copy2(binary, contents / 'MacOS/boxen-desktop')
+    include_font_licenses(contents / 'Resources/Licenses')
     (contents / 'Info.plist').write_bytes(plistlib.dumps({
         'CFBundleName': 'Boxen', 'CFBundleDisplayName': 'Boxen',
         'CFBundleIdentifier': 'dev.boxen.desktop', 'CFBundleExecutable': 'boxen-desktop',
@@ -28,4 +36,5 @@ if sys.platform == 'darwin':
     subprocess.run(['codesign', '--force', '--deep', '--sign', '-', str(app)], check=True)
     print(app)
 else:
+    include_font_licenses(binary.parent / 'boxen-desktop-licenses')
     print(binary)

@@ -1437,7 +1437,7 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
                         view::message_row(
                             ui,
                             m["accepted_at"].as_u64(),
-                            author,
+                            view::MessageAuthor::Mail(author),
                             m["body"].as_str().unwrap_or(""),
                             false,
                             |ui| {
@@ -1556,16 +1556,16 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
             }
         });
     }
-    ui.horizontal_wrapped(|ui| {
-        let resident = data.agents.resident(key);
-        let name = resident
-            .and_then(|resident| resident["name"].as_str())
-            .unwrap_or("resident");
-        ui.weak(format!("→ mail to {name}"));
-        if resident.is_some_and(|resident| resident["auto_activate"] == false) {
-            ui.weak("auto-activation off");
-        }
-    });
+    let resident = data.agents.resident(key);
+    let name = resident
+        .and_then(|resident| resident["name"].as_str())
+        .unwrap_or("resident");
+    let activation = if resident.is_some_and(|resident| resident["auto_activate"] == false) {
+        " · auto-activation off"
+    } else {
+        ""
+    };
+    view::route_hint(ui, &format!("→ mail to {name}{activation}"));
     let blocked = draft.pending.is_some() || data.local_key.is_empty();
     let result = view::composer(
         ui,

@@ -184,7 +184,7 @@ pub fn panel(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
                     )
                 },
             );
-            ui.label(RichText::new(label).monospace().small());
+            ui.label(RichText::new(label).monospace().size(10.5));
         }
     });
     ui.separator();

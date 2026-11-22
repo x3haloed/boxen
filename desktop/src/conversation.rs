@@ -4,6 +4,7 @@
 use crate::{
     Action, Data,
     attachments::{self, FileAction, FileRef, Preview, Target},
+    console_style,
     model::{ContextChange, ContextMeasure, Destination, Row, ThreadKey, Transcript},
 };
 use eframe::egui::{self, RichText};
@@ -153,6 +154,23 @@ pub fn reserve(text: &str, files: &[FileRef], extra: usize, width: f32) -> f32 {
         + if files.is_empty() { 0. } else { 25. }
         + (extra * 22) as f32
 }
+
+pub fn route_hint(ui: &mut egui::Ui, hint: &str) {
+    let font = egui::FontId::monospace(10.5);
+    let height = ui.fonts_mut(|fonts| fonts.row_height(&font));
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), height),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(hint).font(font).weak())
+                    .halign(egui::Align::Min)
+                    .truncate(),
+            );
+        },
+    );
+}
+
 pub struct Composition {
     pub send: bool,
     pub changed: bool,
@@ -448,24 +466,43 @@ pub fn journal_time(ui: &mut egui::Ui, at: Option<u64>) {
     let label = at.map_or_else(|| "—".into(), utc_minute);
     ui.add_sized(
         [40., 18.],
-        egui::Label::new(RichText::new(label).monospace().small().weak()).halign(egui::Align::Min),
+        egui::Label::new(RichText::new(label).monospace().size(10.5).weak())
+            .halign(egui::Align::Min),
     )
     .on_hover_text("Journal time (UTC)");
+}
+
+pub enum MessageAuthor<'a> {
+    You,
+    Assistant,
+    Mail(&'a str),
 }
 
 pub fn message_row(
     ui: &mut egui::Ui,
     at: Option<u64>,
-    author: &str,
+    author: MessageAuthor<'_>,
     text: &str,
     rich: bool,
     body: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
     ui.horizontal_top(|ui| {
         journal_time(ui, at);
+        match author {
+            MessageAuthor::You => {
+                ui.label(RichText::new("›").monospace().color(console_style::ACCENT))
+                    .on_hover_text("You");
+            }
+            MessageAuthor::Assistant => {
+                console_style::dot(ui, console_style::SECONDARY);
+            }
+            MessageAuthor::Mail(_) => {}
+        }
         ui.vertical(|ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(RichText::new(author).monospace().small().strong());
+            if let MessageAuthor::Mail(name) = author {
+                ui.label(RichText::new(name).monospace().size(10.5).strong());
+            }
             if rich {
                 markdown(ui, text);
             } else if !text.is_empty() {
@@ -481,9 +518,9 @@ pub fn run_divider(ui: &mut egui::Ui, run: &Value, label: &str) {
     ui.separator();
     ui.horizontal_wrapped(|ui| {
         journal_time(ui, run["record"]["created_at"].as_u64());
-        ui.label(RichText::new(label).monospace().small().strong());
+        ui.label(RichText::new(label).monospace().size(10.5).strong());
         if let Some(status) = run["status"].as_str() {
-            ui.label(RichText::new(status).monospace().small().weak());
+            ui.label(RichText::new(status).monospace().size(10.5).weak());
         }
     });
 }
@@ -660,10 +697,16 @@ pub fn context_label(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, runs: &[Va
     let label = reading
         .measure
         .map_or_else(|| "ctx unknown".into(), ContextMeasure::label);
-    ui.menu_button(RichText::new(label).monospace().small().weak(), |ui| {
-        ui.set_max_width(320.);
-        context_details(ui, backend, &reading);
-    });
+    ui.menu_button(
+        RichText::new(format!("{backend} · {label}"))
+            .monospace()
+            .size(10.5)
+            .weak(),
+        |ui| {
+            ui.set_max_width(320.);
+            context_details(ui, backend, &reading);
+        },
+    );
     if reading.warning() {
         ui.colored_label(context_warning_color(), "past 85% line")
             .on_hover_text("Boxen's warning line. Codex controls its own compaction.");
@@ -714,8 +757,7 @@ pub fn is_message(row: &Row) -> bool {
     matches!(row.label.as_str(), "You" | "You · steering" | "Agent")
 }
 pub fn incident(row: &Row) -> bool {
-    row.tool.as_ref().is_some_and(|t| t.failed)
-        || row.label == "Incident"
+    row.label == "Incident"
         || row.label == "Context"
         || row.answer.is_some()
         || row.label == "Resolved by runtime · no answer recorded"
@@ -727,22 +769,102 @@ pub fn incident(row: &Row) -> bool {
                 .any(|s| row.text.starts_with(s))
 }
 pub fn activity_rows(ui: &mut egui::Ui, rows: &[Row]) {
-    if rows.is_empty() {
-        return;
-    }
-    let ordinary = rows.iter().filter(|r| !incident(r)).count();
-    if ordinary != 0 {
-        egui::CollapsingHeader::new(format!(
-            "{ordinary} activity {}",
-            if ordinary == 1 { "event" } else { "events" }
-        ))
-        .id_salt(&rows[0].id)
-        .show(ui, |ui| {
-            for row in rows {
-                if !incident(row) {
-                    activity_row(ui, row);
+    let ordinary: Vec<_> = rows
+        .iter()
+        .filter(|row| !(incident(row) || row.label == "Status" && row.text == "completed"))
+        .collect();
+    if let Some(first) = ordinary.first() {
+        let count = ordinary.len();
+        let mut titles: Vec<_> = ordinary
+            .iter()
+            .filter(|row| matches!(row.label.as_str(), "Tool" | "Command" | "Thinking"))
+            .map(|row| {
+                if row.label == "Thinking" {
+                    "thinking"
+                } else {
+                    row.text
+                        .lines()
+                        .next()
+                        .filter(|line| !line.is_empty())
+                        .unwrap_or(&row.label)
                 }
-            }
+            })
+            .collect();
+        titles.dedup();
+        let title = format!(
+            "{count} {}{}",
+            if count == 1 { "step" } else { "steps" },
+            if titles.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " · {}",
+                    titles.into_iter().take(3).collect::<Vec<_>>().join(", ")
+                )
+            },
+        );
+        let failed = ordinary
+            .iter()
+            .filter(|row| row.tool.as_ref().is_some_and(|tool| tool.failed))
+            .count();
+        let passed = ordinary
+            .iter()
+            .filter(|row| {
+                row.tool
+                    .as_ref()
+                    .is_some_and(|tool| tool.finished && !tool.failed)
+            })
+            .count();
+        let result = if failed > 0 {
+            Some((format!("{failed} failed"), console_style::ERROR))
+        } else if passed > 0 {
+            Some((format!("{passed} ok"), console_style::OK))
+        } else {
+            None
+        };
+        ui.push_id(&first.id, |ui| {
+            ui.indent("step-gutter", |ui| {
+                let mut clicked = false;
+                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    ui.make_persistent_id("step-group"),
+                    false,
+                );
+                let mut header = state.show_header(ui, |ui| {
+                    let outcome_width = if result.is_some() { 58. } else { 0. };
+                    let width = (ui.available_width() - outcome_width).max(16.);
+                    let response = ui
+                        .allocate_ui_with_layout(
+                            egui::vec2(width, 18.),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&title).monospace().size(10.5).weak(),
+                                    )
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                                )
+                            },
+                        )
+                        .inner
+                        .on_hover_text(&title);
+                    clicked = response.clicked();
+                    if let Some((result, color)) = &result {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(result).monospace().size(10.5).color(*color));
+                        });
+                    }
+                });
+                if clicked {
+                    header.toggle();
+                }
+                header.body(|ui| {
+                    for row in ordinary {
+                        activity_row(ui, row);
+                    }
+                });
+            });
         });
     }
     for row in rows {
@@ -751,6 +873,7 @@ pub fn activity_rows(ui: &mut egui::Ui, rows: &[Row]) {
         }
     }
 }
+
 pub fn activity_row(ui: &mut egui::Ui, row: &Row) {
     ui.push_id(&row.id, |ui| {
         if row.answer.is_some()

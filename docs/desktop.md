@@ -44,6 +44,9 @@ address. You can also set it with **Machine connections** in the command palette
 The optional `--peer PUBLIC_KEY --address HOST:PORT` overrides one peer's address.
 A peer address locates an already-pinned identity; it grants no new trust.
 
+The desktop embeds Inter and IBM Plex Mono for console typography. Desktop
+builds include their SIL Open Font License notices. [Inter](https://github.com/rsms/inter) · [IBM Plex](https://github.com/IBM/plex)
+
 ## First interactions
 
 - macOS and Windows use native menus. Linux uses the in-window menu.

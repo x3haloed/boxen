@@ -2,6 +2,7 @@ mod activity;
 mod agents;
 mod attachments;
 mod client;
+mod console_style;
 mod conversation;
 mod correspondence;
 mod field;
@@ -18,8 +19,8 @@ mod pulse;
 mod runtimes;
 mod thread_view;
 mod tool_approvals;
-mod work;
 mod watchlist;
+mod work;
 mod workspace;
 mod workspace_observation;
 use client::{Bus, Client, Pending, Update, run_key};
@@ -61,6 +62,7 @@ struct Saved {
     thread_replies: Vec<needs::ThreadReply>,
     holds: Vec<hold::Contribution>,
     hold_edits: Vec<hold::Contribution>,
+    hold_releases: Vec<hold::Release>,
     mail: correspondence::SavedMail,
     correspondence_added: bool,
     agents_added: bool,
@@ -194,15 +196,7 @@ impl Desktop {
         origin: String,
         extra: Option<Destination>,
     ) -> Self {
-        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        cc.egui_ctx.style_mut_of(egui::Theme::Dark, |s| {
-            s.spacing.item_spacing = egui::vec2(6., 4.);
-            s.visuals.panel_fill = egui::Color32::from_rgb(11, 13, 16);
-            s.visuals.window_fill = egui::Color32::from_rgb(16, 19, 23);
-            s.visuals.selection.bg_fill = egui::Color32::from_rgb(23, 40, 60);
-            s.visuals.selection.stroke.color = egui::Color32::from_rgb(76, 158, 255);
-        });
+        console_style::install(&cc.egui_ctx);
         let state_path = home.join("desktop.json");
         let mut saved: Saved = std::fs::read(&state_path)
             .ok()
@@ -894,7 +888,7 @@ impl Desktop {
         }
     }
     fn observe(&mut self) {
-        let Some(client) = self.client.as_ref() else {
+        let Some(client) = self.client.clone() else {
             return;
         };
         let mut selected = Vec::new();
@@ -924,12 +918,25 @@ impl Desktop {
         }
         for thread in self.data.catalogs.values().flatten() {
             for run in &thread.runs {
-                let Some(id) = run["record"]["spec"]["id"].as_str() else { continue };
+                let Some(id) = run["record"]["spec"]["id"].as_str() else {
+                    continue;
+                };
                 if !terminal(run) {
                     self.data.saved.reply_watches.entry(thread.key.peer.clone()).or_default().insert(id.into());
                 } else if self.data.saved.reply_watches.get(&thread.key.peer).is_some_and(|runs| runs.contains(id)) {
                     selected.push((thread.key.clone(), run.clone()));
                 }
+            }
+        }
+        for release in &self.data.saved.hold_releases {
+            let entry = &release.contribution;
+            if let Some(thread) = find_thread(&self.data, &entry.key)
+                && let Some(run) = thread
+                    .runs
+                    .iter()
+                    .find(|run| run["record"]["spec"]["id"] == entry.after)
+            {
+                selected.push((entry.key.clone(), run.clone()));
             }
         }
         for active in needs::active_runs(&self.data) {
@@ -966,6 +973,11 @@ impl Desktop {
             let seq = self.data.transcripts.get(&tag).map_or(0, |t| t.seq);
             let last = run["last_seq"].as_u64().unwrap_or(0);
             if terminal(&run) && seq >= last {
+                if self.data.saved.hold_releases.iter().any(|release| {
+                    release.contribution.key == key && release.contribution.after == id
+                }) {
+                    self.reconcile_hold(&tag);
+                }
                 replies_changed |= needs::settle_reply(&mut self.data, &key, &run);
                 continue;
             }
@@ -1076,9 +1088,8 @@ impl Desktop {
             Action::File(action) => self.file_action(action),
             Action::Respond(key, id, request_id, result) => {
                 let tag = run_key(&key.peer, &id);
-                let pending = needs::active_runs(&self.data).any(|run| {
-                    run.key == key && run.id() == id && run.observed(&self.data, &tag)
-                })
+                let pending = needs::active_runs(&self.data)
+                    .any(|run| run.key == key && run.id() == id && run.observed(&self.data, &tag))
                     && self.data.transcripts.get(&tag).is_some_and(|transcript| {
                         transcript.rows.iter().any(|row| {
                             row.request
@@ -1119,10 +1130,13 @@ impl Desktop {
                 if let Some(client) = self.client.clone() {
                     let dest = conversation::destination(&self.data, &key.peer);
                     let publisher = self.bus.publisher();
-                    self.data.repo_observations.insert(key.clone(), watchlist::RepoObservation {
-                        run: id.clone(),
-                        result: None,
-                    });
+                    self.data.repo_observations.insert(
+                        key.clone(),
+                        watchlist::RepoObservation {
+                            run: id.clone(),
+                            result: None,
+                        },
+                    );
                     std::thread::spawn(move || {
                         let result = client.operation(&dest, json!({"op":"repo_probe","id":id}));
                         publisher.send(Update::RepoObserved(key, id, result));
@@ -1726,7 +1740,9 @@ impl TabViewer for Viewer<'_> {
                     egui::ScrollArea::vertical()
                         .id_salt(("inspector", key))
                         .max_height(ui.available_height())
-                        .show(ui, |ui| watchlist::inspector(ui, self.data, key, self.actions));
+                        .show(ui, |ui| {
+                            watchlist::inspector(ui, self.data, key, self.actions)
+                        });
                 }
             }
             Pane::Thread(key) => thread_view::panel(ui, self.data, key, self.actions),

@@ -1035,7 +1035,11 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                                     view::message_row(
                                         ui,
                                         row.at,
-                                        if outgoing { "You" } else { &row.label },
+                                        if outgoing {
+                                            view::MessageAuthor::You
+                                        } else {
+                                            view::MessageAuthor::Assistant
+                                        },
                                         &row.text,
                                         !outgoing,
                                         |ui| {
@@ -1086,7 +1090,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                                     }
                                 });
                             }
-                            ui.add_space(4.);
+                            ui.add_space(2.);
                             group_start = i + 1;
                         }
                     }
@@ -1109,7 +1113,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                             view::message_row(
                                 ui,
                                 run["record"]["created_at"].as_u64(),
-                                "You",
+                                view::MessageAuthor::You,
                                 spec["prompt"].as_str().unwrap_or(""),
                                 false,
                                 |ui| {
@@ -1127,6 +1131,14 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                         if run["last_seq"].as_u64().unwrap_or(0) != 0 {
                             ui.weak("Loading retained conversation…");
                         }
+                    }
+                    if index + 2 >= runs.len()
+                        && let Some(hold) = data
+                            .transcripts
+                            .get(&tag)
+                            .and_then(|transcript| transcript.hold.as_ref())
+                    {
+                        crate::hold::panel(ui, data, key, id, number, hold, actions);
                     }
                 });
                 if let Some(layout) = layout
@@ -1201,27 +1213,17 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             }
         });
     }
-    for run in runs.iter().rev().take(2) {
-        if let Some(after) = run["record"]["spec"]["id"].as_str()
-            && let Some(hold) = data
-                .transcripts
-                .get(&run_key(&key.peer, after))
-                .and_then(|transcript| transcript.hold.as_ref())
-        {
-            crate::hold::panel(ui, data, key, after, hold, actions);
-        }
-    }
     let hint = last.map(|run| match send_route(run, false) {
-        SendRoute::Hold => "→ held until run completes",
-        SendRoute::Followup => "→ new turn",
+        SendRoute::Hold => "→ held until run completes".into(),
+        SendRoute::Followup => "→ new turn".into(),
         SendRoute::Steer if run["record"]["spec"]["backend"] == "openrouter" => {
-            "→ queued for next step"
+            "→ queued for next step".into()
         }
-        SendRoute::Steer => "→ steers active run",
-        SendRoute::Draft => "→ waiting for a sendable run",
+        SendRoute::Steer => format!("→ steers run {}", runs.len()),
+        SendRoute::Draft => "→ waiting for a sendable run".into(),
     });
     if let Some(hint) = hint {
-        ui.weak(hint);
+        view::route_hint(ui, &hint);
     }
     let frozen = moving
         || data.send_checking.contains(key)
@@ -1767,6 +1769,7 @@ mod tests {
             assert!(visible_text(&output, "Running").is_none());
             assert!(visible_text(&output, "Send update").is_none());
             assert!(visible_text(&output, hint).is_some());
+            assert!(visible_text(&output, "antigravity · ctx unknown").is_some());
             let send = visible_text(&output, "Send").expect("ordinary send button");
             let (_, actions) = click(&mut frame, send);
             assert!(

@@ -163,7 +163,7 @@ fn repo_fields(
         .get(key)
         .filter(|value| Some(value.run.as_str()) == id);
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("REPO").monospace().small().weak());
+        ui.label(RichText::new("REPO").monospace().size(10.5).weak());
         if let Some(Some(Ok(facts))) = sample.map(|value| &value.result) {
             let at = facts["at"]
                 .as_u64()
@@ -229,11 +229,11 @@ fn repo_fields(
 }
 
 fn field(ui: &mut egui::Ui, title: &str, detail: &str, source: Option<&str>) {
-    ui.label(RichText::new(title).monospace().small().weak());
+    ui.label(RichText::new(title).monospace().size(10.5).weak());
     ui.add(egui::Label::new(detail).truncate())
         .on_hover_text(detail);
     if let Some(source) = source {
-        ui.add(egui::Label::new(RichText::new(source).monospace().small().weak()).truncate())
+        ui.add(egui::Label::new(RichText::new(source).monospace().size(10.5).weak()).truncate())
             .on_hover_text(source);
     }
 }
@@ -272,7 +272,7 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
     ui.label(
         RichText::new(format!("{short_id} · {}", dest.label))
             .monospace()
-            .small()
+            .size(10.5)
             .weak(),
     );
     let state = if data.errors.contains_key(&key.peer) {
@@ -317,7 +317,7 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
         );
     });
     ui.columns(2, |columns| {
-        columns[0].label(RichText::new("CONTEXT").monospace().small().weak());
+        columns[0].label(RichText::new("CONTEXT").monospace().size(10.5).weak());
         columns[0].horizontal_wrapped(|ui| conversation::context_label(ui, data, key, runs));
         if let Some(usage) = transcript.and_then(|transcript| transcript.exchange_usage) {
             let summary = usage.label();
@@ -331,7 +331,7 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
         .and_then(|transcript| transcript.execution.as_ref())
         .and_then(|execution| execution["cwd"].as_str())
     {
-        ui.label(RichText::new("DIRECTORY").monospace().small().weak());
+        ui.label(RichText::new("DIRECTORY").monospace().size(10.5).weak());
         ui.add(egui::Label::new(cwd).truncate()).on_hover_text(cwd);
     }
 

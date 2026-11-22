@@ -22,6 +22,25 @@ pub struct Contribution {
     pub accepted: bool,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Release {
+    pub contribution: Contribution,
+    pub revision: u64,
+}
+
+impl Release {
+    fn observed(&self, hold: &Value) -> bool {
+        hold["revision"]
+            .as_u64()
+            .is_some_and(|revision| revision > self.revision)
+            && hold["contributions"].as_array().is_some_and(|entries| {
+                !entries
+                    .iter()
+                    .any(|entry| entry["input"]["id"] == self.contribution.id)
+            })
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mutation {
     Append,
@@ -104,6 +123,26 @@ impl Desktop {
                 return;
             }
         }
+        if mutation == Mutation::Release
+            && let Some(revision) = revision
+        {
+            self.data
+                .saved
+                .hold_releases
+                .retain(|release| release.contribution.id != contribution.id);
+            self.data.saved.hold_releases.push(Release {
+                contribution: contribution.clone(),
+                revision,
+            });
+            if !self.persist() {
+                self.data
+                    .saved
+                    .hold_releases
+                    .retain(|release| release.contribution.id != contribution.id);
+                self.data.hold_pending.remove(&contribution.key);
+                return;
+            }
+        }
         let dest = conversation::destination(&self.data, &contribution.key.peer);
         let publisher = self.bus.publisher();
         std::thread::spawn(move || {
@@ -149,6 +188,16 @@ impl Desktop {
     pub fn hold_reply(&mut self, reply: Reply) {
         let entry = reply.contribution;
         self.data.hold_pending.remove(&entry.key);
+        if reply.mutation == Mutation::Release
+            && !self
+                .data
+                .saved
+                .hold_releases
+                .iter()
+                .any(|release| release.contribution.id == entry.id)
+        {
+            return;
+        }
         if reply.mutation == Mutation::Edit {
             self.data
                 .saved
@@ -157,11 +206,7 @@ impl Desktop {
         }
         match reply.result {
             Ok(result) => {
-                if reply.mutation == Mutation::Release {
-                    self.restore_held_draft(&entry);
-                    self.data.saved.holds.retain(|saved| saved.id != entry.id);
-                    self.restore_held_draft(&entry);
-                } else if reply.mutation == Mutation::Edit
+                if reply.mutation == Mutation::Edit
                     && let Some(saved) = self
                         .data
                         .saved
@@ -184,6 +229,11 @@ impl Desktop {
                 let nonacceptance = !reply.attempted || error.starts_with("HTTP 422:");
                 if reply.mutation == Mutation::Append && nonacceptance {
                     self.data.saved.holds.retain(|saved| saved.id != entry.id);
+                } else if reply.mutation == Mutation::Release && nonacceptance {
+                    self.data
+                        .saved
+                        .hold_releases
+                        .retain(|release| release.contribution.id != entry.id);
                 } else if reply.mutation == Mutation::Edit {
                     self.restore_held_draft(&entry);
                 }
@@ -209,6 +259,29 @@ impl Desktop {
         else {
             return;
         };
+        let released: Vec<_> = self
+            .data
+            .saved
+            .hold_releases
+            .iter()
+            .filter(|release| {
+                run_key(&release.contribution.key.peer, &release.contribution.after) == tag
+            })
+            .filter(|release| release.observed(&hold))
+            .map(|release| release.contribution.clone())
+            .collect();
+        let mut changed = !released.is_empty();
+        for entry in released {
+            self.restore_held_draft(&entry);
+            self.data
+                .saved
+                .hold_releases
+                .retain(|release| release.contribution.id != entry.id);
+            self.data.saved.holds.retain(|saved| saved.id != entry.id);
+            self.data
+                .thread_issues
+                .insert(entry.key, "Released to draft".into());
+        }
         let phase = hold["phase"].as_str().unwrap_or("");
         let accepted: Vec<_> = self
             .data
@@ -223,11 +296,22 @@ impl Desktop {
             })
             .cloned()
             .collect();
-        if accepted.is_empty() {
-            return;
-        }
-        let mut changed = false;
         for entry in accepted {
+            if matches!(phase, "started" | "returned" | "uncertain") {
+                let count = self.data.saved.hold_releases.len();
+                self.data
+                    .saved
+                    .hold_releases
+                    .retain(|release| release.contribution.id != entry.id);
+                if count != self.data.saved.hold_releases.len() {
+                    changed = true;
+                    if phase == "started" {
+                        self.data
+                            .thread_issues
+                            .insert(entry.key.clone(), "Follow-up started before release".into());
+                    }
+                }
+            }
             if phase == "returned" {
                 self.restore_held_draft(&entry);
                 self.data.saved.holds.retain(|saved| saved.id != entry.id);
@@ -299,66 +383,82 @@ pub fn panel(
     data: &Data,
     key: &ThreadKey,
     after: &str,
+    number: usize,
     hold: &Value,
     actions: &mut Vec<Action>,
 ) {
+    use crate::console_style;
     match hold["phase"].as_str() {
         Some("held" | "claimed") => {
-            ui.weak("Held after this run · starts after successful completion");
-            if let Some(entries) = hold["contributions"].as_array() {
-                for entry in entries {
-                    let input = &entry["input"];
-                    let id = input["id"].as_str().unwrap_or("");
-                    let text = input["text"].as_str().unwrap_or("");
-                    let own = data.saved.holds.iter().find(|item| item.id == id);
-                    ui.push_id(id, |ui| {
-                        if let Some(machine) = entry["machine"].as_str()
-                            && let Some(destination) = data
-                                .saved
-                                .destinations
-                                .iter()
-                                .find(|host| host.key == machine)
-                        {
-                            ui.weak(&destination.label);
-                        }
-                        ui.add(egui::Label::new(text).wrap().selectable(true));
-                        if let (Some(own), Some(revision)) = (own, hold["revision"].as_u64())
-                            && hold["phase"] == "held"
-                            && !data.hold_pending.contains(key)
-                        {
-                            ui.horizontal(|ui| {
-                                if ui.small_button("Release to draft").clicked() {
-                                    let mut contribution = own.clone();
-                                    contribution.text = text.into();
-                                    actions.push(Action::HoldChange(
-                                        contribution,
-                                        revision,
-                                        Mutation::Release,
-                                    ));
-                                }
-                            });
-                            egui::CollapsingHeader::new("Edit").show(ui, |ui| {
+            let row = egui::Frame::new()
+                .fill(egui::Color32::from_rgb(29, 25, 19))
+                .inner_margin(6)
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.colored_label(
+                        console_style::WARN,
+                        format!("Held after run {number} · starts after successful completion"),
+                    );
+                    for entry in hold["contributions"].as_array().into_iter().flatten() {
+                        let input = &entry["input"];
+                        let id = input["id"].as_str().unwrap_or("");
+                        let text = input["text"].as_str().unwrap_or("");
+                        let own = data.saved.holds.iter().find(|item| item.id == id);
+                        ui.push_id(id, |ui| {
+                            if let Some(machine) = entry["machine"].as_str()
+                                && let Some(destination) = data
+                                    .saved
+                                    .destinations
+                                    .iter()
+                                    .find(|host| host.key == machine)
+                            {
+                                ui.weak(&destination.label);
+                            }
+                            ui.add(egui::Label::new(text).wrap().selectable(true));
+                            if let (Some(own), Some(revision)) = (own, hold["revision"].as_u64())
+                                && hold["phase"] == "held"
+                                && !data.hold_pending.contains(key)
+                            {
                                 let edit =
                                     ui.make_persistent_id(("hold-edit", after, id, revision));
-                                let mut changed = ui
-                                    .data_mut(|data| data.get_temp::<String>(edit))
-                                    .unwrap_or_else(|| text.into());
-                                ui.text_edit_multiline(&mut changed);
-                                if ui.small_button("Save edit").clicked() {
-                                    let mut contribution = own.clone();
-                                    contribution.text = changed.clone();
-                                    actions.push(Action::HoldChange(
-                                        contribution,
-                                        revision,
-                                        Mutation::Edit,
-                                    ));
+                                let mut draft =
+                                    ui.data_mut(|memory| memory.get_temp::<String>(edit));
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Edit").clicked() {
+                                        draft = Some(text.into());
+                                    }
+                                    if ui.small_button("Release to draft").clicked() {
+                                        let mut contribution = own.clone();
+                                        contribution.text = text.into();
+                                        actions.push(Action::HoldChange(
+                                            contribution,
+                                            revision,
+                                            Mutation::Release,
+                                        ));
+                                    }
+                                });
+                                if let Some(changed) = &mut draft {
+                                    ui.text_edit_multiline(changed);
+                                    if ui.small_button("Save edit").clicked() {
+                                        let mut contribution = own.clone();
+                                        contribution.text = changed.clone();
+                                        actions.push(Action::HoldChange(
+                                            contribution,
+                                            revision,
+                                            Mutation::Edit,
+                                        ));
+                                    }
                                 }
-                                ui.data_mut(|data| data.insert_temp(edit, changed));
-                            });
-                        }
-                    });
-                }
-            }
+                                if let Some(draft) = draft {
+                                    ui.data_mut(|memory| memory.insert_temp(edit, draft));
+                                }
+                            }
+                        });
+                    }
+                })
+                .response
+                .rect;
+            console_style::dashed_rect(ui, row, console_style::WARN);
         }
         Some("returned") => {
             ui.weak("Held message returned to draft");
@@ -370,5 +470,36 @@ pub fn panel(
             ui.weak("Held follow-up acceptance is uncertain");
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_release_needs_a_newer_revision_without_its_exact_contribution() {
+        let release = Release {
+            contribution: Contribution {
+                key: ThreadKey {
+                    peer: "fixture".into(),
+                    id: "conversation".into(),
+                },
+                id: "own".into(),
+                after: "predecessor".into(),
+                text: "Held message".into(),
+                files: vec![],
+                accepted: true,
+            },
+            revision: 3,
+        };
+        assert!(!release.observed(&json!({"revision":3,"contributions":[]})));
+        assert!(!release.observed(
+            &json!({"revision":4,"phase":"started","contributions":[{"input":{"id":"own"}}]})
+        ));
+        assert!(release.observed(
+            &json!({"revision":4,"phase":"held","contributions":[{"input":{"id":"other"}}]})
+        ));
+        assert!(release.observed(&json!({"revision":4,"phase":"released","contributions":[]})));
     }
 }

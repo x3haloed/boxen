@@ -162,7 +162,7 @@ fn replies(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
         )
         .collect();
     replies.sort_unstable_by_key(|(at, _)| std::cmp::Reverse(*at));
-    ui.label(egui::RichText::new("REPLIES").monospace().small().weak());
+    ui.label(egui::RichText::new("REPLIES").monospace().size(10.5).weak());
     if replies.is_empty() {
         ui.weak("No unread replies observed");
     }
@@ -242,7 +242,7 @@ fn request_context(ui: &mut egui::Ui, data: &Data, active: &Active<'_>, gate: &R
         .find(|row| row.label == "You" && row.update_id.is_none())
     {
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("REQUEST").monospace().small().weak());
+            ui.label(egui::RichText::new("REQUEST").monospace().size(10.5).weak());
             let mut preview: String = initial.text.chars().take(180).collect();
             if preview.len() < initial.text.len() {
                 preview.push('…');
@@ -286,7 +286,7 @@ pub fn toolbar(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
                 ui.label(
                     egui::RichText::new("BLOCKING REQUESTS")
                         .monospace()
-                        .small()
+                        .size(10.5)
                         .weak(),
                 );
                 if gates.is_empty() {
