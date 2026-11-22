@@ -1333,6 +1333,7 @@ fn antigravity_input(
     run: &str,
     id: &Value,
     actions: &mut Vec<Action>,
+    mut first: Option<bool>,
 ) {
     ui.strong(
         request["question"]
@@ -1344,7 +1345,7 @@ fn antigravity_input(
             for choice in choices {
                 if let (Some(label), Some(option)) =
                     (choice["label"].as_str(), choice["id"].as_str())
-                    && ui.button(label).clicked()
+                    && decision_button(ui, label, &mut first)
                 {
                     actions.push(Action::Respond(
                         key.clone(),
@@ -1366,7 +1367,7 @@ fn antigravity_input(
     ui.horizontal_wrapped(|ui| {
         if let Some((field, choices)) = single {
             for choice in choices {
-                if ui.button(crate::model::display(choice)).clicked() {
+                if decision_button(ui, crate::model::display(choice), &mut first) {
                     actions.push(Action::Respond(
                         key.clone(),
                         run.into(),
@@ -1411,6 +1412,17 @@ pub(crate) fn backend_request(
     run: &str,
     actions: &mut Vec<Action>,
 ) {
+    request_controls(ui, row, key, run, actions, None);
+}
+
+pub(crate) fn request_controls(
+    ui: &mut egui::Ui,
+    row: &Row,
+    key: &ThreadKey,
+    run: &str,
+    actions: &mut Vec<Action>,
+    mut first: Option<bool>,
+) {
     let Some(req) = &row.request else { return };
     let method = req["method"].as_str().unwrap_or("");
     let p = &req["params"];
@@ -1422,11 +1434,11 @@ pub(crate) fn backend_request(
             }
         }
         if method == "antigravity/input" {
-            antigravity_input(ui, p, key, run, &req["id"], actions);
+            antigravity_input(ui, p, key, run, &req["id"], actions, first);
             return;
         }
         if method == COMMAND_APPROVAL {
-            if let Some(decision) = command_approval(ui, p) {
+            if let Some(decision) = command_approval(ui, p, first) {
                 actions.push(Action::Respond(
                     key.clone(),
                     run.into(),
@@ -1489,7 +1501,12 @@ pub(crate) fn backend_request(
                     ("Cancel", "cancel"),
                 ] {
                     let enabled = action != "accept" || content.is_some();
-                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                    let chosen = if enabled && action == "accept" {
+                        decision_button(ui, label, &mut first)
+                    } else {
+                        ui.add_enabled(enabled, egui::Button::new(label)).clicked()
+                    };
+                    if chosen {
                         let values = if action == "accept" {
                             content.clone()
                         } else {
@@ -1511,7 +1528,7 @@ pub(crate) fn backend_request(
                     ("Decline", "decline"),
                     ("Cancel", "cancel"),
                 ] {
-                    if ui.button(label).clicked() {
+                    if decision_button(ui, label, &mut first) {
                         actions.push(Action::Respond(
                             key.clone(),
                             run.into(),
@@ -1566,7 +1583,20 @@ pub(crate) fn backend_request(
     });
 }
 
-fn command_approval(ui: &mut egui::Ui, params: &Value) -> Option<Value> {
+fn decision_button(
+    ui: &mut egui::Ui,
+    label: impl Into<egui::WidgetText>,
+    first: &mut Option<bool>,
+) -> bool {
+    let default = first.take();
+    let mut button = egui::Button::new(label);
+    if default.is_some() {
+        button = button.shortcut_text("↵");
+    }
+    ui.add(button).clicked() || default == Some(true)
+}
+
+fn command_approval(ui: &mut egui::Ui, params: &Value, mut first: Option<bool>) -> Option<Value> {
     let legacy = [json!("accept"), json!("decline"), json!("cancel")];
     let decisions = params["availableDecisions"]
         .as_array()
@@ -1636,7 +1666,7 @@ fn command_approval(ui: &mut egui::Ui, params: &Value) -> Option<Value> {
                     }
                 }
             };
-            if ui.button(label).clicked() {
+            if decision_button(ui, label, &mut first) {
                 selected = Some(decision.clone());
             }
         }

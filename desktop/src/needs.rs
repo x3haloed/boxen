@@ -250,10 +250,56 @@ fn request_context(ui: &mut egui::Ui, data: &Data, active: &Active<'_>, gate: &R
             ui.label(preview).on_hover_text(&initial.text);
         });
     }
+    let before: Vec<_> = transcript
+        .rows
+        .iter()
+        .position(|row| row.id == gate.id)
+        .into_iter()
+        .flat_map(|position| transcript.rows[..position].iter().rev())
+        .filter(|row| row.label == "Command" && row.tool.as_ref().is_some_and(|tool| tool.finished))
+        .take(2)
+        .collect();
+    if !before.is_empty() {
+        ui.weak("BEFORE");
+        for row in before.into_iter().rev() {
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(row.text.lines().next().unwrap_or(""));
+                if let Some(result) = row.tool.as_ref().and_then(|tool| tool.result.as_deref()) {
+                    ui.weak(result);
+                }
+            });
+        }
+    }
+}
+
+struct Gate<'a> {
+    active: Active<'a>,
+    row: &'a Row,
+    current: bool,
+}
+
+impl Gate<'_> {
+    fn identity(&self) -> (&str, &str, &str) {
+        (&self.active.key.peer, self.active.id(), &self.row.id)
+    }
+
+    fn open(&self) -> Action {
+        Action::OpenGate(
+            self.active.key.clone(),
+            self.active.resident,
+            format!("{}:{}", self.active.id(), self.row.id),
+        )
+    }
+}
+
+#[derive(Clone)]
+struct SelectedGate {
+    identity: (String, String, String),
+    focus: egui::Id,
 }
 
 pub fn toolbar(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
-    let mut gates: Vec<(Active<'_>, &Row, bool)> = Vec::new();
+    let mut gates = Vec::new();
     let mut total = 0;
     let mut observed = 0;
     for active in active_runs(data) {
@@ -266,20 +312,72 @@ pub fn toolbar(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
         }
         if let Some(transcript) = data.transcripts.get(&tag) {
             for row in transcript.rows.iter().filter(|row| row.request.is_some()) {
-                gates.push((
-                    Active {
+                gates.push(Gate {
+                    active: Active {
                         key: active.key.clone(),
                         ..active
                     },
                     row,
                     current,
-                ));
+                });
             }
         }
     }
-    let counted = gates.iter().filter(|(_, _, current)| *current).count();
-    ui.menu_button(format!("Needs you · {counted}"), |ui| {
-        ui.weak(format!("From {observed} of {total} active runs"));
+    gates.sort_by(|a, b| {
+        b.current
+            .cmp(&a.current)
+            .then_with(|| a.identity().cmp(&b.identity()))
+    });
+    let counted = gates.iter().filter(|gate| gate.current).count();
+    let selection_id = ui.make_persistent_id("needs-gate-selection");
+    let menu = ui.menu_button(format!("Needs you · {counted}"), |ui| {
+        ui.set_width(420.);
+        ui.horizontal_wrapped(|ui| {
+            ui.weak(format!("From {observed} of {total} active runs"));
+            if !gates.is_empty() {
+                ui.weak("J/K select · ↵ first decision · G context");
+            }
+        });
+        let previous = ui.data_mut(|state| state.get_temp::<SelectedGate>(selection_id));
+        let previous_index = previous.as_ref().and_then(|selected| {
+            let (peer, run, row) = &selected.identity;
+            gates
+                .iter()
+                .position(|gate| gate.identity() == (peer, run, row))
+        });
+        let owns_keys = previous
+            .as_ref()
+            .is_some_and(|previous| ui.memory(|memory| memory.focused() == Some(previous.focus)));
+        let mut index = previous_index.unwrap_or_default();
+        let mut open = false;
+        let mut enter = false;
+        if owns_keys && previous_index.is_some() {
+            let (down, up, context, decision) = ui.input_mut(|input| {
+                let modifiers = egui::Modifiers::NONE;
+                let fresh_enter = input.events.iter().any(|event| {
+                    matches!(event, egui::Event::Key {
+                        key: egui::Key::Enter, pressed: true, repeat: false, modifiers, ..
+                    } if *modifiers == egui::Modifiers::NONE)
+                });
+                (
+                    input.consume_key(modifiers, egui::Key::J),
+                    input.consume_key(modifiers, egui::Key::K),
+                    input.consume_key(modifiers, egui::Key::G),
+                    input.consume_key(modifiers, egui::Key::Enter)
+                        && fresh_enter
+                        && !input.pointer.any_released(),
+                )
+            });
+            if down {
+                index = (index + 1).min(gates.len().saturating_sub(1));
+            } else if up {
+                index = index.saturating_sub(1);
+            } else {
+                open = context;
+                enter = decision && !context;
+            }
+        }
+        let move_focus = previous_index != Some(index);
         egui::ScrollArea::vertical()
             .max_height(460.)
             .show(ui, |ui| {
@@ -292,10 +390,13 @@ pub fn toolbar(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
                 if gates.is_empty() {
                     ui.weak("No pending requests observed");
                 }
-                gates.sort_by(|(a, a_row, _), (b, b_row, _)| {
-                    (&a.key.peer, a.id(), &a_row.id).cmp(&(&b.key.peer, b.id(), &b_row.id))
-                });
-                for (active, row, current) in gates {
+                let mut selected = None;
+                for (position, gate) in gates.iter().enumerate() {
+                    let Gate {
+                        active,
+                        row,
+                        current,
+                    } = gate;
                     let host = conversation::destination(data, &active.key.peer);
                     let title = if active.resident {
                         activity::title(data, &active.key)
@@ -304,40 +405,70 @@ pub fn toolbar(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
                             .map(|thread| thread.title.clone())
                             .unwrap_or_else(|| "Thread".into())
                     };
-                    ui.push_id((&active.key.peer, active.id(), &row.id), |ui| {
-                        ui.strong(title);
-                        ui.weak(host.label);
-                        request_context(ui, data, &active, row);
-                        if current {
-                            thread_view::backend_request(
-                                ui,
-                                row,
-                                &active.key,
-                                active.id(),
-                                actions,
+                    ui.push_id(gate.identity(), |ui| {
+                        let header = ui.selectable_label(
+                            index == position,
+                            format!("{title} · {}", host.label),
+                        );
+                        if header.clicked() {
+                            index = position;
+                            header.request_focus();
+                        }
+                        if index != position {
+                            ui.label(
+                                egui::RichText::new(row.text.lines().next().unwrap_or("")).weak(),
                             );
+                            if let Some(answer) = &row.answer {
+                                ui.weak(answer.label());
+                            }
                         } else {
+                            if move_focus {
+                                header.request_focus();
+                                header.scroll_to_me(None);
+                            }
+                            let (peer, run, request) = gate.identity();
+                            selected = Some(SelectedGate {
+                                identity: (peer.into(), run.into(), request.into()),
+                                focus: header.id,
+                            });
+                            request_context(ui, data, active, row);
+                            if *current {
+                                thread_view::request_controls(
+                                    ui,
+                                    row,
+                                    &active.key,
+                                    active.id(),
+                                    actions,
+                                    Some(enter && previous_index == Some(position)),
+                                );
+                            }
+                            if ui.small_button("Go to context (G)").clicked()
+                                || (open && previous_index == Some(position))
+                            {
+                                actions.push(gate.open());
+                                ui.close();
+                            }
+                        }
+                        if !current {
                             ui.weak(if active.reachable(data) {
                                 "Waiting for current replay"
                             } else {
-                                "Machine unreachable · request last seen pending"
+                                "Machine unreachable · controls return if replay shows it pending"
                             });
-                        }
-                        if ui.small_button("Go to context").clicked() {
-                            actions.push(Action::OpenGate(
-                                active.key.clone(),
-                                active.resident,
-                                format!("{}:{}", active.id(), row.id),
-                            ));
-                            ui.close();
                         }
                         ui.separator();
                     });
+                }
+                if let Some(selected) = selected {
+                    ui.data_mut(|state| state.insert_temp(selection_id, selected));
                 }
                 ui.separator();
                 replies(ui, data, actions);
             });
     });
+    if menu.inner.is_none() || gates.is_empty() {
+        ui.data_mut(|state| state.remove::<SelectedGate>(selection_id));
+    }
 }
 
 #[cfg(test)]
@@ -414,5 +545,107 @@ mod tests {
         data.errors.insert(host.into(), "offline".into());
         let hosts = coverage(&data);
         assert_eq!((hosts[host].observed, hosts[host].total), (0, 2));
+    }
+
+    #[test]
+    fn queue_keys_act_on_the_displayed_exact_request() {
+        let mut data = Data::default();
+        let host = "test-host";
+        let mut runs = vec![];
+        for (run, request) in [("first", 5), ("second", 8)] {
+            let key = ThreadKey {
+                peer: host.into(),
+                id: run.into(),
+            };
+            let tag = run_key(host, run);
+            data.transcripts.entry(tag.clone()).or_default().apply(&json!({
+                "seq":1,"kind":"backend","data":{
+                    "id":request,"method":"item/commandExecution/requestApproval",
+                    "params":{"command":format!("{run} command"),"availableDecisions":["decline","accept"]}
+                }
+            })).unwrap();
+            data.watches.insert(
+                tag,
+                Observing {
+                    key,
+                    epoch: 1,
+                    stop: Default::default(),
+                    retry: Instant::now(),
+                    error: None,
+                    done: false,
+                    frontier: Some(1),
+                },
+            );
+            runs.push(json!({
+                "status":"waiting","last_seq":1,
+                "record":{"spec":{"id":run,"thread_id":run,"backend":"codex","prompt":run}}
+            }));
+        }
+        data.catalogs
+            .insert(host.into(), crate::model::catalog(host, &runs));
+        let ctx = egui::Context::default();
+        let frame = |data: &Data, events| {
+            let mut actions = vec![];
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(960., 720.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| toolbar(ui, data, &mut actions),
+            );
+            (actions, output)
+        };
+        let (_, output) = frame(&data, vec![]);
+        let click = output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                let egui::Shape::Text(text) = &shape.shape else {
+                    return None;
+                };
+                (text.galley.job.text == "Needs you · 2")
+                    .then(|| text.pos + text.galley.size() / 2.)
+            })
+            .unwrap();
+        let pointer = |pressed| egui::Event::PointerButton {
+            pos: click,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&data, vec![egui::Event::PointerMoved(click), pointer(true)]);
+        assert!(frame(&data, vec![pointer(false)]).0.is_empty());
+        frame(&data, vec![]);
+        let key = |key| {
+            [true, false].map(|pressed| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            })
+        };
+        assert!(frame(&data, key(egui::Key::J).to_vec()).0.is_empty());
+        let (actions, _) = frame(&data, vec![key(egui::Key::Enter)[0].clone()]);
+        assert!(matches!(actions.as_slice(),
+            [Action::Respond(target, run, id, result)]
+                if target.id == "second" && run == "second" && *id == 8
+                    && result["decision"] == "decline"
+        ));
+        // A second press event without an intervening release is key repeat.
+        assert!(frame(&data, key(egui::Key::Enter).to_vec()).0.is_empty());
+        data.errors.insert(host.into(), "offline".into());
+        assert!(frame(&data, key(egui::Key::Enter).to_vec()).0.is_empty());
+        data.errors.clear();
+        assert!(frame(&data, key(egui::Key::K).to_vec()).0.is_empty());
+        let (actions, _) = frame(&data, key(egui::Key::G).to_vec());
+        assert!(matches!(actions.as_slice(),
+            [Action::OpenGate(target, false, anchor)]
+                if target.id == "first" && anchor == "first:event-1"
+        ));
     }
 }

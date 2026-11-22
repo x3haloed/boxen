@@ -119,8 +119,10 @@ Missing measurements appear as unknown.
 **Needs you** lists pending runtime requests from observed active runs and
 reports coverage against the machine catalogs. A stream counts once it reaches
 the sampled replay frontier. An unreachable machine can still have previously
-observed requests with inactive controls. **Go to context** opens the request
-in Activity. Attributed answers distinguish queueing from the adapter's
+observed requests with inactive controls. **J/K** selects a request and **G**
+opens it at its exact journal row in Activity. When the selected gate has queue
+keyboard focus, **Enter** invokes the offered decision marked with ↵.
+Attributed answers distinguish queueing from the adapter's
 backend write. If an acknowledgment is lost, the desktop samples a fresh replay
 frontier before offering any controls for the exact pending request. The timeline
 groups the written decision and any refused local attempt on that request.

@@ -959,6 +959,31 @@ mod tests {
     }
 
     #[test]
+    fn width_round_trip_parks_only_the_fourth_column() {
+        let mut grid = Grid {
+            columns: Grid::columns_for(2040.),
+            ..Default::default()
+        };
+        for id in ["a", "b", "c", "d"] {
+            grid.open(pane(id), true);
+        }
+        let original: Vec<_> = grid.slots.iter().map(|slot| slot.home).collect();
+        grid.columns = Grid::columns_for(1600.);
+        assert!(
+            grid.slots[..3]
+                .iter()
+                .all(|slot| slot.home.fits(grid.columns))
+        );
+        assert!(!grid.slots[3].home.fits(grid.columns));
+        grid.columns = Grid::columns_for(2040.);
+        assert!(grid.slots.iter().all(|slot| slot.home.fits(grid.columns)));
+        assert_eq!(
+            grid.slots.iter().map(|slot| slot.home).collect::<Vec<_>>(),
+            original
+        );
+    }
+
+    #[test]
     fn explicit_placement_clears_a_parked_home() {
         let mut grid = Grid {
             columns: 4,
