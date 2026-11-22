@@ -132,23 +132,16 @@ impl Client {
                             v.as_array()
                                 .map(|rows| {
                                     rows.iter()
-                                        .map(|r| json!({"id":r["id"],"name":r["name"],"backend":r["backend"],"model":r["model"],"definition":r["definition"],"thread_id":r["thread_id"]}))
+                                        .map(|r| json!({"id":r["id"],"name":r["name"],"backend":r["backend"],"model":r["model"],"definition":r["definition"],"thread_id":r["thread_id"],"auto_activate":r["auto_activate"]}))
                                         .collect()
                                 })
                                 .ok_or("Invalid resident list".into())
                         });
                     if resident_cache.is_ok() {
-                        let has_instances = resident_cache.as_ref().is_ok_and(|rows| {
-                            rows.iter().any(|r| r["definition"]["id"].is_string())
-                        });
-                        definitions = if has_instances {
-                            client.operation(
-                                &destination,
-                                json!({"op":"resident_definition","args":{"action":"list"}}),
-                            )
-                        } else {
-                            Ok(json!({"definitions":[]}))
-                        };
+                        definitions = client.operation(
+                            &destination,
+                            json!({"op":"resident_definition","args":{"action":"list"}}),
+                        );
                         health = client.operation(&destination, json!({"op":"inference_health"}));
                     } else {
                         definitions = Err("Machine unavailable".into());
@@ -1302,7 +1295,8 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
     let mut choose_reply = None;
     let mut switch = None;
     let mut message_anchor = None;
-    let extra = usize::from(draft.parent.is_some())
+    let extra = 1
+        + usize::from(draft.parent.is_some())
         + usize::from(!pending.is_empty())
         + usize::from(
             data.preparing
@@ -1502,6 +1496,16 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
             }
         });
     }
+    ui.horizontal_wrapped(|ui| {
+        let resident = data.agents.resident(key);
+        let name = resident
+            .and_then(|resident| resident["name"].as_str())
+            .unwrap_or("resident");
+        ui.weak(format!("→ mail to {name}"));
+        if resident.is_some_and(|resident| resident["auto_activate"] == false) {
+            ui.weak("auto-activation off");
+        }
+    });
     let blocked = draft.pending.is_some() || data.local_key.is_empty();
     let result = view::composer(
         ui,

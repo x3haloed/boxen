@@ -514,7 +514,7 @@ impl Desktop {
             egui::pos2(workspace.left() + SIDEBAR_WIDTH, workspace.bottom()),
         );
         let board_left = sidebar_rect.right() + 1.;
-        let width = MIN_COLUMN_WIDTH.min((workspace.right() - board_left).max(1.));
+        let width = (workspace.right() - board_left).max(1.) / columns as f32;
         let board = egui::Rect::from_min_max(
             egui::pos2(board_left, workspace.top()),
             egui::pos2(board_left + width * columns as f32, workspace.bottom()),
@@ -536,7 +536,7 @@ impl Desktop {
         sidebar_ui.horizontal(|ui| {
             ui.strong("Watchlist");
             for (pane, label) in [
-                (Pane::Threads, "Threads"),
+                (Pane::Threads, "Workspace"),
                 (Pane::Agents, "Agents"),
                 (Pane::Correspondence, "Mail"),
             ] {
@@ -622,10 +622,23 @@ impl Desktop {
                     "{}",
                     slot.home.column + 1 + slot.home.row * columns
                 ));
-                ui.add_sized(
-                    [(ui.available_width() - 75.).max(0.), 20.],
-                    egui::Label::new(title).truncate(),
-                );
+                if ui
+                    .add_sized(
+                        [(ui.available_width() - 75.).max(0.), 20.],
+                        egui::Label::new(title)
+                            .truncate()
+                            .sense(egui::Sense::click()),
+                    )
+                    .clicked()
+                {
+                    self.grid_mut().focus = Some(slot.pane.clone());
+                    match &slot.pane {
+                        Pane::Thread(key) | Pane::Chat(key) | Pane::Activity(key) => {
+                            self.data.selected_thread = Some(key.clone());
+                        }
+                        _ => {}
+                    }
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     close = ui.small_button("×").on_hover_text("Close pane").clicked();
                     ui.menu_button(format!("{}×{}", slot.home.width, slot.home.height), |ui| {

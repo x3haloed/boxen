@@ -19,6 +19,7 @@ mod runtimes;
 mod thread_view;
 mod tool_approvals;
 mod work;
+mod watchlist;
 mod workspace;
 use client::{Bus, Client, Pending, Update, run_key};
 use eframe::egui::{self, RichText};
@@ -1063,18 +1064,17 @@ impl Desktop {
             Action::OpenGate(key, resident, anchor) => {
                 conversation::switch(&mut self.data, &key, true, Some(anchor));
                 if resident {
-                    self.data
-                        .saved
-                        .workspace
-                        .open_editor(Pane::Chat(key), false);
+                    self.action(Action::OpenChat(key, false));
                 } else {
                     self.action(Action::Open(key, false));
                 }
             }
             Action::OpenChat(key, pin) => {
+                self.data.selected_thread = Some(key.clone());
                 self.data.saved.workspace.open_editor(Pane::Chat(key), pin)
             }
             Action::OpenActivity(key, pin) => {
+                self.data.selected_thread = Some(key.clone());
                 conversation::switch(&mut self.data, &key, true, None);
                 self.data.saved.workspace.open_editor(Pane::Chat(key), pin);
             }
@@ -1331,78 +1331,33 @@ fn thread_rows(
                 _ => "unknown",
             }
         };
-        let observed = thread
-            .runs
-            .iter()
-            .filter_map(|run| {
-                let id = run["record"]["spec"]["id"].as_str()?;
-                data.transcripts
-                    .get(&run_key(&dest.key, id))?
-                    .latest_visible
-                    .as_ref()
-            })
-            .max_by_key(|(_, event)| event.at);
-        let response = ui
-            .push_id((&thread.key.peer, &thread.key.id), |ui| {
-                ui.horizontal(|ui| {
-                    let row_width = ui.clip_rect().right() - ui.next_widget_position().x - 8.;
-                    let columns = 58. + 48. + 29. + 8.;
-                    let name_width = (row_width - columns - 4. * ui.spacing().item_spacing.x).max(20.);
-                    let response = ui.add_sized(
-                        [name_width, 22.],
-                        egui::Button::selectable(selected, &thread.title).truncate(),
-                    );
-                    conversation::context_mark(ui, data, &thread.key, &thread.runs);
-                    let status = if has_background && state != "unseen" {
-                        format!("{state} +bg")
-                    } else {
-                        state.into()
-                    };
-                    let color = match state {
-                        "running" | "starting" | "stopping" => {
-                            egui::Color32::from_rgb(76, 158, 255)
-                        }
-                        "input" => egui::Color32::from_rgb(216, 162, 58),
-                        "failed" | "interrupted" => egui::Color32::from_rgb(239, 91, 80),
-                        _ => ui.visuals().weak_text_color(),
-                    };
-                    ui.add_sized(
-                        [58., 20.],
-                        egui::Label::new(RichText::new(status).monospace().size(10.).color(color))
-                            .truncate(),
-                    );
-                    ui.add_sized(
-                        [48., 20.],
-                        egui::Label::new(
-                            RichText::new(observed.map_or("—", |(_, event)| event.label))
-                                .monospace()
-                                .size(10.),
-                        )
-                        .truncate(),
-                    );
-                    ui.add_sized(
-                        [29., 20.],
-                        egui::Label::new(
-                            RichText::new(
-                                observed
-                                    .map_or_else(|| "—".into(), |(_, event)| pulse::age(event.at)),
-                            )
-                            .monospace()
-                            .size(10.),
-                        )
-                        .truncate(),
-                    );
-                    response
-                })
-                .inner
-            })
-            .inner;
-        if response.double_clicked()
-            || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
-        {
-            actions.push(Action::Open(thread.key.clone(), true));
-        } else if response.clicked() {
-            actions.push(Action::Open(thread.key.clone(), false));
+        let observed = watchlist::latest_visible(data, &thread.key, &thread.runs);
+        let status = if has_background && state != "unseen" {
+            format!("{state} +bg")
+        } else {
+            state.into()
+        };
+        let color = match state {
+            "running" | "starting" | "stopping" => egui::Color32::from_rgb(76, 158, 255),
+            "input" => egui::Color32::from_rgb(216, 162, 58),
+            "failed" | "interrupted" => egui::Color32::from_rgb(239, 91, 80),
+            _ => ui.visuals().weak_text_color(),
+        };
+        let last = if state == "unseen" { "offline" } else { observed.map_or("—", |event| event.label) };
+        let response = ui.push_id((&thread.key.peer, &thread.key.id), |ui| {
+            watchlist::Row {
+                title: &thread.title,
+                state: &status,
+                color,
+                last,
+                age: &watchlist::event_age(observed),
+                selected,
+                muted: state == "unseen",
+                context: Some((&thread.key, &thread.runs)),
+            }.show(ui, data)
+        }).inner;
+        if let Some(pin) = watchlist::opens(ui, &response) {
+            actions.push(Action::Open(thread.key.clone(), pin));
         }
         response.on_hover_text(format!(
             "{}\n{}",
@@ -1572,7 +1527,7 @@ impl TabViewer for Viewer<'_> {
                         (ui.available_width() - 28. - ui.spacing().item_spacing.x).max(24.);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.data.filter)
-                            .hint_text("Filter threads…")
+                            .hint_text("Filter Watchlist…")
                             .desired_width(search_width),
                     );
                     let response = ui
@@ -1660,20 +1615,9 @@ impl TabViewer for Viewer<'_> {
                     .cloned()
                     .collect();
                 let query = self.data.filter.to_lowercase();
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [(ui.available_width() - 148.).max(36.), 20.],
-                        egui::Label::new("NAME"),
-                    );
-                    for (label, width) in [("STATE", 58.), ("LAST", 48.), ("AGE", 29.)] {
-                        ui.add_sized(
-                            [width, 20.],
-                            egui::Label::new(RichText::new(label).monospace().size(10.)),
-                        );
-                    }
-                });
+                watchlist::header(ui);
                 let inspector_height = if self.data.selected_thread.is_some() {
-                    110.
+                    205.
                 } else {
                     0.
                 };
@@ -1681,7 +1625,7 @@ impl TabViewer for Viewer<'_> {
 
                 egui::ScrollArea::vertical()
                     .max_height(list_height)
-                    .auto_shrink([false, false])
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
                         if destinations.is_empty() {
                             ui.weak(if self.data.saved.destinations.is_empty() {
@@ -1690,6 +1634,7 @@ impl TabViewer for Viewer<'_> {
                                 "No machines selected."
                             });
                         }
+                        ui.label(RichText::new("THREADS").monospace().small().weak());
                         let grouped = destinations.len() > 1;
                         for dest in &destinations {
                             if grouped {
@@ -1703,30 +1648,10 @@ impl TabViewer for Viewer<'_> {
                                 thread_rows(ui, self.data, self.actions, dest, &query);
                             }
                         }
+                        agents::watchlist(ui, self.data, &destinations, &query, self.actions);
                     });
-                if let Some(key) = &self.data.selected_thread
-                    && let Some(thread) = find_thread(self.data, key)
-                    && let Some(run) = thread.runs.last()
-                {
-                    ui.separator();
-                    ui.strong(&thread.title);
-                    let dest = conversation::destination(self.data, &key.peer);
-                    ui.weak(format!(
-                        "{} · {}",
-                        dest.label,
-                        run["record"]["spec"]["backend"]
-                            .as_str()
-                            .unwrap_or("runtime unknown")
-                    ));
-                    ui.weak(
-                        run["record"]["spec"]["model"]
-                            .as_str()
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or("Default model"),
-                    );
-                    ui.horizontal_wrapped(|ui| {
-                        conversation::context_label(ui, self.data, key, &thread.runs);
-                    });
+                if let Some(key) = &self.data.selected_thread {
+                    watchlist::inspector(ui, self.data, key, self.actions);
                 }
             }
             Pane::Thread(key) => thread_view::panel(ui, self.data, key, self.actions),

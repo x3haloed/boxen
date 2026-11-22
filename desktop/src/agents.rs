@@ -242,6 +242,7 @@ fn status(p: &Peer, id: &str) -> (Signal, String, String) {
         "interrupted" => (Signal::Failed, "Interrupted"),
         "starting" => (Signal::Running, "Starting…"),
         "running" => (Signal::Running, "Running"),
+        "waiting" => (Signal::Running, "Input"),
         "cancelling" => (Signal::Running, "Cancelling…"),
         _ => (Signal::Unknown, "Status unavailable"),
     };
@@ -366,6 +367,201 @@ fn row(
     });
     (clicked, double_clicked)
 }
+pub fn watchlist(
+    ui: &mut egui::Ui,
+    data: &Data,
+    destinations: &[Destination],
+    query: &str,
+    actions: &mut Vec<Action>,
+) {
+    ui.label(RichText::new("RESIDENTS").monospace().small().weak());
+    for destination in destinations {
+        let Some(peer) = data.agents.peers.get(&destination.key) else {
+            continue;
+        };
+        let mut residents: Vec<_> = peer
+            .residents
+            .iter()
+            .filter(|resident| {
+                resident["name"]
+                    .as_str()
+                    .is_some_and(|name| name.to_lowercase().contains(query))
+            })
+            .collect();
+        residents
+            .sort_by_key(|resident| resident["name"].as_str().unwrap_or_default().to_lowercase());
+        for resident in residents {
+            watch_resident(ui, data, destination, peer, resident, actions);
+        }
+    }
+
+    ui.label(RichText::new("DEFINITIONS").monospace().small().weak());
+    for destination in destinations {
+        let Some(peer) = data.agents.peers.get(&destination.key) else {
+            continue;
+        };
+        let classes = groups(peer);
+        let mut definitions: BTreeMap<_, _> = peer
+            .definitions
+            .iter()
+            .map(|(id, name)| (id.as_str(), (name.as_str(), Vec::new())))
+            .collect();
+        for class in &classes {
+            if let Some(id) = class.definition.as_deref() {
+                definitions.insert(id, (class.name.as_str(), class.residents.clone()));
+            }
+        }
+        let mut definitions: Vec<_> = definitions.into_iter().collect();
+        definitions.sort_by_key(|(id, (name, _))| (name.to_lowercase(), *id));
+        for (id, (name, residents)) in definitions {
+            if !name.to_lowercase().contains(query) {
+                continue;
+            }
+            ui.push_id(("definition", &destination.key, id), |ui| {
+                let signals: Vec<_> = residents
+                    .iter()
+                    .map(|r| status(peer, r["id"].as_str().unwrap_or_default()).0)
+                    .collect();
+                let running = signals
+                    .iter()
+                    .filter(|&&signal| signal == Signal::Running)
+                    .count();
+                let failed = signals
+                    .iter()
+                    .filter(|&&signal| signal == Signal::Failed)
+                    .count();
+                let ready = signals
+                    .iter()
+                    .filter(|&&signal| signal == Signal::Healthy)
+                    .count();
+                let unknown = signals
+                    .iter()
+                    .filter(|&&signal| signal == Signal::Unknown)
+                    .count();
+                let offline =
+                    data.errors.contains_key(&destination.key) || peer.metadata_error.is_some();
+                let (state, color) = if offline {
+                    ("unseen".into(), Signal::Unknown.color())
+                } else if running > 0 {
+                    (format!("{running} run"), Signal::Running.color())
+                } else if ready > 0 || residents.is_empty() {
+                    (format!("{ready} idle"), ui.visuals().weak_text_color())
+                } else if failed > 0 {
+                    (format!("{failed} stopped"), Signal::Failed.color())
+                } else {
+                    (format!("{unknown} unseen"), Signal::Unknown.color())
+                };
+                let expanded = ui.make_persistent_id("expanded");
+                let mut open = ui
+                    .data(|memory| memory.get_temp::<bool>(expanded))
+                    .unwrap_or(false);
+                let last = if offline {
+                    "offline".into()
+                } else if failed > 0 {
+                    format!("{failed} fail")
+                } else {
+                    "—".into()
+                };
+                let response = crate::watchlist::Row {
+                    title: name,
+                    state: &state,
+                    color,
+                    last: &last,
+                    age: "—",
+                    selected: open,
+                    muted: offline,
+                    context: None,
+                }
+                .show(ui, data)
+                .on_hover_text(format!(
+                    "{} · {} independent instances",
+                    destination.label,
+                    residents.len()
+                ));
+                if crate::watchlist::opens(ui, &response).is_some() {
+                    open = !open;
+                    ui.data_mut(|memory| memory.insert_temp(expanded, open));
+                }
+                if open {
+                    ui.indent("instances", |ui| {
+                        if residents.is_empty() {
+                            ui.weak("No instances");
+                        }
+                        for resident in residents {
+                            watch_resident(ui, data, destination, peer, resident, actions);
+                        }
+                    });
+                }
+            });
+        }
+    }
+}
+
+fn watch_resident(
+    ui: &mut egui::Ui,
+    data: &Data,
+    destination: &Destination,
+    peer: &Peer,
+    resident: &Value,
+    actions: &mut Vec<Action>,
+) {
+    let Some(id) = resident["id"].as_str() else {
+        return;
+    };
+    let key = ThreadKey {
+        peer: destination.key.clone(),
+        id: id.into(),
+    };
+    let runs = data.agents.history(&key).unwrap_or_default();
+    let (signal, line, detail) = status(peer, id);
+    let offline = data.errors.contains_key(&key.peer) || peer.metadata_error.is_some();
+    let event = crate::watchlist::latest_visible(data, &key, runs);
+    let last = if offline {
+        "offline"
+    } else {
+        event.map_or("—", |event| event.label)
+    };
+    let text = if offline {
+        "unseen".into()
+    } else if signal == Signal::Healthy {
+        "idle".into()
+    } else {
+        line.to_lowercase().replace(" · http ", " ")
+    };
+    let color = if offline {
+        Signal::Unknown.color()
+    } else if line == "Input" {
+        Color32::from_rgb(216, 162, 58)
+    } else if signal == Signal::Healthy {
+        ui.visuals().weak_text_color()
+    } else {
+        signal.color()
+    };
+    let response = ui
+        .push_id((&key.peer, &key.id), |ui| {
+            crate::watchlist::Row {
+                title: resident["name"].as_str().unwrap_or("Resident"),
+                state: &text,
+                color,
+                last,
+                age: &crate::watchlist::event_age(event),
+                selected: data.selected_thread.as_ref() == Some(&key),
+                muted: offline,
+                context: Some((&key, runs)),
+            }
+            .show(ui, data)
+        })
+        .inner
+        .on_hover_text(format!(
+            "{}
+{detail}",
+            destination.label
+        ));
+    if let Some(pin) = crate::watchlist::opens(ui, &response) {
+        actions.push(Action::OpenChat(key, pin));
+    }
+}
+
 pub fn panel(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
     egui::ScrollArea::vertical()
         .id_salt("agents-list")

@@ -102,6 +102,14 @@ the existing authenticated control path after an explicit response action.
 Replay preserves pending requests. An answered or backend-resolved request loses
 its active controls.
 
+The Watchlist presents anonymous threads, residents and resident definitions
+under shared columns. Thread state follows the current input owner, with
+`+bg` when an older run is still active. Resident state comes from the latest
+activation and definitions aggregate independent instances on each machine.
+Event age comes only from replayed or live visible events. A thread or resident
+row peeks on a single click and opens on the grid with Enter or a double-click.
+The inspector follows the selected conversation.
+
 **Needs you** lists pending runtime requests from observed active runs and
 reports coverage against the machine catalogs. A stream counts once it reaches
 the sampled replay frontier. An unreachable machine can still have previously
