@@ -1073,36 +1073,15 @@ pub fn details(ui: &mut egui::Ui, pane: &Pane, data: &mut Data, actions: &mut Ve
     }
 }
 
-fn activation_name(data: &Data, key: &ThreadKey, run_id: &str) -> String {
-    let ordinal = data
-        .agents
-        .history(key)
-        .into_iter()
-        .flatten()
-        .filter(|run| {
-            run["record"]["resident_activation"] == true
-                && run["record"]["imported"].is_null()
-                && run["record"]["transcript_import"].is_null()
-        })
-        .position(|run| run["record"]["spec"]["id"] == run_id)
-        .map(|index| index + 1);
-    ordinal.map_or_else(
-        || run_id.chars().take(8).collect(),
-        |number| number.to_string(),
-    )
-}
-
 fn mail_receipt(data: &Data, key: &ThreadKey, message: &Value) -> Option<String> {
     let run = message["activation_input"]["run_id"]
         .as_str()
         .or_else(|| message["presented_in"].as_str());
-    if let Some(run) = run {
-        let name = activation_name(data, key, run);
-        return Some(if message["activation_input"]["seq"].is_u64() {
-            format!("Presented in activation {name}")
-        } else {
-            format!("Assigned to activation {name} · input unconfirmed")
-        });
+    if run.is_some() {
+        // A recorded presentation is the settled case and needs no line;
+        // only the unconfirmed input remains worth saying.
+        return (!message["activation_input"]["seq"].is_u64())
+            .then(|| "Input unconfirmed".to_owned());
     }
     if message["delivery"]["status"] == "queued" {
         return Some("Saved in outbox".into());
@@ -1120,11 +1099,11 @@ fn mail_receipt(data: &Data, key: &ThreadKey, message: &Value) -> Option<String>
                 .find(|run| !crate::model::terminal(run))
         })
         .flatten();
-    let waiting = active
-        .and_then(|run| run["record"]["spec"]["id"].as_str())
-        .map_or_else(String::new, |id| {
-            format!(" · activation {} active", activation_name(data, key, id))
-        });
+    let waiting = if active.is_some() {
+        " · after the current activation"
+    } else {
+        ""
+    };
     Some(format!(
         "Accepted by {} mailbox · queued{waiting}",
         destination.label
@@ -1471,24 +1450,20 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
                 };
                 let response = ui
                     .push_id(id, |ui| {
-                        let author = if *outgoing { "You" } else { &resident_name };
+                        // Resident mail here is one-to-one: depth, not a name,
+                        // says who wrote it, and the replied-to message is the
+                        // conversation itself.
                         view::message_row(
                             ui,
                             m["accepted_at"].as_u64(),
-                            view::MessageAuthor::Mail(author),
+                            if *outgoing {
+                                view::MessageAuthor::You
+                            } else {
+                                view::MessageAuthor::Agent
+                            },
                             m["body"].as_str().unwrap_or(""),
                             false,
                             |ui| {
-                                if let Some(parent) = m["in_reply_to"].as_str() {
-                                    let title = messages
-                                        .iter()
-                                        .find(|(i, _)| i == parent)
-                                        .map(|(_, (_, v))| snippet(v))
-                                        .unwrap_or_else(|| "Earlier message".into());
-                                    if ui.button(format!("↳ {title}")).clicked() {
-                                        message_anchor = Some(parent.into());
-                                    }
-                                }
                                 view::chips(
                                     ui,
                                     &mut files,

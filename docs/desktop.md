@@ -206,6 +206,13 @@ and replay. A queued OpenRouter update has its own receipt until the run records
 its incorporation or ends before applying it.
 The gear menu's **Receipt key** explains what each thread, held follow-up,
 gate answer and resident mail receipt establishes.
+Depth rather than labels separates the two participants: your turns sit on a
+raised band with an accent edge, and agent narration sits flush on the canvas.
+Step groups keep their dim monospace row. Resident mail is one-to-one, so its
+entries carry no author names or replied-to excerpts. A message recorded in an
+activation's input shows no receipt line; an assigned but unrecorded input reads
+**Input unconfirmed**, and mail queued behind an active run reads
+`… · after the current activation`.
 When Antigravity reports that its prompt ended and a native background command
 remains open, the composer offers ordinary **Send** as soon as the daemon
 reports that the same session can take a fresh prompt. Late command updates

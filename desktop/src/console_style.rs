@@ -31,6 +31,10 @@ pub const ACCENT: Color32 = Color32::from_rgb(76, 158, 255);
 pub const OK: Color32 = Color32::from_rgb(63, 185, 80);
 pub const WARN: Color32 = Color32::from_rgb(216, 162, 58);
 pub const ERROR: Color32 = Color32::from_rgb(239, 91, 80);
+/// Your turns sit on a raised band, a step lighter than the canvas; the
+/// agent's narration sits flush on the canvas. Depth tells them apart.
+pub const RAISED: Color32 = Color32::from_rgb(24, 33, 45);
+pub const RAISED_TEXT: Color32 = Color32::from_rgb(238, 242, 246);
 
 pub fn install(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();

@@ -1567,8 +1567,12 @@ fn receipt_key(ui: &mut egui::Ui) {
                     "The destination retained the message. It can wait for activation.",
                 ),
                 (
-                    "Presented in activation",
-                    "The message appeared in the recorded activation input batch.",
+                    "No line",
+                    "The message appeared in a recorded activation input batch.",
+                ),
+                (
+                    "Input unconfirmed",
+                    "An activation was assigned, but its input batch was not recorded.",
                 ),
                 (
                     "Auto-activation off",

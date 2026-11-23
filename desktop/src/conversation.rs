@@ -490,46 +490,76 @@ pub fn journal_time(ui: &mut egui::Ui, at: Option<u64>) {
     .on_hover_text("Journal time (UTC)");
 }
 
-pub enum MessageAuthor<'a> {
+/// Who a message comes from. Threads and one-to-one resident mail have two
+/// participants, so depth rather than a name tells them apart: your turns
+/// are raised on a band with an accent edge, the agent's sit flush.
+pub enum MessageAuthor {
     You,
-    Assistant,
-    Mail(&'a str),
+    Agent,
 }
+
+/// How far a raised band reaches left of the time gutter, so the gutter and
+/// text column stay aligned with flush rows.
+const BAND_BLEED: i8 = 6;
 
 pub fn message_row(
     ui: &mut egui::Ui,
     at: Option<u64>,
-    author: MessageAuthor<'_>,
+    author: MessageAuthor,
     text: &str,
     rich: bool,
     body: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
-    ui.horizontal_top(|ui| {
-        journal_time(ui, at);
-        match author {
-            MessageAuthor::You => {
-                ui.label(RichText::new("›").monospace().color(console_style::ACCENT))
-                    .on_hover_text("You");
-            }
-            MessageAuthor::Assistant => {
-                console_style::dot(ui, console_style::SECONDARY);
-            }
-            MessageAuthor::Mail(_) => {}
-        }
-        ui.vertical(|ui| {
+    let you = matches!(author, MessageAuthor::You);
+    let frame = if you {
+        // A little air above marks the start of your turn.
+        ui.add_space(4.);
+        egui::Frame::new()
+            .fill(console_style::RAISED)
+            .outer_margin(egui::Margin {
+                left: -BAND_BLEED,
+                ..Default::default()
+            })
+            .inner_margin(egui::Margin {
+                left: BAND_BLEED,
+                right: 6,
+                top: 4,
+                bottom: 4,
+            })
+    } else {
+        egui::Frame::new()
+    };
+    let response = frame
+        .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            if let MessageAuthor::Mail(name) = author {
-                ui.label(RichText::new(name).monospace().size(10.5).strong());
+            if you {
+                ui.visuals_mut().override_text_color = Some(console_style::RAISED_TEXT);
             }
-            if rich {
-                markdown(ui, text);
-            } else if !text.is_empty() {
-                ui.add(egui::Label::new(text).wrap().selectable(true));
-            }
-            body(ui);
-        });
-    })
-    .response
+            ui.horizontal_top(|ui| {
+                journal_time(ui, at);
+                // Holds the text column where the old role glyph sat, so
+                // messages stay aligned with step groups and run dividers.
+                ui.add_space(9.);
+                ui.vertical(|ui| {
+                    ui.set_min_width(ui.available_width());
+                    if rich {
+                        markdown(ui, text);
+                    } else if !text.is_empty() {
+                        ui.add(egui::Label::new(text).wrap().selectable(true));
+                    }
+                    body(ui);
+                });
+            });
+        })
+        .response;
+    if you {
+        let edge = egui::Rect::from_min_size(
+            response.rect.left_top(),
+            egui::vec2(2., response.rect.height()),
+        );
+        ui.painter().rect_filled(edge, 0., console_style::ACCENT);
+    }
+    response
 }
 
 pub fn span(ms: u64) -> String {

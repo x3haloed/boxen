@@ -1166,7 +1166,7 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
                                         if outgoing {
                                             view::MessageAuthor::You
                                         } else {
-                                            view::MessageAuthor::Assistant
+                                            view::MessageAuthor::Agent
                                         },
                                         &row.text,
                                         !outgoing,
