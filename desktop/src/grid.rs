@@ -802,30 +802,18 @@ impl Desktop {
                 let (observed, total) = count.map_or((0, 0), |c| (c.observed, c.total));
                 let down = self.data.errors.contains_key(&dest.key);
                 let catalogued = self.data.catalogs.contains_key(&dest.key);
-                let (label, color, dot) = if down {
-                    (
-                        format!("{} unreachable", dest.label),
-                        crate::console_style::ERROR,
-                        crate::console_style::ERROR,
-                    )
+                // A hollow glyph and a red name say the machine is unreachable.
+                let (label, color) = if down {
+                    (dest.label.clone(), crate::console_style::ERROR)
                 } else if !catalogued {
-                    (
-                        format!("{} …", dest.label),
-                        egui::Color32::GRAY,
-                        egui::Color32::GRAY,
-                    )
+                    (format!("{} …", dest.label), egui::Color32::GRAY)
                 } else if observed != total {
                     (
                         format!("{} {observed}/{total}", dest.label),
                         crate::console_style::WARN,
-                        crate::console_style::WARN,
                     )
                 } else {
-                    (
-                        dest.label.clone(),
-                        ui.visuals().text_color(),
-                        crate::console_style::OK,
-                    )
+                    (dest.label.clone(), ui.visuals().text_color())
                 };
                 let needed = label.chars().count() as f32 * 6.6 + 22.;
                 if ui.available_width() < needed {
@@ -845,7 +833,11 @@ impl Desktop {
                     );
                     break;
                 }
-                crate::console_style::dot(ui, dot);
+                crate::marks::Identity::Machine {
+                    key: &dest.key,
+                    reachable: !down,
+                }
+                .show(ui, 12., crate::console_style::CANVAS);
                 ui.label(RichText::new(label).monospace().size(10.5).color(color))
                     .on_hover_text(if down {
                         "Machine unreachable"
@@ -1044,37 +1036,28 @@ impl Desktop {
                     "{}",
                     slot.home.column + 1 + slot.home.row * columns
                 ));
-                let (name, run) = pane_heading(&self.data, &slot.pane, title.text());
-                let width = (ui.available_width() - 75.).max(0.);
-                let heading = ui
-                    .allocate_ui_with_layout(
-                        egui::vec2(width, 20.),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            let run_width = run
-                                .as_ref()
-                                .map_or(0., |run| run.chars().count() as f32 * 6.6 + 12.);
-                            let response = ui
-                                .allocate_ui_with_layout(
-                                    egui::vec2((width - run_width).max(20.), 20.),
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(name).monospace().size(10.5),
-                                            )
-                                            .truncate()
-                                            .sense(egui::Sense::click()),
-                                        )
-                                    },
-                                )
-                                .inner;
-                            if let Some(run) = run {
-                                ui.label(RichText::new(run).monospace().size(10.5).weak());
-                            }
-                            response
-                        },
-                    );
+                if let Some(identity) = pane_identity(&self.data, &slot.pane) {
+                    identity.show(ui, 12., crate::console_style::PANEL);
+                }
+                // The state dot, runtime (and for threads the ··· menu) sit at
+                // the right end of the title bar; the title takes the rest.
+                let status = match &slot.pane {
+                    Pane::Thread(_) => 110.,
+                    Pane::Chat(_) | Pane::Activity(_) => 80.,
+                    _ => 0.,
+                };
+                let width = (ui.available_width() - 75. - status).max(0.);
+                let heading = ui.allocate_ui_with_layout(
+                    egui::vec2(width, 20.),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(title.text()).strong())
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                        )
+                    },
+                );
                 // The heading's full width focuses the pane, not only its glyphs.
                 if heading.inner.clicked()
                     || heading.response.interact(egui::Sense::click()).clicked()
@@ -1147,6 +1130,15 @@ impl Desktop {
                             }
                         }
                     });
+                    match &slot.pane {
+                        Pane::Thread(key) => {
+                            crate::thread_view::title_status(ui, &mut self.data, key, actions);
+                        }
+                        Pane::Chat(key) | Pane::Activity(key) => {
+                            crate::correspondence::title_status(ui, &self.data, key);
+                        }
+                        _ => {}
+                    }
                 });
             });
             if close {
@@ -1648,6 +1640,25 @@ fn describe_plan(
     changes.join("; ")
 }
 
+/// The mark that leads a pane's title: a thread shows the machine it lives on,
+/// an agent its own sigil, which follows it from machine to machine.
+pub fn pane_identity<'a>(data: &'a crate::Data, pane: &'a Pane) -> Option<crate::marks::Identity<'a>> {
+    match pane {
+        Pane::Thread(key) => Some(crate::marks::Identity::Machine {
+            key: &key.peer,
+            reachable: !data.errors.contains_key(&key.peer),
+        }),
+        Pane::Chat(key) | Pane::Activity(key) => Some(crate::marks::Identity::Agent {
+            resident: &key.id,
+            definition: data
+                .agents
+                .resident(key)
+                .and_then(|resident| resident["definition"]["id"].as_str()),
+        }),
+        _ => None,
+    }
+}
+
 /// `THIS MACHINE · LOCAL DEV ENVIRONMENT` plus `run 42` / `act 14`.
 pub fn pane_heading(data: &crate::Data, pane: &Pane, title: &str) -> (String, Option<String>) {
     match pane {
@@ -1886,7 +1897,7 @@ mod tests {
             assert_eq!(visible_text("Parked (1)"), shown == 3);
             for (index, name) in names.iter().enumerate() {
                 assert_eq!(
-                    visible_text(&format!("MACHINE · {}", name.to_uppercase())),
+                    visible_text(name),
                     index < shown
                 );
             }

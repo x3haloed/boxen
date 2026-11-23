@@ -35,8 +35,8 @@ fn columns(ui: &mut egui::Ui) -> Columns {
         rect
     };
     Columns {
-        name: cell(name),
-        mark: cell(MARK),
+        mark: cell(MARK + 4.),
+        name: cell(name - 4.),
         state: cell(STATE),
         last: cell(LAST),
         age: cell(AGE),
@@ -83,6 +83,8 @@ pub struct Row<'a> {
     pub selected: bool,
     pub muted: bool,
     pub context: Option<(&'a ThreadKey, &'a [Value])>,
+    /// A thread's machine glyph or an agent's sigil, in place of a host label.
+    pub identity: Option<crate::marks::Identity<'a>>,
 }
 
 impl Row<'_> {
@@ -90,13 +92,13 @@ impl Row<'_> {
         let c = columns(ui);
         if self.selected {
             ui.painter()
-                .rect_filled(c.name.union(c.age), 0., ui.visuals().selection.bg_fill);
+                .rect_filled(c.mark.union(c.age), 0., ui.visuals().selection.bg_fill);
         }
         if let Some((key, _)) = self.context
             && on_grid(data, key)
         {
             let tick = egui::Rect::from_min_size(
-                c.name.left_top() - egui::vec2(4., -2.),
+                c.mark.left_top() - egui::vec2(4., -2.),
                 egui::vec2(2., HEIGHT - 4.),
             );
             ui.painter()
@@ -109,7 +111,7 @@ impl Row<'_> {
         });
         // The whole row, not only the name's glyphs, is the click target.
         let response = ui.interact(
-            c.name.union(c.age),
+            c.mark.union(c.age),
             ui.next_auto_id().with(("watchlist-row", self.title)),
             egui::Sense::click(),
         );
@@ -123,10 +125,17 @@ impl Row<'_> {
                 .halign(egui::Align::Min)
                 .selectable(false),
         );
-        if let Some((key, runs)) = self.context {
-            let mut mark =
-                ui.new_child(egui::UiBuilder::new().max_rect(c.mark.shrink2(egui::vec2(1., 4.))));
-            conversation::context_mark(&mut mark, data, key, runs);
+        if let Some(identity) = self.identity {
+            let mark = egui::Rect::from_center_size(
+                c.mark.left_center() + egui::vec2(5., 0.),
+                egui::vec2(10., 10.),
+            );
+            let background = if self.selected {
+                ui.visuals().selection.bg_fill
+            } else {
+                crate::console_style::PANEL
+            };
+            identity.paint(ui.painter(), mark, background);
         }
         label(ui, c.state, self.state, self.color).on_hover_text(self.state);
         let weak = ui.visuals().weak_text_color();
@@ -392,17 +401,14 @@ pub fn inspector(ui: &mut egui::Ui, data: &Data, key: &ThreadKey, actions: &mut 
             }),
         );
     });
-    ui.columns(2, |columns| {
-        let (reading, source) = conversation::context_summary(data, key, runs);
-        field(&mut columns[0], "CONTEXT", &reading, source.as_deref());
-        if let Some(usage) = transcript.and_then(|transcript| transcript.exchange_usage) {
-            let summary = usage.label();
-            let source = usage.source();
-            field(&mut columns[1], "LAST EXCHANGE", &summary, Some(&source));
-        } else {
-            field(&mut columns[1], "LAST EXCHANGE", "Unknown", None);
-        }
-    });
+    // Context fullness is not shown: compaction keeps it from being the user's concern.
+    if let Some(usage) = transcript.and_then(|transcript| transcript.exchange_usage) {
+        let summary = usage.label();
+        let source = usage.source();
+        field(ui, "LAST EXCHANGE", &summary, Some(&source));
+    } else {
+        field(ui, "LAST EXCHANGE", "Unknown", None);
+    }
     if let Some(cwd) = transcript
         .and_then(|transcript| transcript.execution.as_ref())
         .and_then(|execution| execution["cwd"].as_str())
@@ -504,6 +510,7 @@ mod tests {
                         selected: false,
                         muted: false,
                         context: None,
+                        identity: None,
                     }
                     .show(ui, &data);
                     center = response.rect.center();

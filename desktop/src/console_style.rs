@@ -107,9 +107,10 @@ pub fn install(ctx: &egui::Context) {
     });
 }
 
-pub fn dot(ui: &mut egui::Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(9., 14.), egui::Sense::hover());
+pub fn dot(ui: &mut egui::Ui, color: Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(9., 14.), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 2.7, color);
+    response
 }
 
 pub fn drag_grip(ui: &mut egui::Ui) {

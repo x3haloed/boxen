@@ -805,6 +805,111 @@ fn thread_status(
     }
 }
 
+/// The thread's state dot, runtime and `···` menu, drawn right to left at
+/// the end of its pane's title bar. The state word is the dot's hover text.
+pub fn title_status(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut Vec<Action>) {
+    let dest = view::destination(data, &key.peer);
+    let runs = find_thread(data, key)
+        .map(|t| t.runs.clone())
+        .unwrap_or_default();
+    let last = runs.last();
+    let running = active(last).map(str::to_owned);
+    let native_ended = running.is_some() && last.is_some_and(prompt_ended);
+    let accepts_followup = last.is_some_and(|run| run["native_prompt"] == "ready");
+    let moving = data.saved.moves.iter().any(|m| &m.key == key);
+    let pending = data
+        .saved
+        .pending
+        .iter()
+        .any(|p| p.destination.key == key.peer && p.spec["thread_id"] == key.id);
+    let settings_enabled = last.is_some()
+        && running.is_none()
+        && !pending
+        && !moving
+        && !data
+            .preparing_followups
+            .values()
+            .any(|intent| &intent.key == key);
+    let backend = last
+        .and_then(|run| run["record"]["spec"]["backend"].as_str())
+        .unwrap_or("codex")
+        .to_owned();
+    let (status, status_color) = thread_status(data, key, last, native_ended, accepts_followup);
+    let execution = last.map(|last| {
+        let tag = run_key(
+            &key.peer,
+            last["record"]["spec"]["id"].as_str().unwrap_or(""),
+        );
+        data.transcripts
+            .get(&tag)
+            .and_then(|transcript| transcript.execution.clone())
+            .unwrap_or_else(|| last["record"]["execution"].clone())
+    });
+    let mut open_settings = false;
+    egui::containers::menu::MenuButton::from_button(
+        crate::console_style::icon_button(egui::RichText::new("···").size(13.)),
+    )
+    .ui(ui, |ui| {
+        ui.set_min_width(220.);
+        if ui
+            .add_enabled(settings_enabled, egui::Button::new("Run settings…"))
+            .clicked()
+        {
+            open_settings = true;
+            ui.close();
+        }
+        if running.is_some() && ui.button("Cancel run").clicked() {
+            actions.push(Action::Cancel(key.clone()));
+            ui.close();
+        }
+        if let Some(execution) = execution.as_ref().filter(|e| e.is_object()) {
+            ui.separator();
+            ui.label(
+                egui::RichText::new("EXECUTION")
+                    .monospace()
+                    .size(10.)
+                    .weak(),
+            );
+            ui.label(format!("Machine · {}", dest.label));
+            ui.label(format!(
+                "Account · {}",
+                execution["account"].as_str().unwrap_or("Unknown")
+            ));
+            ui.label(format!(
+                "Session · {}",
+                execution["session"].as_str().unwrap_or("Unknown")
+            ));
+            let privileges = match execution["elevated"].as_bool() {
+                Some(true) => "Elevated",
+                Some(false) => "Standard user",
+                None => "Unknown",
+            };
+            ui.label(format!("Privileges · {privileges}"));
+            ui.label(format!(
+                "Directory · {}",
+                execution["cwd"]
+                    .as_str()
+                    .or_else(|| last.and_then(|l| l["record"]["spec"]["cwd"].as_str()))
+                    .unwrap_or("Unknown")
+            ));
+            if let Some(available) = execution["desktop_available"].as_bool() {
+                ui.label(if available {
+                    "Desktop session available"
+                } else {
+                    "Desktop session unavailable"
+                });
+            }
+        }
+    })
+    .0
+    .on_hover_text("Run settings, cancel and execution context");
+    ui.label(egui::RichText::new(&backend).monospace().size(10.5).weak());
+    crate::console_style::dot(ui, status_color).on_hover_text(status);
+    if open_settings {
+        data.editing_thread_settings = Some((key.clone(), settings_for(data, key)));
+    }
+}
+
 pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut Vec<Action>) {
     // Threads are one timeline: steps collapse between messages.
     data.saved.activity_views.remove(key);
@@ -815,8 +920,6 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         .unwrap_or_default();
     let last = runs.last();
     let running = active(last).map(str::to_owned);
-    let native_ended = running.is_some() && last.is_some_and(prompt_ended);
-    let accepts_followup = last.is_some_and(|run| run["native_prompt"] == "ready");
     let moving = data.saved.moves.iter().any(|m| &m.key == key);
     let pending = data
         .saved
@@ -845,122 +948,12 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         .find(|(k, _)| k == key)
         .map(|(_, f)| std::mem::take(f))
         .unwrap_or_default();
-    let settings_enabled = last.is_some()
-        && running.is_none()
-        && pending.is_none()
-        && !moving
-        && !data
-            .preparing_followups
-            .values()
-            .any(|intent| &intent.key == key);
     let backend = last
         .and_then(|run| run["record"]["spec"]["backend"].as_str())
         .unwrap_or("codex")
         .to_owned();
-    let (status, status_color) = thread_status(data, key, last, native_ended, accepts_followup);
     let live_id = running.as_deref().unwrap_or("");
     let live_tag = run_key(&key.peer, live_id);
-    let execution = last.map(|last| {
-        let tag = run_key(
-            &key.peer,
-            last["record"]["spec"]["id"].as_str().unwrap_or(""),
-        );
-        data.transcripts
-            .get(&tag)
-            .and_then(|transcript| transcript.execution.clone())
-            .unwrap_or_else(|| last["record"]["execution"].clone())
-    });
-    let mut open_settings = false;
-    ui.horizontal(|ui| {
-        crate::console_style::dot(ui, status_color);
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(&status)
-                    .monospace()
-                    .size(10.5)
-                    .color(status_color),
-            )
-            .truncate(),
-        );
-        if let Some(created) = running
-            .is_some()
-            .then(|| last.and_then(|run| run["record"]["created_at"].as_u64()))
-            .flatten()
-        {
-            ui.label(
-                egui::RichText::new(format!("· {}", crate::pulse::age(created)))
-                    .monospace()
-                    .size(10.5)
-                    .weak(),
-            );
-        }
-        if last.is_some() {
-            view::context_label(ui, data, key, &runs);
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            egui::containers::menu::MenuButton::from_button(
-                crate::console_style::icon_button(egui::RichText::new("···").size(13.)),
-            )
-            .ui(ui, |ui| {
-                ui.set_min_width(220.);
-                if ui
-                    .add_enabled(settings_enabled, egui::Button::new("Run settings…"))
-                    .clicked()
-                {
-                    open_settings = true;
-                    ui.close();
-                }
-                if running.is_some() && ui.button("Cancel run").clicked() {
-                    actions.push(Action::Cancel(key.clone()));
-                    ui.close();
-                }
-                if let Some(execution) = execution.as_ref().filter(|e| e.is_object()) {
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new("EXECUTION")
-                            .monospace()
-                            .size(10.)
-                            .weak(),
-                    );
-                    ui.label(format!("Machine · {}", dest.label));
-                    ui.label(format!(
-                        "Account · {}",
-                        execution["account"].as_str().unwrap_or("Unknown")
-                    ));
-                    ui.label(format!(
-                        "Session · {}",
-                        execution["session"].as_str().unwrap_or("Unknown")
-                    ));
-                    let privileges = match execution["elevated"].as_bool() {
-                        Some(true) => "Elevated",
-                        Some(false) => "Standard user",
-                        None => "Unknown",
-                    };
-                    ui.label(format!("Privileges · {privileges}"));
-                    ui.label(format!(
-                        "Directory · {}",
-                        execution["cwd"]
-                            .as_str()
-                            .or_else(|| last.and_then(|l| l["record"]["spec"]["cwd"].as_str()))
-                            .unwrap_or("Unknown")
-                    ));
-                    if let Some(available) = execution["desktop_available"].as_bool() {
-                        ui.label(if available {
-                            "Desktop session available"
-                        } else {
-                            "Desktop session unavailable"
-                        });
-                    }
-                }
-            })
-            .0
-            .on_hover_text("Run settings, cancel and execution context");
-        });
-    });
-    ui.separator();
-    if open_settings {
-        data.editing_thread_settings = Some((key.clone(), settings_for(data, key)));
-    }
     next_run_settings(ui, data, key, false, &backend, actions);
     if let Some(error) = data.watches.get(&live_tag).and_then(|w| w.error.as_ref()) {
         ui.label(format!("Reconnecting to activity · {error}"));
@@ -1988,7 +1981,8 @@ mod tests {
             assert!(visible_text(&output, "Running").is_none());
             assert!(visible_text(&output, "Send update").is_none());
             assert!(visible_text(&output, hint).is_some());
-            assert!(visible_text(&output, "· antigravity · ctx unknown").is_some());
+            // Context fullness is no longer shown; the runtime sits in the pane's title bar.
+            assert!(visible_text(&output, "ctx unknown").is_none());
             let send = visible_text(&output, hint).expect("ordinary send control");
             let (_, actions) = click(&mut frame, send);
             assert!(

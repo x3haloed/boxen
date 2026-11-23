@@ -471,6 +471,7 @@ pub fn watchlist(
                     selected: open,
                     muted: offline,
                     context: None,
+                    identity: Some(crate::marks::Identity::Family { definition: id }),
                 }
                 .show(ui, data)
                 .on_hover_text(format!(
@@ -552,6 +553,10 @@ fn watch_resident(
                 selected: data.selected_thread.as_ref() == Some(&key),
                 muted: offline,
                 context: Some((&key, runs)),
+                identity: Some(crate::marks::Identity::Agent {
+                    resident: id,
+                    definition: resident["definition"]["id"].as_str(),
+                }),
             }
             .show(ui, data)
         })

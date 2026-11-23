@@ -174,58 +174,6 @@ pub enum ContextMeasure {
     Antigravity { tokens: u64, window: u64 },
     Selection { selected: u64, available: u64 },
 }
-impl ContextMeasure {
-    pub fn label(self) -> String {
-        match self {
-            Self::Codex { tokens, window } => {
-                format!("ctx {}%", context_percent(tokens, window))
-            }
-            Self::Claude { input_tokens } => format!("{} in, last turn", token_amount(input_tokens)),
-            Self::Antigravity { tokens, window } => {
-                format!("{} of {} used", token_amount(tokens), token_amount(window))
-            }
-            Self::Selection {
-                selected,
-                available,
-            } => {
-                format!(
-                    "{:.0}/{:.0} KiB selectable",
-                    selected as f64 / 1024.0,
-                    available as f64 / 1024.0
-                )
-            }
-        }
-    }
-
-    pub fn past_warning_line(self) -> bool {
-        matches!(self, Self::Codex { tokens, window } if u128::from(tokens) * 100 >= u128::from(window) * 85)
-    }
-
-    pub fn detail(self) -> String {
-        match self {
-            Self::Codex { tokens, window } => {
-                format!(
-                    "{}% of window · {tokens} / {window} tokens",
-                    context_percent(tokens, window)
-                )
-            }
-            Self::Claude { input_tokens } => {
-                format!("{input_tokens} input tokens · last main-session exchange, including cached input")
-            }
-            Self::Antigravity { tokens, window } => {
-                format!("{tokens} / {window} session tokens")
-            }
-            Self::Selection { selected, available } => {
-                format!("{selected} / {available} selectable bytes after reservations")
-            }
-        }
-    }
-}
-
-fn context_percent(tokens: u64, window: u64) -> u128 {
-    u128::from(tokens) * 100 / u128::from(window)
-}
-
 pub fn token_amount(tokens: u64) -> String {
     for (scale, suffix) in [(1_000_000, "M"), (1_000, "k")] {
         if tokens >= scale {
@@ -244,16 +192,6 @@ pub enum ContextChange {
     Compaction,
     Projection,
     Shortage,
-}
-
-impl ContextChange {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Compaction => "compacted",
-            Self::Projection => "history projected",
-            Self::Shortage => "context shortage",
-        }
-    }
 }
 
 fn context_amounts(used: &Value, limit: &Value) -> Option<(u64, u64)> {
@@ -928,10 +866,12 @@ mod tests {
             }
         })).unwrap();
         assert_eq!(
-            transcript.context.unwrap().label(),
-            "74/160 KiB selectable"
+            transcript.context,
+            Some(ContextMeasure::Selection {
+                selected: 75776,
+                available: 163840
+            })
         );
-        assert!(!transcript.context.unwrap().past_warning_line());
         transcript.apply(&json!({
             "seq":4,"at":4000,"kind":"context_boundary","data":{
                 "selected":["one","two"],"masked":["one"],"source_count":3
@@ -962,7 +902,6 @@ mod tests {
         assert_eq!(transcript.rows[0].text, "Claude Code compacted · auto · 162000 tok before");
         apply(&mut transcript, 3, "backend_usage", json!({"backend":"claude","input_tokens":41000}));
         assert_eq!(transcript.context, Some(ContextMeasure::Claude { input_tokens: 41000 }));
-        assert_eq!(transcript.context.unwrap().label(), "41k in, last turn");
         assert_eq!(transcript.context_at, Some(3000));
         assert_eq!(transcript.context_change, Some((ContextChange::Compaction, 2000)));
         apply(&mut transcript, 4, "backend_thread", json!({"id":"replacement","backend":"claude"}));

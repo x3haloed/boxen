@@ -8,6 +8,7 @@ mod correspondence;
 mod field;
 mod grid;
 mod hold;
+mod marks;
 mod menu;
 mod model;
 mod model_catalogs;
@@ -1477,6 +1478,10 @@ fn thread_rows(
                 selected,
                 muted: state == "unseen",
                 context: Some((&thread.key, &thread.runs)),
+                identity: Some(crate::marks::Identity::Machine {
+                    key: &thread.key.peer,
+                    reachable: !data.errors.contains_key(&thread.key.peer),
+                }),
             }.show(ui, data)
         }).inner;
         if let Some(pin) = watchlist::opens(ui, &response) {

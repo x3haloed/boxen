@@ -1216,6 +1216,38 @@ fn operator_inbox(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: 
         });
 }
 
+/// A resident's state dot and runtime, drawn right to left at the end of
+/// its pane's title bar. The state word is the dot's hover text; the Mail
+/// and Activity tabs already say this is a resident.
+pub fn title_status(ui: &mut egui::Ui, data: &Data, key: &ThreadKey) {
+    let run = data.agents.history(key).and_then(|runs| runs.last());
+    let (state, color) = match run {
+        _ if data.mail.errors.contains_key(&key.peer) => {
+            ("unreachable", crate::console_style::ERROR)
+        }
+        Some(run) if run["status"] == "waiting" => {
+            ("waiting for input", crate::console_style::WARN)
+        }
+        Some(run) if !crate::model::terminal(run) => ("working", crate::console_style::ACCENT),
+        Some(run) if matches!(run["status"].as_str(), Some("failed" | "interrupted")) => (
+            run["status"].as_str().unwrap_or(""),
+            crate::console_style::ERROR,
+        ),
+        _ => ("idle", egui::Color32::GRAY),
+    };
+    let runtime = run
+        .and_then(|run| run["record"]["spec"]["backend"].as_str())
+        .or_else(|| {
+            data.agents
+                .resident(key)
+                .and_then(|resident| resident["backend"].as_str())
+        });
+    if let Some(runtime) = runtime {
+        ui.label(egui::RichText::new(runtime).monospace().size(10.5).weak());
+    }
+    crate::console_style::dot(ui, color).on_hover_text(state);
+}
+
 /// A read-only timeline over accepted correspondence, with an ordinary mailbox composer.
 pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut Vec<Action>) {
     use crate::{
@@ -1224,39 +1256,6 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
     };
     let local = view::local(data);
     let resident_name = agent_name(data, key);
-    ui.horizontal(|ui| {
-        let run = data.agents.history(key).and_then(|runs| runs.last());
-        let (state, color) = match run {
-            _ if data.mail.errors.contains_key(&key.peer) => {
-                ("unreachable", crate::console_style::ERROR)
-            }
-            Some(run) if run["status"] == "waiting" => {
-                ("waiting for input", crate::console_style::WARN)
-            }
-            Some(run) if !crate::model::terminal(run) => ("working", crate::console_style::ACCENT),
-            Some(run) if matches!(run["status"].as_str(), Some("failed" | "interrupted")) => (
-                run["status"].as_str().unwrap_or(""),
-                crate::console_style::ERROR,
-            ),
-            _ => ("idle", egui::Color32::GRAY),
-        };
-        crate::console_style::dot(ui, color);
-        ui.label(
-            egui::RichText::new(state)
-                .monospace()
-                .size(10.5)
-                .color(color),
-        );
-        ui.label(
-            egui::RichText::new("· resident")
-                .monospace()
-                .size(10.5)
-                .weak(),
-        );
-        if let Some(runs) = data.agents.history(key).filter(|runs| !runs.is_empty()) {
-            view::context_label(ui, data, key, runs);
-        }
-    });
     let scope = ui.make_persistent_id(("resident-mail-scope", key));
     let mut all = ui
         .data_mut(|memory| memory.get_temp::<bool>(scope))
@@ -1266,7 +1265,6 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
             return;
         }
         ui.add_space(10.);
-        ui.label(egui::RichText::new("scope").monospace().size(10.).weak());
         if ui
             .selectable_label(!all, if all { "○ With you" } else { "● With you" })
             .clicked()

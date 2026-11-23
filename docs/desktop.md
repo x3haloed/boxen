@@ -219,22 +219,21 @@ reports that the same session can take a fresh prompt. Late command updates
 remain visible on the run that started the command.
 The GUI does not store credentials, copy model keys, or depend on browser storage.
 
-Thread panes project runtime context measurements from retained events. Codex
-uses its last exchange token count and reported model window. The 85% warning
-line is a Boxen estimate. Claude Code shows the latest main-session input token
-count, including cached input. Antigravity uses its reported session token
-counts. OpenRouter shows the selected bytes and the selectable budget after
-reservations. Missing samples and incomplete replay show an unknown gauge.
-The context popover shows the exact reading, source time and validity. After a
-machine move the previous host's measurement stays in history while the gauge
-waits for a reading from the new host.
+Context fullness is not shown: compaction keeps it from being the user's
+concern. Reported compactions, OpenRouter projections and run-stopping
+shortages still appear in the retained timeline.
 
-A reported compaction clears the prior measurement and appears in the timeline.
-Claude Code can report a trigger and before-token count; a later usage sample
-has its own timestamp. OpenRouter records actual projections and run-stopping
-shortages. The pane and Watchlist surface recent consequences for 30 minutes.
-The Watchlist prioritizes a shortage over the warning line and the warning line
-over a recent compaction. Routine projections remain in the retained timeline.
+Identity marks replace host labels. Each machine has an angular glyph derived
+from its public key, drawn solid when reachable and hollow when not; the
+toolbar pairs each glyph with the machine's name as the legend. Each resident
+has a round sigil derived from its own resident ID, so it keeps the same mark
+when it moves between machines; instances of one definition share the
+definition's hue and differ by mark, and a definition row shows a ring in that
+hue. Thread panes and Watchlist rows lead with their machine's glyph, resident
+panes and rows with the resident's sigil. A pane's title bar holds the mark,
+the conversation title, the state dot (its hover names the state), the runtime
+and, for threads, the **···** menu; there is no second status line and no run
+or activation counter.
 
 The **Live pulse** pane receives a bounded arrival-order projection of live
 run observations. Events read while catching up to a sampled journal frontier
