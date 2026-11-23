@@ -23,9 +23,9 @@ On macOS this produces `work/Boxen.app`, a locally ad-hoc-signed application:
 open work/Boxen.app
 ```
 
-The bundle's icon comes from `desktop/assets/app-icon/`. See its
-[README](../desktop/assets/app-icon/README.md) for which files are source and how
-to regenerate the rest.
+The bundle includes the precompiled Liquid Glass icon for macOS 26 and later
+and a classic `.icns` fallback. See the [app icon README](../desktop/assets/app-icon/README.md)
+for the source files and regeneration commands.
 
 On other platforms the script builds `desktop/target/release/boxen-desktop`
 (`.exe` on Windows). It requires the platform's native graphics/windowing build
