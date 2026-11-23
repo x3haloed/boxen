@@ -23,6 +23,10 @@ On macOS this produces `work/Boxen.app`, a locally ad-hoc-signed application:
 open work/Boxen.app
 ```
 
+The bundle's icon comes from `desktop/assets/app-icon/`. See its
+[README](../desktop/assets/app-icon/README.md) for which files are source and how
+to regenerate the rest.
+
 On other platforms the script builds `desktop/target/release/boxen-desktop`
 (`.exe` on Windows). It requires the platform's native graphics/windowing build
 dependencies. Native macOS ARM64 and Windows x86_64 desktop execution have been

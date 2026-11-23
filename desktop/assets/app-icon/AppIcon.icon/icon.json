@@ -1,0 +1,57 @@
+{
+  "fill" : {
+    "automatic-gradient" : "srgb:0.13725,0.16471,0.30588,1.00000"
+  },
+  "fill-specializations" : [
+    {
+      "appearance" : "dark",
+      "value" : {
+        "solid" : "srgb:0.05490,0.06275,0.14902,1.00000"
+      }
+    }
+  ],
+  "groups" : [
+    {
+      "name" : "Seam",
+      "layers" : [
+        {
+          "name" : "Seam",
+          "image-name" : "2-seam.png",
+          "glass" : true
+        }
+      ],
+      "lighting" : "individual",
+      "specular" : true,
+      "shadow" : {
+        "kind" : "layerColor",
+        "opacity" : 0.6
+      },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    },
+    {
+      "name" : "Casket",
+      "layers" : [
+        {
+          "name" : "Casket",
+          "image-name" : "1-casket.png",
+          "glass" : false
+        }
+      ],
+      "specular" : false,
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : "shared"
+  }
+}
