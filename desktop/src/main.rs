@@ -1989,11 +1989,16 @@ fn main() -> eframe::Result {
                 address: v["remote_address"].as_str()?.into(),
             })
         });
+    let viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1600., 940.])
+        .with_min_inner_size([760., 720.])
+        .with_app_id("dev.boxen.desktop");
+    // An empty icon suppresses eframe's default and lets macOS use the bundle's layered icon.
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_icon(egui::IconData::default());
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1600., 940.])
-            .with_min_inner_size([760., 720.])
-            .with_app_id("dev.boxen.desktop"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
