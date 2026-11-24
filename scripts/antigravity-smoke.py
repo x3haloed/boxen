@@ -254,6 +254,14 @@ with tempfile.TemporaryDirectory(prefix='boxen-acp-smoke-') as temp:
         assert api({'op': 'runtime_info', 'run_id': model_change['id']})['observed']['session']['model'] == 'fixture-model'
         print('PASS an offered Antigravity model change on a resumed idle thread')
 
+        async_wake = start('ASYNC_COMMAND_WAKE', require='late_activity')
+        wake_events, wake_done = collect(async_wake['id'])
+        assert wake_done['status'] == 'completed', wake_done
+        assert not any(e['kind'] == 'antigravity_prompt_state' and e['data'].get('state') == 'ready' for e in wake_events)
+        assert any(e['kind'] == 'tool_approval_decision' and e['data'].get('request_id') == 'wake-perm' and e['data'].get('action') == 'accept' for e in wake_events)
+        assert 'Fixed after async wake.' in api({'op': 'thread_result', 'id': async_wake['id']})['response']
+        print('PASS non-daemon async run_command stays active for reactive wake and auto-approves follow-up tools')
+
         origin = start('BACKGROUND_COMMAND')
         opened, ready = collect(origin['id'], kind='antigravity_prompt_state')
         if ready.get('native_prompt') != 'ready':

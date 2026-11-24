@@ -99,10 +99,22 @@ for line in sys.stdin:
         chunk('Fixture reasoning.', thought=True)
         if prompt == 'BACKGROUND_COMMAND':
             update('tool_call', toolCallId='background-command', name='run_command',
-                   kind='execute', title='Synthetic background command', status='in_progress',
-                   rawInput={'WaitMsBeforeAsync': 500})
-            chunk('Background command started.')
+                   kind='execute', title='Synthetic background daemon', status='in_progress',
+                   rawInput={'WaitMsBeforeAsync': 500, 'IsDaemon': True})
+            chunk('Background daemon started.')
             send(id=ident, result={'stopReason': 'end_turn'})
+            continue
+        if prompt == 'ASYNC_COMMAND_WAKE':
+            update('tool_call', toolCallId='async-build', name='run_command',
+                   kind='execute', title='Synthetic async build', status='in_progress',
+                   rawInput={'WaitMsBeforeAsync': 10000})
+            chunk('Waiting for build.')
+            send(id=ident, result={'stopReason': 'end_turn'})
+            update('tool_call_update', toolCallId='async-build', status='completed',
+                   rawOutput={'combinedOutput': 'build failed once', 'exitCode': 1})
+            send(id='wake-perm', method='session/request_permission', params={
+                'sessionId': session, 'toolCall': {'toolCallId': 'wake-edit', 'title': 'Edit file after wake'},
+                'options': [{'optionId': 'allow-once', 'name': 'Allow', 'kind': 'allow_once'}]})
             continue
         if prompt == 'FOLLOW_BACKGROUND':
             tool('boxen_work', {'action': 'list'}, 16)
@@ -202,6 +214,12 @@ for line in sys.stdin:
         chunk('Unsupported form declined.')
         send(id=prompt_id, result={'stopReason': 'end_turn'})
         prompt_id = None
+    elif method is None and ident == 'wake-perm':
+        assert message['result'] == {'outcome': {'outcome': 'selected', 'optionId': 'allow-once'}}
+        update('tool_call', toolCallId='wake-edit', kind='edit', title='Edit file after wake', status='in_progress')
+        update('tool_call_update', toolCallId='wake-edit', status='completed')
+        chunk(' Fixed after async wake.')
+        update('usage_update', used=25, size=100)
     elif method is None and ident == 'wake-question':
         assert message['result'] == {'outcome': {'outcome': 'selected', 'optionId': 'second'}}
         update('tool_call_update', toolCallId='timer', status='completed')

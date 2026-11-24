@@ -517,7 +517,7 @@ impl Turn {
                     self.tools.start(id)?;
                     if kind == "tool_call"
                         && update["name"] == "run_command"
-                        && update["rawInput"]["WaitMsBeforeAsync"].as_u64().is_some()
+                        && update["rawInput"]["IsDaemon"].as_bool() == Some(true)
                     {
                         self.passive.insert(id.into());
                     }

@@ -14,14 +14,17 @@ A completed native prompt can leave tools or a scheduled wake outstanding. In th
 
 An anonymous conversation can accept a fresh prompt on the same ACP connection
 when Antigravity has returned `end_turn`, there are no outstanding questions or
-steering requests, and the only open calls are native `run_command` calls with
-an asynchronous wait budget. A new run owns the new prompt and the bridge calls
-it makes. The old run still owns its command until a terminal update or an
-explicit interrupted outcome. The wait budget establishes the kind of native
-call Boxen can track independently. An accepted handoff requires its own receipt.
-Work that can wake a model, including scheduled input and unresolved requests,
-continues to gate follow-ups. The destination, execution account, working
-directory, model and reasoning effort stay pinned while sharing the connection.
+steering requests, and the only open calls are native `run_command` daemon calls
+(`IsDaemon: true`). Normal asynchronous `run_command` calls without
+`IsDaemon: true` are expected to finish and wake the model, so they keep the
+originating run active (with permission auto-approval and MCP tools bound)
+through the reactive wake. A new run owns the new prompt and the bridge calls
+it makes. The old run still owns its daemon command until a terminal update or
+an explicit interrupted outcome. An accepted handoff requires its own receipt.
+Work that can wake a model, including normal background commands, scheduled
+input, and unresolved requests, continues to gate follow-ups. The destination,
+execution account, working directory, model and reasoning effort stay pinned
+while sharing the connection.
 
 During an active native prompt, `steer` sends a new ACP prompt as live steering. Boxen advertises local ACP elicitation forms. A form arrives as an `input_requested` event with `request_id`, `kind: "form"`, and `requested_schema`. A `respond` result of `{"action":"accept","content":{"shape":"2"}}` submits the declared field and offered value. A result of `{"action":"decline"}` or `{"action":"cancel"}` closes that form. Whole-run cancellation sends the native stop request and cancels pending forms. Unsupported form shapes are declined with a retained event. Boxen accepts bounded flat forms with primitive fields and choice lists. Forms are for non-sensitive information. [ACP elicitation specification](https://agentclientprotocol.com/protocol/v1/elicitation)
 
