@@ -474,6 +474,7 @@ struct Turn {
     prompt: Option<u64>,
     stop_reason: Option<String>,
     awaiting_wake: bool,
+    wake_answer_started: bool,
     cancel_sent: Option<Instant>,
     answer: String,
 }
@@ -501,6 +502,9 @@ impl Turn {
             "agent_message_chunk" | "agent_thought_chunk" => {
                 if self.prompt.is_none() {
                     self.awaiting_wake = true;
+                    if kind == "agent_message_chunk" {
+                        self.wake_answer_started = true;
+                    }
                 }
                 self.append_text(update, kind == "agent_thought_chunk")?;
             }
@@ -515,6 +519,7 @@ impl Turn {
                     self.passive.remove(id);
                 } else if kind == "tool_call" || status.is_some() {
                     self.tools.start(id)?;
+                    self.wake_answer_started = false;
                     if kind == "tool_call"
                         && update["name"] == "run_command"
                         && update["rawInput"]["IsDaemon"].as_bool() == Some(true)
@@ -546,8 +551,13 @@ impl Turn {
                 )?;
             }
             "usage_update" => {
-                if self.prompt.is_none() && self.tools.is_empty() && self.questions.is_empty() {
+                if self.prompt.is_none()
+                    && self.tools.is_empty()
+                    && self.questions.is_empty()
+                    && self.wake_answer_started
+                {
                     self.awaiting_wake = false;
+                    self.wake_answer_started = false;
                 }
                 self.run.append(
                     "backend_usage",
@@ -674,6 +684,7 @@ impl Turn {
                 kind,
             },
         );
+        self.wake_answer_started = false;
         self.run.diagnostic(
             Level::Info,
             "antigravity.input_requested",
@@ -729,6 +740,7 @@ impl Turn {
             self.prompt = None;
             self.stop_reason = Some(stop.to_owned());
             self.awaiting_wake = stop == "end_turn" && !self.tools.is_empty();
+            self.wake_answer_started = false;
             self.run.append("backend_prompt_ended",json!({"backend":"antigravity","reason":stop,"pending_tools":self.tools.len(),"pending_questions":self.questions.len()}))?;
         }
         Ok(())
@@ -1047,6 +1059,7 @@ fn begin_prompt(
         prompt: Some(prompt),
         stop_reason: None,
         awaiting_wake: false,
+        wake_answer_started: false,
         cancel_sent: None,
         answer: String::new(),
     }))

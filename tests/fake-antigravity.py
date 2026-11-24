@@ -112,6 +112,9 @@ for line in sys.stdin:
             send(id=ident, result={'stopReason': 'end_turn'})
             update('tool_call_update', toolCallId='async-build', status='completed',
                    rawOutput={'combinedOutput': 'build failed once', 'exitCode': 1})
+            # Real Antigravity emits thought -> usage_update before issuing each tool call.
+            chunk('Diagnosing build failure after wake.', thought=True)
+            update('usage_update', used=21, size=100)
             send(id='wake-perm', method='session/request_permission', params={
                 'sessionId': session, 'toolCall': {'toolCallId': 'wake-edit', 'title': 'Edit file after wake'},
                 'options': [{'optionId': 'allow-once', 'name': 'Allow', 'kind': 'allow_once'}]})
