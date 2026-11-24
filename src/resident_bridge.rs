@@ -267,7 +267,7 @@ fn serve(
         ),
         "ping" => Ok(json!({})),
         "tools/list" => {
-            let mut tools = crate::work_tools::tools();
+            let mut tools = crate::work_tools::tools_for(resident.is_some());
             if resident.is_some() {
                 tools.extend(agent_tools::resident_tools());
                 tools.extend(agent_tools::observation_tools());

@@ -863,7 +863,47 @@ fn files(jobs: &Arc<Jobs>, run: &Arc<Run>, args: &Value) -> Result<Value> {
 }
 
 pub fn is_tool(name: &str) -> bool {
-    matches!(name, "boxen_machines" | "boxen_work" | "boxen_thread_files")
+    matches!(
+        name,
+        "boxen_machines" | "boxen_work" | "boxen_thread_files" | "boxen_threads"
+    )
+}
+
+fn threads(jobs: &Arc<Jobs>, run: &Arc<Run>, args: &Value) -> Result<Value> {
+    let record = run.snapshot().record;
+    if record.resident.is_some()
+        || record.spec.resident_id.is_some()
+        || crate::thread_history::is_resident_thread(jobs, &record.spec.thread_id)
+    {
+        return Err(
+            "boxen_threads is scoped to non-resident threads; resident conversations are excluded"
+                .into(),
+        );
+    }
+    let machine = if let Some(selector) = args["machine"].as_str() {
+        resolve(jobs, Some(selector))?
+    } else {
+        resolve(jobs, None)?
+    };
+    let mut forwarded = args.clone();
+    if let Some(obj) = forwarded.as_object_mut() {
+        obj.remove("machine");
+        if machine.local && matches!(args["action"].as_str(), Some("list" | "search")) {
+            obj.insert(
+                "exclude_thread_id".into(),
+                json!(record.spec.thread_id),
+            );
+        }
+    }
+    let mut result = machine.request(
+        jobs,
+        &run.owner(),
+        json!({"op":"thread_history","args":forwarded}),
+    )?;
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("machine".into(), json!(machine.key));
+    }
+    Ok(result)
 }
 
 pub fn call(
@@ -879,6 +919,7 @@ pub fn call(
         match name {
             "boxen_machines" => inventory(jobs, &run.owner(), &args),
             "boxen_thread_files" => files(jobs, run, &args),
+            "boxen_threads" => threads(jobs, run, &args),
             "boxen_work" => {
                 let machine = work_machine(jobs, run, &args)?;
                 match args["action"].as_str().unwrap_or("") {
@@ -899,12 +940,40 @@ pub fn call(
     result
 }
 
-pub fn tools() -> Vec<Value> {
-    vec![
+pub fn tools_for(resident: bool) -> Vec<Value> {
+    let mut list = vec![
         json!({"type":"function","name":"boxen_machines","description":"This tool discovers the current machine and admitted network members, with observed reachability, runtime/backends and execution context. machine accepts an exact name, full id or unambiguous id prefix; omission reads eight members at a time. next_offset retrieves later members. A failed probe reports unavailable without declaring a machine stopped. Runtime declarations do not establish toolchain, application permissions or model credentials.","inputSchema":{"type":"object","properties":{"machine":{"type":"string"},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}}),
         json!({"type":"function","name":"boxen_work","description":"This tool requests and follows ordinary work across admitted machines. list returns a bounded page of existing anonymous requests, optionally filtered by thread_id; next_cursor retrieves the following page. request starts an anonymous conversation or continues thread_id. handoff accepts the same arguments and records this originating run and tool call at the destination. Handoff acceptance means that the destination owns the new request; later execution still has its own outcome. after_request_id identifies an exact previous request instead of looking up a thread head; a stale predecessor is rejected by the destination. machine accepts a discovered name/id; omission follows a known request or thread handle in this conversation, otherwise local; new remote work gets an automatic destination workspace. request_id can be omitted or a short stable label; labels remain stable within this coordinating conversation, including reads and controls. Returned ids identify exact retries. Attachments are local file paths retained before transfer. required_capabilities restricts acceptance to a backend that offers all named capabilities. read returns bounded retained progress, next_after, current status and a final response; after replays from that sequence, wait_ms waits up to 20000 for new activity. Large projections are labeled truncated; event_seq retrieves one original event as paged JSON text with offset/next_offset. A long final response has next_response_offset for a response_offset read. steer adds input to active work, cancel requests interruption, and respond answers a retained backend request. Controls can have unknown outcomes and are not automatically repeated. A host/network failure does not establish workload failure. Execution continues independently of this observer. Work requests are distinct from resident mailbox correspondence.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["list","request","handoff","read","steer","cancel","respond"]},"machine":{"type":"string"},"request_id":{"type":"string"},"thread_id":{"type":"string"},"after_request_id":{"type":"string"},"cursor":{"type":"object"},"prompt":{"type":"string"},"backend":{"type":"string","enum":crate::runtime::Backend::ALL.map(crate::runtime::Backend::id)},"required_capabilities":{"type":"array","items":{"type":"string","enum":crate::runtime::Capability::ALL}},"cwd":{"type":"string"},"model":{"type":"string"},"attachments":{"type":"array","items":{"type":"string"},"maxItems":8},"after":{"type":"integer","minimum":0},"event_seq":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"response_offset":{"type":"integer","minimum":0},"wait_ms":{"type":"integer","minimum":0,"maximum":20000},"backend_request_id":{},"result":{}},"required":["action"],"additionalProperties":false}}),
         crate::jobs::thread_workspace::tool(),
-    ]
+    ];
+    if !resident {
+        list.push(json!({
+            "type": "function",
+            "name": "boxen_threads",
+            "description": "This read-only tool discovers and reads prior non-resident Boxen threads without modifying them or replaying prior effects. Resident conversations are strictly excluded. list returns other non-resident threads newest-first with timestamps, human ages, run counts, latest statuses, and opening/latest previews (supports since_hours, until_hours, cwd, limit, offset). search ranks matching non-resident threads across prompts, assistant turns, and tool summaries using query terms and optional since_hours/until_hours/cwd filters, returning best-matching turn excerpts and each thread's latest preview. read returns a clean turn-oriented transcript for thread_id across all backends, preserving late turns, statuses, status details (including interrupted/uncertain outcomes), and compact tool summaries (set include_tool_output=true for fuller tool output, or start_turn/limit/order to page omitted middle turns). machine optionally selects an admitted peer; omission queries the local machine.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "search", "read"]},
+                    "machine": {"type": "string"},
+                    "query": {"type": "string"},
+                    "thread_id": {"type": "string"},
+                    "since_hours": {"type": "number", "minimum": 0},
+                    "until_hours": {"type": "number", "minimum": 0},
+                    "cwd": {"type": "string"},
+                    "start_turn": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "order": {"type": "string", "enum": ["asc", "desc"]},
+                    "include_tool_output": {"type": "boolean"},
+                    "max_bytes": {"type": "integer", "minimum": 4096, "maximum": 24576}
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }
+        }));
+    }
+    list
 }
 
 #[cfg(test)]

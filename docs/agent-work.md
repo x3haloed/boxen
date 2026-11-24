@@ -2,8 +2,10 @@
 
 `boxen_machines`, `boxen_work`, and `boxen_thread_files` expose the existing
 machine network, anonymous conversations, retained run events, controls and
-attachment transport. They are available to built-in inference workloads and
-through a run-scoped MCP connection to managed Codex and Antigravity workloads. These tools do
+attachment transport. Non-resident workloads additionally receive read-only
+`boxen_threads` for discovering and reading earlier non-resident threads across
+admitted machines; see [cross-thread history](thread-history.md). They are available to built-in inference workloads and
+through a run-scoped MCP connection to managed Codex, Claude and Antigravity workloads. These tools do
 not create residents, send mailbox correspondence, distribute credentials or
 move a native conversation to another host.
 

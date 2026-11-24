@@ -44,6 +44,7 @@ mod runtime;
 mod runtime_policy;
 mod scheduler;
 mod state;
+mod thread_history;
 mod tool_approvals;
 mod web;
 mod work_tools;

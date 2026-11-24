@@ -625,6 +625,7 @@ pub fn execute(
     let mut context = record.trigger_context()
         + &record.observation_context()
         + &run.runtime_context()?
+        + &jobs.continuity_context(&record)
         + &jobs.attachments.context(&spec.attachments);
     if let Some(recovery) = &record.recovery {
         run.append("recovery_notice", recovery.clone())?;

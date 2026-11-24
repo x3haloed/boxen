@@ -56,7 +56,7 @@ def bridge_rejection_checks():
     probe('POST','/mcp',False,b'x'*64,delayed=True,stalled=True)
 
 def invoke(tool, arguments, number, dynamic=False):
-    if not dynamic and (promoted_bridge or (work_bridge and tool in ('boxen_machines','boxen_work','boxen_thread_files'))):
+    if not dynamic and (promoted_bridge or (work_bridge and tool in ('boxen_machines','boxen_work','boxen_thread_files','boxen_threads'))):
         response=mcp_call('tools/call',{'name':tool,'arguments':arguments},ident=number)
         assert 'result' in response,response
         repeated=mcp_call('tools/call',{'name':tool,'arguments':arguments},ident=number)

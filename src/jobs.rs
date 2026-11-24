@@ -468,6 +468,11 @@ impl Record {
         if let Some(origin) = &self.scheduled {
             text.push_str(&origin.context());
         }
+        if self.resident.is_none() && self.spec.resident_id.is_none() {
+            text.push_str(
+                "\nPrior non-resident Boxen threads on this machine remain readable through the boxen_threads tool (list, search, read). When a message continues earlier work, refers to prior options, or shifts to another prior conversation, searching or listing recent non-resident threads supplies that history without modifying those threads or replaying prior effects. Self-contained requests do not depend on prior thread history. Resident conversations are excluded from boxen_threads.\n",
+            );
+        }
         text.push('\n');
         text
     }
@@ -1486,6 +1491,25 @@ impl Jobs {
         self.directory.parent()
     }
 
+    pub fn continuity_context(&self, record: &Record) -> String {
+        const SESSION_START_ORIENTATION_LIMIT: usize = 8;
+        if record.resident.is_some()
+            || record.spec.resident_id.is_some()
+            || crate::thread_history::is_resident_thread(self, &record.spec.thread_id)
+        {
+            return String::new();
+        }
+        if record.after.is_some() || record.spec.id != record.spec.thread_id {
+            return String::new();
+        }
+        crate::thread_history::orientation_summary(
+            self,
+            &record.spec.thread_id,
+            SESSION_START_ORIENTATION_LIMIT,
+        )
+        .unwrap_or_default()
+    }
+
     fn anonymous_thread_spec(&self, owner: &str, id: &str) -> Result<Spec> {
         valid_id(id)?;
         if self.residents.get(owner, id).is_ok() {
@@ -2240,7 +2264,7 @@ impl Jobs {
         info["checked_requests"] = json!({"start":"start_checked","resident_activate":"resident_activate_checked","completion_handoff":"start_until_handoff"});
         info["platform"] =
             json!({"os":crate::platform::host_os(),"architecture":std::env::consts::ARCH});
-        info["agent_work"] = json!({"tools":["boxen_machines","boxen_work","boxen_thread_files"],"transport":"existing_authenticated_peer_operations","native_registration":"per_run_mcp"});
+        info["agent_work"] = json!({"tools":["boxen_machines","boxen_work","boxen_thread_files"],"non_resident_tools":["boxen_threads"],"transport":"existing_authenticated_peer_operations","native_registration":"per_run_mcp"});
         info["execution"] = crate::execution::Execution::host_info(&execution);
         info
     }

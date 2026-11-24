@@ -239,6 +239,7 @@ pub fn operation(jobs: &Arc<Jobs>, actor: &str, request: &Value) -> Result<Value
                 );
             }
             "thread_workspace_offer" => return jobs.offer_workspace_file(request),
+            "thread_history" => return crate::thread_history::operation(jobs, actor, request),
             "resident_list" => {
                 return Ok(json!(
                     jobs.residents

@@ -623,7 +623,8 @@ pub fn execute(
     {
         trigger_context.push_str(&format!("\nRecovery incident: {recovery}\nPrevious tool effects may already have occurred. This new request does not replay those effects."));
     }
-    let execution_context = run.runtime_context()?;
+    let mut execution_context = run.runtime_context()?;
+    execution_context.push_str(&jobs.continuity_context(&record));
     let resident = record.resident;
     if promoted {
         trigger_context.push_str(&format!("\nResident attachment (Boxen-authored runtime context, separate from the message authors and the saved native instructions):\n{}",residents.instructions(resident.as_ref().unwrap())));

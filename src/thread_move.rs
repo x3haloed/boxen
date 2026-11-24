@@ -135,6 +135,9 @@ impl Jobs {
             .join(&m.thread)
             .join(format!("{:020}.json", m.generation))
     }
+    pub(crate) fn placement_summary(&self, thread: &str) -> Option<Value> {
+        self.placement(thread).ok().flatten().map(|p| p.summary())
+    }
     pub(super) fn placement(&self, thread: &str) -> Result<Option<Move>> {
         valid_id(thread)?;
         let dir = self.move_root().join("receipts").join(thread);

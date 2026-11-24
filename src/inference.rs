@@ -981,7 +981,8 @@ pub fn execute(
     let record = run.snapshot().record;
     let trigger_context = record.trigger_context();
     let observation_context = record.observation_context();
-    let execution_context = run.runtime_context()?;
+    let mut execution_context = run.runtime_context()?;
+    execution_context.push_str(&jobs.continuity_context(&record));
     let resident = record.resident;
     if let Some(recovery) = &record.recovery {
         run.append("recovery_notice", recovery.clone())?;
@@ -1042,7 +1043,7 @@ pub fn execute(
     ];
     tools.push(media::tool());
     tools.push(context::tool());
-    for tool in crate::work_tools::tools() {
+    for tool in crate::work_tools::tools_for(resident.is_some()) {
         tools.push(json!({"type":"function","function":{"name":tool["name"],"description":tool["description"],"parameters":tool["inputSchema"]}}));
     }
     for tool in agent_tools::observation_tools() {
