@@ -7,6 +7,13 @@ available across all four runtimes (`codex`, `claude`, `antigravity`, and
 `openrouter`) through the shared per-run MCP bridge and built-in runtime tool
 interface, backed by the authenticated `thread_history` operator operation.
 
+Model-facing cross-thread continuity is experimental and off by default. The
+desktop **New Thread** command starts an ordinary thread. Setting
+`BOXEN_EXPERIMENTAL_THREAD_CONTINUITY=1` in the environment of `boxen serve`
+enables the tool and its context for eligible threads executed by that daemon,
+including threads started from the desktop. The authenticated `thread_history`
+operator operation is available with either setting.
+
 ## Scope and resident exclusion
 
 Cross-thread discovery and reading are strictly scoped to **non-resident**
@@ -38,8 +45,9 @@ first read. Callers can page any range with `start_turn`, `limit`, and `order`.
 
 ## One-time session-start orientation
 
-On the opening run of a new non-resident thread (`after` absent and
-`id == thread_id`), Boxen appends a bounded one-time summary of up to eight
+With the experiment enabled, Boxen appends a bounded one-time summary on the
+opening run of a new non-resident thread (`after` absent and `id == thread_id`).
+The summary includes up to eight
 recent non-resident threads (ID, age, run count, latest status, opening
 preview) in Boxen-authored runtime context. Follow-up runs in the same thread
 omit that list to preserve prompt-prefix stability while retaining full
@@ -69,8 +77,9 @@ mutable thread index is maintained.
   controlled runtimes (no credentials), exercising multi-backend `list`,
   `search`, `read`, time filters, head+tail budgeting and middle paging,
   strict direct/promoted resident exclusion, local and peer MCP tool access,
-  one-time session-start orientation, resident-caller exclusion, and runtime
-  diagnostic logging. It is included in `scripts/test-linux.py`.
+  one-time session-start orientation, resident-caller exclusion, ordinary New
+  Thread behavior with the default settings, and runtime diagnostic logging.
+  It is included in `scripts/test-linux.py`.
 - Live multi-model hill-climb verification (disposable seeded corpora plus a
   read-only copy of a real local non-resident thread) evaluated continuation,
   terse openers, long late-reversal threads, multi-thread pivoting/retention,

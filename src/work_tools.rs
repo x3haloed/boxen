@@ -870,6 +870,9 @@ pub fn is_tool(name: &str) -> bool {
 }
 
 fn threads(jobs: &Arc<Jobs>, run: &Arc<Run>, args: &Value) -> Result<Value> {
+    if !crate::thread_history::agent_continuity_enabled() {
+        return Err("This daemon has experimental cross-thread continuity disabled".into());
+    }
     let record = run.snapshot().record;
     if record.resident.is_some()
         || record.spec.resident_id.is_some()
@@ -946,7 +949,7 @@ pub fn tools_for(resident: bool) -> Vec<Value> {
         json!({"type":"function","name":"boxen_work","description":"This tool requests and follows ordinary work across admitted machines. list returns a bounded page of existing anonymous requests, optionally filtered by thread_id; next_cursor retrieves the following page. request starts an anonymous conversation or continues thread_id. handoff accepts the same arguments and records this originating run and tool call at the destination. Handoff acceptance means that the destination owns the new request; later execution still has its own outcome. after_request_id identifies an exact previous request instead of looking up a thread head; a stale predecessor is rejected by the destination. machine accepts a discovered name/id; omission follows a known request or thread handle in this conversation, otherwise local; new remote work gets an automatic destination workspace. request_id can be omitted or a short stable label; labels remain stable within this coordinating conversation, including reads and controls. Returned ids identify exact retries. Attachments are local file paths retained before transfer. required_capabilities restricts acceptance to a backend that offers all named capabilities. read returns bounded retained progress, next_after, current status and a final response; after replays from that sequence, wait_ms waits up to 20000 for new activity. Large projections are labeled truncated; event_seq retrieves one original event as paged JSON text with offset/next_offset. A long final response has next_response_offset for a response_offset read. steer adds input to active work, cancel requests interruption, and respond answers a retained backend request. Controls can have unknown outcomes and are not automatically repeated. A host/network failure does not establish workload failure. Execution continues independently of this observer. Work requests are distinct from resident mailbox correspondence.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["list","request","handoff","read","steer","cancel","respond"]},"machine":{"type":"string"},"request_id":{"type":"string"},"thread_id":{"type":"string"},"after_request_id":{"type":"string"},"cursor":{"type":"object"},"prompt":{"type":"string"},"backend":{"type":"string","enum":crate::runtime::Backend::ALL.map(crate::runtime::Backend::id)},"required_capabilities":{"type":"array","items":{"type":"string","enum":crate::runtime::Capability::ALL}},"cwd":{"type":"string"},"model":{"type":"string"},"attachments":{"type":"array","items":{"type":"string"},"maxItems":8},"after":{"type":"integer","minimum":0},"event_seq":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"response_offset":{"type":"integer","minimum":0},"wait_ms":{"type":"integer","minimum":0,"maximum":20000},"backend_request_id":{},"result":{}},"required":["action"],"additionalProperties":false}}),
         crate::jobs::thread_workspace::tool(),
     ];
-    if !resident {
+    if !resident && crate::thread_history::agent_continuity_enabled() {
         list.push(json!({
             "type": "function",
             "name": "boxen_threads",

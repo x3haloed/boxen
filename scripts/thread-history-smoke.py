@@ -11,9 +11,12 @@ Verifies:
   excluding the calling thread from its own `list`/`search`.
 - One-time session-start orientation on run 1 of a new non-resident thread (absent on follow-ups
   and absent on resident activations).
+- An ordinary New Thread request receives neither history context nor the model-facing tool
+  on a daemon running with default settings.
 - Runtime diagnostic logging (`thread_history.operation`) without restart.
 """
 import json
+import os
 import pathlib
 import secrets
 import socket
@@ -188,12 +191,16 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-history-') as temporary:
              'Remote private resident note', 'REMOTE_RESIDENT_CANARY',
              now_ms - 2 * hour, resident=dict(res_obj, id=t_remote_res, owner=keys[1], machine_id=keys[1]))
 
-    def launch(i):
+    def launch(i, *, continuity=False):
+        env = os.environ.copy()
+        env.pop('BOXEN_EXPERIMENTAL_THREAD_CONTINUITY', None)
+        if continuity:
+            env['BOXEN_EXPERIMENTAL_THREAD_CONTINUITY'] = '1'
         processes[i] = subprocess.Popen(
             COMMAND + ['--data-dir', str(homes[i]), 'serve', '--listen', f'127.0.0.1:{ports[i]}',
                        '--advertise', f'127.0.0.1:{ports[i]}', '--ui', f'127.0.0.1:{uis[i]}',
                        '--codex', str(fake_codex())],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         lines = [processes[i].stdout.readline() for _ in range(3)]
         assert 'Local controls:' in lines[-1], lines
         tokens[i] = (homes[i] / 'control-token').read_text().strip()
@@ -234,13 +241,15 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-history-') as temporary:
         raise AssertionError('Run deadline expired')
 
     try:
-        launch(0)
+        launch(0, continuity=True)
         launch(1)
         cli(0, 'ping', f'127.0.0.1:{ports[1]}', keys[1], 'endpoint discovery')
 
         # 1. Runtime info advertises boxen_threads under non_resident_tools
         info = api(0, {'op': 'runtime_info'})
         assert 'boxen_threads' in info['agent_work']['non_resident_tools'], info['agent_work']
+        default_info = api(1, {'op': 'runtime_info'})
+        assert 'boxen_threads' not in default_info['agent_work']['non_resident_tools'], default_info['agent_work']
 
         # 2. Diagnostic logging check (off by default, runtime enable captures thread_history.operation)
         diag = base / 'thread-history-diag.jsonl'
@@ -364,6 +373,27 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-history-') as temporary:
         res_dyn_names = [t['name'] for t in res_thread_starts[-1]['payload']['params'].get('dynamicTools', [])]
         assert 'boxen_threads' not in res_dyn_names, res_dyn_names
         print('PASS resident activation excludes boxen_threads and session-start orientation')
+
+        default_trace = base / 'default-rpc-trace.jsonl'
+        api(1, {'op': 'log_file', 'path': str(default_trace), 'filter': {'level': 'trace', 'events': ['rpc.sent', 'rpc.received'], 'payloads': True}})
+        default_thread = uid()
+        api(1, {'op': 'start', 'spec': {
+            'id': default_thread, 'thread_id': default_thread, 'backend': 'codex',
+            'cwd': str(workspace), 'model': 'fixture',
+            'prompt': 'WORK_INTERFACE:' + json.dumps([step('boxen_threads', {'action': 'list'}, error=True)]),
+        }})
+        default_snap = finish(1, default_thread)
+        assert default_snap['status'] == 'completed', default_snap
+        api(1, {'op': 'log_off'})
+        rpc_records = [json.loads(line) for line in default_trace.read_text().splitlines() if line.strip()]
+        default_meta = turn_meta(default_thread)
+        assert 'boxen_threads' not in default_meta, default_meta
+        assert 'Recent non-resident threads on this machine' not in default_meta, default_meta
+        tool_catalogs = [server['tools'] for record in rpc_records
+                         for server in record.get('payload', {}).get('result', {}).get('data', [])
+                         if server.get('name') == 'boxen_work']
+        assert tool_catalogs and all('boxen_threads' not in tools for tools in tool_catalogs), tool_catalogs
+        print('PASS default New Thread omits cross-thread context and rejects direct calls to boxen_threads')
     finally:
         stop(0)
         stop(1)

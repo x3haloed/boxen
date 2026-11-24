@@ -15,6 +15,10 @@ const READ_BUDGET_BYTES: usize = 24 * 1024;
 const SEARCH_BUDGET_BYTES: usize = 24 * 1024;
 const LIST_BUDGET_BYTES: usize = 24 * 1024;
 
+pub(crate) fn agent_continuity_enabled() -> bool {
+    std::env::var_os("BOXEN_EXPERIMENTAL_THREAD_CONTINUITY").is_some_and(|value| value == "1")
+}
+
 fn clip(text: &str, limit: usize) -> (String, bool) {
     if text.len() <= limit {
         return (text.to_owned(), false);

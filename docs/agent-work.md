@@ -2,12 +2,13 @@
 
 `boxen_machines`, `boxen_work`, and `boxen_thread_files` expose the existing
 machine network, anonymous conversations, retained run events, controls and
-attachment transport. Non-resident workloads additionally receive read-only
-`boxen_threads` for discovering and reading earlier non-resident threads across
-admitted machines; see [cross-thread history](thread-history.md). They are available to built-in inference workloads and
-through a run-scoped MCP connection to managed Codex, Claude and Antigravity workloads. These tools do
-not create residents, send mailbox correspondence, distribute credentials or
-move a native conversation to another host.
+attachment transport. A daemon with experimental cross-thread continuity enabled
+also exposes read-only `boxen_threads` to non-resident workloads for discovering
+and reading earlier non-resident threads across admitted machines. See
+[cross-thread history](thread-history.md). Work tools are available to built-in
+inference workloads and through MCP to managed Codex, Claude and Antigravity
+workloads. These tools do not create residents, send mailbox correspondence,
+distribute credentials or move a native conversation to another host.
 
 ## Discover and request
 
