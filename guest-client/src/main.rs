@@ -1,8 +1,16 @@
 //! Portable native client for a Boxen guest conversation.
+mod attachments;
+#[cfg(all(target_os = "macos", not(cosmo)))]
+mod mac_ui;
+#[cfg(all(target_os = "macos", not(cosmo)))]
+use mac_ui as ui;
+#[cfg(not(all(target_os = "macos", not(cosmo))))]
 mod markdown;
+#[cfg(not(all(target_os = "macos", not(cosmo))))]
 mod paint;
 mod session;
 mod setup;
+#[cfg(not(all(target_os = "macos", not(cosmo))))]
 mod ui;
 
 use boxen_guest_transport::{Connection, Result, host_path};

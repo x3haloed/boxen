@@ -6,19 +6,25 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-fontdue = "=0.9.5"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 boxen-guest-transport = { path = "transport" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 5.0.1 forwards macOS close requests to the client as EVENT_CLOSE.
-softer_gui = { path = "vendor/softer_gui" }
 pulldown-cmark = { version = "=0.13.6", default-features = false }
+
+[target.'cfg(any(not(target_os = "macos"), cosmo))'.dependencies]
+fontdue = "=0.9.5"
+softer_gui = { path = "vendor/softer_gui" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+base64 = "0.23"
+pulldown-cmark = { version = "=0.13.6", default-features = false, features = ["html"] }
 
 [features]
 ape = ["dep:cosmo-build"]
 
 [build-dependencies]
+cc = "1"
 cosmo-build = { version = "=10.0.0", optional = true }
 
 [target.'cfg(cosmo)'.dependencies]

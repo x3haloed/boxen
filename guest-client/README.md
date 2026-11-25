@@ -4,7 +4,9 @@ The native client exchanges messages and files with a single Boxen resident
 through two Google Cloud Pub/Sub topics. The header shows the resident's Ready,
 Working, or Offline state and reports connection and queue status separately.
 Enter sends and Shift+Enter inserts a newline. The conversation scrolls without
-moving the composer.
+moving the composer. The macOS app uses AppKit text controls. Resident messages
+appear on the left and your messages on the right. Drag to select text across
+either side of the conversation and press Command-C to copy it.
 
 Chat history renders CommonMark with tables, task lists, and strikethrough.
 Click a web link to copy its address. Markdown images show their description,
@@ -16,7 +18,8 @@ before sending. Click an image thumbnail to preview it in the window. Other
 attachments open a Save dialog. The Windows APE uses an in-app picker for file
 selection and saving. The resident sends files through its existing guest-chat tool.
 
-To build the portable artifact, use Boxen's pinned Cosmopolitan toolchain cache
+The legacy portable client uses the previous custom-rendered UI. To build that
+artifact, use Boxen's pinned Cosmopolitan toolchain cache
 and run `cargo build --locked --release --features ape`. The artifact is
 `target/cosmo/release/boxen-guest-client.com`.
 Windows can launch a byte-identical copy with an `.exe` extension. On macOS,
