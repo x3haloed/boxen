@@ -506,10 +506,14 @@ impl Jobs {
                         "destination already has a resident with this conversation ID".into(),
                     );
                 }
-                self.resolve_working_directory(&m.thread, &m.cwd, true)?;
                 if m.backend == "openrouter" {
                     self.inference.ready()?;
+                } else if crate::runtime::Backend::parse(&m.backend).ok()
+                    == Some(crate::runtime::Backend::ChatCompletions)
+                {
+                    self.chat_endpoints.get(&m.backend)?;
                 }
+                self.resolve_working_directory(&m.thread, &m.cwd, true)?;
                 if let Some(previous) = self.placement(&m.thread)? {
                     if previous.generation >= m.generation || previous.target == self.machine_id() {
                         return Err(

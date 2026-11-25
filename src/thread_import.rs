@@ -165,6 +165,7 @@ impl Jobs {
             execution_change: None,
             transcript_import: None,
             runtime_policy: Default::default(),
+            resolved_inference_model: None,
             imported: Some(Provenance {
                 backend_thread_id: spec.backend_thread_id.clone(),
                 metadata,

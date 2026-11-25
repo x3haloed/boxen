@@ -126,6 +126,7 @@ impl Jobs {
                 after: None,
                 execution_change: None,
                 runtime_policy: Default::default(),
+                resolved_inference_model: None,
                 imported: None,
                 transcript_import: Some(provenance.clone()),
                 observations: vec![],

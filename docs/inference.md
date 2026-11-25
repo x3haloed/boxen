@@ -4,6 +4,8 @@ Boxen can execute text/tool and native multimodal reading workloads through Open
 
 This is the first built-in runtime, not a claim of universal provider, modality, or native-session portability. The [research](research/inference-runtime.md) and [managed-session portability investigation](research/managed-session-portability.md) remain relevant.
 
+The same run and tool loop also accepts [named host-local Chat Completions endpoints](chat-completions.md), alongside the OpenRouter provider.
+
 ## Configuration and use
 
 The executing machine reads its OpenRouter credential from `~/.boxen/credentials/openrouter.key` by default (relative to the selected daemon data directory). The file contains only the key and should be owner-readable/writable (`600` on Unix). A different path can be selected with `serve --openrouter-key-file PATH`. The credential is read locally at execution, is not included in API submissions or process arguments, and is not copied to a peer. Changing the file's contents takes effect for subsequent requests without a daemon restart. Secret storage and cross-machine sharing are still separate design work; this file convention is not an encrypted credential vault.

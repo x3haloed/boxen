@@ -43,6 +43,7 @@ impl OutstandingWork {
 pub enum Backend {
     Codex,
     OpenRouter,
+    ChatCompletions,
     Antigravity,
     Claude,
 }
@@ -83,16 +84,26 @@ impl Backend {
         match self {
             Self::Codex => "codex",
             Self::OpenRouter => "openrouter",
+            Self::ChatCompletions => "chat-completions",
             Self::Antigravity => "antigravity",
             Self::Claude => "claude",
         }
     }
 
     pub fn parse(id: &str) -> Result<Self> {
+        if let Some(name) = id.strip_prefix("chat-completions:")
+            && valid_endpoint_name(name)
+        {
+            return Ok(Self::ChatCompletions);
+        }
         Self::ALL
             .into_iter()
             .find(|backend| backend.id() == id)
             .ok_or_else(|| "unsupported backend".into())
+    }
+
+    pub fn is_inference(self) -> bool {
+        matches!(self, Self::OpenRouter | Self::ChatCompletions)
     }
 
     fn capabilities(self, resident: bool) -> impl Iterator<Item = Capability> {
@@ -104,7 +115,7 @@ impl Backend {
                 NativeSessionResume,
                 LateActivity,
             ],
-            Self::OpenRouter => &[QueuedSteering],
+            Self::OpenRouter | Self::ChatCompletions => &[QueuedSteering],
             Self::Claude => &[NativeSessionResume, LateActivity],
             Self::Antigravity => &[
                 LiveSteering,
@@ -146,7 +157,7 @@ impl Backend {
         let mut info = match self {
             Self::Codex => json!({"kind":"managed","protocol":"app_server","input":["text"],
                 "attachment_transport":"retained_file_path", "tools":true, "full_access":true,"resident":true}),
-            Self::OpenRouter => {
+            Self::OpenRouter | Self::ChatCompletions => {
                 json!({"kind":"built_in","default_model":crate::inference::DEFAULT_MODEL,
                 "input":["text","image","audio","video","file"],"native_read":true,
                 "context_policies":["summary","verbatim"],"default_ephemeral_context":"summary",
@@ -166,6 +177,19 @@ impl Backend {
         info["activation_capabilities"] = json!(self.capabilities(true).collect::<Vec<_>>());
         info
     }
+}
+
+pub fn valid_endpoint_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 48
+        && name.as_bytes()[0].is_ascii_lowercase()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+pub fn is_inference(id: &str) -> bool {
+    Backend::parse(id).is_ok_and(Backend::is_inference)
 }
 
 pub fn requirements(value: Option<&Value>) -> Result<Requirements> {

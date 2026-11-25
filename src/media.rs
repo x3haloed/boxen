@@ -174,7 +174,26 @@ pub fn upload_bytes(root: &Path, artifact: &Value) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub fn read(root: &Path, cwd: &str, run: &str, args: Value) -> Result<Value> {
+#[derive(Clone, Copy)]
+pub enum Support {
+    Text,
+    Images,
+    All,
+}
+
+impl Support {
+    fn require_native(self, modality: &str) -> Result<()> {
+        if matches!(self, Self::All) || matches!(self, Self::Images) && modality == "image" {
+            return Ok(());
+        }
+        Err(
+            format!("The selected inference endpoint does not accept native {modality} input")
+                .into(),
+        )
+    }
+}
+
+pub fn read(root: &Path, cwd: &str, run: &str, args: Value, support: Support) -> Result<Value> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Input {
@@ -189,6 +208,7 @@ pub fn read(root: &Path, cwd: &str, run: &str, args: Value) -> Result<Value> {
     let path = Path::new(cwd).join(&input.path);
     let bytes = file_bytes(&path)?;
     if let Some((modality, mime)) = kind(&bytes) {
+        support.require_native(modality)?;
         if input.offset.is_some() || input.limit.is_some() {
             return Err("media reads send the original whole file; text offset/limit do not select pages or time ranges".into());
         }
@@ -223,7 +243,11 @@ pub fn read(root: &Path, cwd: &str, run: &str, args: Value) -> Result<Value> {
 }
 
 /// Snapshot references remain in journals; only this projection creates native wire parts.
-pub fn project(root: &Path, messages: &[Value]) -> Result<(Vec<Value>, bool, usize)> {
+pub fn project(
+    root: &Path,
+    messages: &[Value],
+    support: Support,
+) -> Result<(Vec<Value>, bool, usize)> {
     let mut output = Vec::new();
     let mut pending = Vec::new();
     // Tool results own references atomically with the accepted result. Native
@@ -256,6 +280,9 @@ pub fn project(root: &Path, messages: &[Value]) -> Result<(Vec<Value>, bool, usi
                 }
                 let a = &part["artifact"];
                 let load = (|| -> Result<Value> {
+                    if let Some(modality) = a["modality"].as_str() {
+                        support.require_native(modality)?;
+                    }
                     let run = a["run"]
                         .as_str()
                         .filter(|s| hex64(s))
@@ -322,6 +349,7 @@ mod tests {
             cwd,
             &"a".repeat(64),
             json!({"path":"text","limit":3}),
+            Support::All,
         )
         .unwrap();
         assert_eq!(v["text"], "a");
@@ -331,7 +359,8 @@ mod tests {
                 &root,
                 cwd,
                 &"a".repeat(64),
-                json!({"path":"text","offset":2})
+                json!({"path":"text","offset":2}),
+                Support::All,
             )
             .is_err()
         );
@@ -341,16 +370,26 @@ mod tests {
                 &root,
                 cwd,
                 &"a".repeat(64),
-                json!({"path":"image","limit":10})
+                json!({"path":"image","limit":10}),
+                Support::All,
             )
             .is_err()
         );
-        assert!(read(&root, cwd, &"a".repeat(64), json!({"path":"."})).is_err());
+        assert!(
+            read(
+                &root,
+                cwd,
+                &"a".repeat(64),
+                json!({"path":"."}),
+                Support::All
+            )
+            .is_err()
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn invalid_reference_stays_unavailable_without_source_read() {
-        let (m,pdf,missing)=project(Path::new("/does-not-exist"),&[json!({"role":"user","content":[{"type":"boxen_artifact","artifact":{"run":"../source","sha256":"x"}}]})]).unwrap();
+        let (m,pdf,missing)=project(Path::new("/does-not-exist"),&[json!({"role":"user","content":[{"type":"boxen_artifact","artifact":{"run":"../source","sha256":"x"}}]})],Support::All).unwrap();
         assert!(!pdf);
         assert_eq!(missing, 1);
         assert_eq!(m[0]["content"][0]["type"], "text");

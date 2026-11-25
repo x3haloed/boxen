@@ -81,9 +81,9 @@ boxen [--data-dir PATH] identity\n\
 boxen [--data-dir PATH] trust PUBLIC_KEY LABEL [--address HOST:PORT]\n\
 boxen [--data-dir PATH] untrust PUBLIC_KEY\n\
 boxen [--data-dir PATH] peers\n\
-boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--antigravity auto|PATH] [--claude PATH] [--openrouter-key-file PATH]\n\
+boxen [--data-dir PATH] serve [--listen IP:PORT] [--ui IP:PORT] [--advertise HOST:PORT] [--name LABEL] [--codex PATH] [--antigravity auto|PATH] [--claude PATH] [--openrouter-key-file PATH] [--chat-endpoints PATH]\n\
 boxen [--data-dir PATH] ping HOST:PORT PUBLIC_KEY [MESSAGE]\n\n\
-boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|antigravity|claude|openrouter] [--require CAPABILITY,...] [--complete-on-handoff JSON] [--context JSON] [--reasoning-effort LEVEL]\n\
+boxen [--data-dir PATH] start HOST:PORT PUBLIC_KEY CWD MODEL PROMPT [--thread ID] [--id ID] [--backend codex|antigravity|claude|openrouter|chat-completions:NAME] [--require CAPABILITY,...] [--complete-on-handoff JSON] [--context JSON] [--reasoning-effort LEVEL]\n\
 boxen [--data-dir PATH] request HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] messages HOST:PORT PUBLIC_KEY JSON\n\
 boxen [--data-dir PATH] discord-connector --instance ID [--url http://127.0.0.1:PORT]\n\
@@ -107,7 +107,7 @@ boxen [--data-dir PATH] log-status HOST:PORT PUBLIC_KEY\n\
 boxen [--data-dir PATH] log-off HOST:PORT PUBLIC_KEY\n\n\
 boxen residents HOST:PORT PUBLIC_KEY\n\
 boxen resident-promote HOST:PORT PUBLIC_KEY JSON_SPEC\n\
-boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|antigravity|claude|openrouter] [--reasoning-effort LEVEL] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
+boxen resident-create HOST:PORT PUBLIC_KEY NAME CWD MODEL [--backend codex|antigravity|claude|openrouter|chat-completions:NAME] [--reasoning-effort LEVEL] [--id ID] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
 boxen resident-class HOST:PORT PUBLIC_KEY JSON\n\
 boxen resident-get HOST:PORT PUBLIC_KEY RESIDENT_ID\n\
 boxen resident-update HOST:PORT PUBLIC_KEY RESIDENT_ID EXPECTED_REVISION [--model MODEL] [--reasoning-effort LEVEL] [--name NAME] [--identity-file PATH] [--memory-file PATH] [--quota BYTES] [--auto-activate true|false]\n\
@@ -124,7 +124,7 @@ Pair by exchanging identity public keys through a trusted channel and\n\
 running trust on BOTH machines. --ui must bind to IPv4 loopback.\n\
 Default data: ~/.boxen (or BOXEN_HOME). Default peer port: 42424.\n\
 MODEL '-' selects the executing machine's configured default.\n\
-Workloads use managed CLIs or the built-in OpenRouter runtime with Full access on the destination."
+Workloads use managed CLIs or the built-in inference runtime with Full access on the destination."
         );
         #[cfg(feature = "inference-probe")]
         println!(
@@ -207,8 +207,13 @@ Workloads use managed CLIs or the built-in OpenRouter runtime with Full access o
             let key_file = take_option(&mut args, "--openrouter-key-file")?
                 .map(PathBuf::from)
                 .unwrap_or_else(|| state.directory().join("credentials/openrouter.key"));
-            let inference_config = inference::Config { endpoint, key_file };
+            let inference_config = inference::Config {
+                endpoint,
+                key_file: Some(key_file),
+            };
             inference_config.validate()?;
+            let chat_endpoints = take_option(&mut args, "--chat-endpoints")?.map(PathBuf::from);
+            let chat_endpoints = inference::LocalEndpoints::load(chat_endpoints.as_deref())?;
             let codex = take_option(&mut args, "--codex")?
                 .or_else(|| env::var("BOXEN_CODEX").ok())
                 .unwrap_or_else(|| "codex".into());
@@ -241,6 +246,7 @@ Workloads use managed CLIs or the built-in OpenRouter runtime with Full access o
                 codex,
                 state.public_key().into(),
                 inference_config,
+                chat_endpoints,
                 antigravity,
                 claude,
             )?;

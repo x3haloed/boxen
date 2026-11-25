@@ -169,6 +169,7 @@ mod tests {
             after: None,
             execution_change: None,
             runtime_policy: Default::default(),
+            resolved_inference_model: None,
             imported: None,
             transcript_import: None,
             observations: Vec::new(),
@@ -402,6 +403,8 @@ pub struct Record {
     #[serde(default)]
     pub runtime_policy: crate::runtime_policy::Policy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_inference_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported: Option<thread_import::Provenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_import: Option<transcript_import::Provenance>,
@@ -420,6 +423,15 @@ pub struct Record {
     pub created_at: u64,
 }
 impl Record {
+    pub fn inference_model(&self) -> Option<&str> {
+        self.resolved_inference_model
+            .as_deref()
+            .or_else(|| (!self.spec.model.is_empty()).then_some(self.spec.model.as_str()))
+            .or_else(|| {
+                (self.spec.backend == "openrouter").then_some(crate::inference::DEFAULT_MODEL)
+            })
+    }
+
     pub fn execution_context(&self) -> String {
         let mut context = self.execution.as_ref().map_or_else(String::new, |execution| {
             format!("\nBoxen's workload subprocess execution context is {}. This host-local account and operating-system session determine subprocess file ownership, credential-store access and desktop availability. OS permissions apply independently to each application. The daemon owns retained journals, messaging and media retention.\n", serde_json::to_string(execution).unwrap_or_default())
@@ -1471,6 +1483,7 @@ pub struct Jobs {
     antigravity_sessions: Mutex<HashMap<String, Arc<crate::antigravity::SessionSlot>>>,
     antigravity_catalog: Mutex<Option<AntigravityCatalog>>,
     pub inference: crate::inference::Config,
+    pub chat_endpoints: crate::inference::LocalEndpoints,
     _lock: File,
     pub residents: Arc<Residents>,
     pub definitions: crate::resident_definitions::Definitions,
@@ -2070,7 +2083,7 @@ impl Jobs {
                 return Err("thread belongs to a different peer".into());
             }
         }
-        if last.snapshot().record.spec.backend != "openrouter" {
+        if !crate::runtime::is_inference(&last.snapshot().record.spec.backend) {
             return Err("Boxen history projection tools apply to the built-in inference runtime; managed runtimes retain native history controls".into());
         }
         let mutating = terminal(&last.snapshot().status);
@@ -2249,6 +2262,7 @@ impl Jobs {
         backend.describe(match backend {
             Backend::Codex => true,
             Backend::OpenRouter => self.inference.ready().is_ok(),
+            Backend::ChatCompletions => false,
             Backend::Antigravity => {
                 crate::antigravity::executable(&self.antigravity_path, execution).is_some()
             }
@@ -2256,13 +2270,35 @@ impl Jobs {
         })
     }
 
+    fn describe_chat_endpoint(&self, id: &str) -> Value {
+        let endpoint = self.chat_endpoints.get(id).ok();
+        let mut info = Backend::ChatCompletions.describe(endpoint.is_some());
+        info["id"] = json!(id);
+        info["protocol"] = json!("chat_completions");
+        info["provider"] = json!("local_endpoint");
+        info["default_model"] = json!(endpoint.map(|e| &e.default_model));
+        info["input"] = if endpoint.is_some_and(|e| e.images) {
+            json!(["text", "image"])
+        } else {
+            json!(["text"])
+        };
+        info
+    }
+
     pub fn runtime_info(&self) -> Value {
         let execution = self
             .runtime_home()
             .ok_or_else(|| "run directory has no home".into())
             .and_then(crate::execution::Execution::capture);
-        let backends =
-            Backend::ALL.map(|backend| self.describe_backend(backend, execution.as_ref().ok()));
+        let backends: Vec<_> = Backend::ALL
+            .into_iter()
+            .map(|backend| self.describe_backend(backend, execution.as_ref().ok()))
+            .chain(
+                self.chat_endpoints
+                    .names()
+                    .map(|name| self.describe_chat_endpoint(&format!("chat-completions:{name}"))),
+            )
+            .collect();
         let mut info = json!({"native_thread_import":{"backend":"codex","history":"public_turn_item_snapshot","starts_execution":false,"resident_promotion":true},"messaging":{"protocol":"boxen-messaging-v1","instance_scoped":true,"builtin":"boxen","agent_tool":"boxen_messages","managed_tools":"registered_on_new_native_sessions"},"observations":{"protocol":"boxen-adapter-v1","input":"bounded_json","delivery":["activation","explicit_tool_read","adapter_result"],"managed_tools":"registered_on_new_native_sessions","pending_store_bytes":4194304}});
         info["backends"] = json!(backends);
         info["checked_requests"] = json!({"start":"start_checked","resident_activate":"resident_activate_checked","completion_handoff":"start_until_handoff"});
@@ -2298,12 +2334,17 @@ impl Jobs {
                 "required_capabilities":record.spec.required_capabilities},
             "observed":observed,
         });
+        let backend_id = record.spec.backend.clone();
         drop(inner);
         let execution = self
             .runtime_home()
             .filter(|_| backend == Backend::Antigravity && self.antigravity_path == "auto")
             .and_then(|home| crate::execution::Execution::capture(home).ok());
-        info["declared"] = self.describe_backend(backend, execution.as_ref());
+        info["declared"] = if backend == Backend::ChatCompletions {
+            self.describe_chat_endpoint(&backend_id)
+        } else {
+            self.describe_backend(backend, execution.as_ref())
+        };
         Ok(info)
     }
 
@@ -2317,16 +2358,19 @@ impl Jobs {
     pub fn open(directory: PathBuf, codex_path: String, machine_id: String) -> Result<Arc<Self>> {
         let config = crate::inference::Config {
             endpoint: crate::chat::ENDPOINT.into(),
-            key_file: directory
-                .parent()
-                .ok_or("runs parent required")?
-                .join("credentials/openrouter.key"),
+            key_file: Some(
+                directory
+                    .parent()
+                    .ok_or("runs parent required")?
+                    .join("credentials/openrouter.key"),
+            ),
         };
         Self::open_with_runtimes(
             directory,
             codex_path,
             machine_id,
             config,
+            Default::default(),
             "auto".into(),
             None,
         )
@@ -2336,6 +2380,7 @@ impl Jobs {
         codex_path: String,
         machine_id: String,
         inference: crate::inference::Config,
+        chat_endpoints: crate::inference::LocalEndpoints,
         antigravity_path: String,
         claude_path: Option<String>,
     ) -> Result<Arc<Self>> {
@@ -2427,6 +2472,7 @@ impl Jobs {
             antigravity_sessions: Mutex::new(HashMap::new()),
             antigravity_catalog: Mutex::new(None),
             inference,
+            chat_endpoints,
             _lock: lock,
         });
         for entry in fs::read_dir(&jobs.directory)? {
@@ -2866,7 +2912,7 @@ impl Jobs {
                 .iter()
                 .flat_map(|m| m.attachments.iter().cloned())
                 .collect(),
-            context: if resident.backend == "openrouter" {
+            context: if crate::runtime::is_inference(&resident.backend) {
                 Some(resident.context.clone())
             } else {
                 None
@@ -3543,11 +3589,25 @@ impl Jobs {
             {
                 self.inference.ready()?
             }
+            Backend::ChatCompletions
+                if activation.is_none() || !spec.required_capabilities.is_empty() =>
+            {
+                self.chat_endpoints.get(&spec.backend).inspect_err(|_| {
+                    logging::record(
+                        Level::Info,
+                        Target::Workload,
+                        "submission.endpoint_unavailable",
+                        Context::run(&spec.id, &spec.thread_id, owner),
+                        || json!({"backend":spec.backend}),
+                        || Value::Null,
+                    );
+                })?;
+            }
             _ => {}
         }
         if let Some(settings) = &spec.context {
             settings.validate()?;
-            if backend != Backend::OpenRouter {
+            if !backend.is_inference() {
                 return Err("Boxen context policies apply to the built-in runtime; managed runtimes own their native compaction".into());
             }
         }
@@ -3639,7 +3699,7 @@ impl Jobs {
                 return Err("this conversation's runtime is fixed".into());
             }
             if after.is_none() {
-                if spec.backend == "openrouter" && resident.is_none() && old.model != spec.model {
+                if backend.is_inference() && resident.is_none() && old.model != spec.model {
                     return Err("this slice pins a thread’s inference model unless the latest run ID is supplied".into());
                 }
                 if old.cwd != spec.cwd {
@@ -3717,6 +3777,18 @@ impl Jobs {
         let runtime_policy = crate::runtime_policy::Policy::load(
             self.directory.parent().ok_or("run directory has no home")?,
         )?;
+        let resolved_inference_model =
+            if backend == Backend::ChatCompletions && spec.model.is_empty() {
+                head.and_then(|prior| prior.record.resolved_inference_model.clone())
+                    .or_else(|| {
+                        self.chat_endpoints
+                            .get(&spec.backend)
+                            .ok()
+                            .map(|profile| profile.default_model.clone())
+                    })
+            } else {
+                None
+            };
         let home = self.directory.parent().ok_or("run directory has no home")?;
         let execution = crate::execution::Execution::capture(home)?;
         if backend == Backend::Antigravity
@@ -3756,6 +3828,7 @@ impl Jobs {
             after: after.map(str::to_owned),
             execution_change,
             runtime_policy,
+            resolved_inference_model,
             imported: None,
             transcript_import: None,
             observations: self.observations.batches(owner, &spec.thread_id),
@@ -3865,7 +3938,7 @@ impl Jobs {
                     }
                 }
                 match backend {
-                    Backend::OpenRouter => crate::inference::execute(
+                    Backend::OpenRouter | Backend::ChatCompletions => crate::inference::execute(
                         &spec,
                         run.clone(),
                         receiver,

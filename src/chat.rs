@@ -1,4 +1,4 @@
-//! OpenRouter Chat Completions transport and conservative native-state projection.
+//! Chat Completions transport and conservative native-state projection.
 use crate::Result;
 use serde_json::{Value, json};
 use std::{
@@ -15,16 +15,18 @@ pub fn exchange(
     deadline_seconds: Option<u64>,
     emit: &mut impl FnMut(Value) -> Result<()>,
 ) -> Result<()> {
-    let agent = ureq::Agent::config_builder()
+    let mut config = ureq::Agent::config_builder()
         .max_redirects(0)
         .http_status_as_error(false)
         .timeout_global(deadline_seconds.map(Duration::from_secs))
         .timeout_resolve(Some(Duration::from_secs(20)))
         .timeout_connect(Some(Duration::from_secs(20)))
         .timeout_send_request(Some(Duration::from_secs(30)))
-        .timeout_send_body(Some(Duration::from_secs(30)))
-        .build()
-        .new_agent();
+        .timeout_send_body(Some(Duration::from_secs(30)));
+    if endpoint.starts_with("http://127.0.0.1:") {
+        config = config.proxy(None);
+    }
+    let agent = config.build().new_agent();
     let mut request = agent.post(endpoint).header("Accept", "text/event-stream");
     if let Some(key) = key {
         request = request.header("Authorization", format!("Bearer {key}"));

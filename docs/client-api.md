@@ -34,7 +34,7 @@ Operations:
 | `{"op":"tool_approvals","args":{"action":"get"}}` | Host-wide `computer_use` and `browser_use` booleans |
 | `{"op":"tool_approvals","args":{"action":"set","computer_use":false}}` | Persisted settings; omitted booleans retain their values |
 
-`start` is for identity-less threads; direct resident starts are rejected. Resident correspondence and independent activation use the [mailbox API](mailboxes.md). `SPEC` contains `id`, `thread_id`, `backend` (`codex`, `antigravity`, or `openrouter`), `cwd` (an absolute destination-local directory, or omitted/empty for an automatic working area), `model` (omitted/empty for the configured default), and `prompt`. Generate a lowercase 64-character hex run ID before sending, and preserve it with the exact spec until acceptance is known. For a new conversation use that same ID as `thread_id`; follow-ups use the existing thread ID with a new run ID. Repeating the same ID, owner, and exact spec is idempotent. A different spec under that ID is rejected. Catalog discovery by ID can reconcile a response lost after acceptance. A response timeout is not a rejection and must not trigger a new run ID.
+`start` is for identity-less threads; direct resident starts are rejected. Resident correspondence and independent activation use the [mailbox API](mailboxes.md). `SPEC` contains `id`, `thread_id`, `backend` (`codex`, `antigravity`, `openrouter`, or a configured [`chat-completions:NAME`](chat-completions.md)), `cwd` (an absolute destination-local directory, or omitted/empty for an automatic working area), `model` (omitted/empty for the configured default), and `prompt`. Generate a lowercase 64-character hex run ID before sending, and preserve it with the exact spec until acceptance is known. For a new conversation use that same ID as `thread_id`; follow-ups use the existing thread ID with a new run ID. Repeating the same ID, owner, and exact spec is idempotent. A different spec under that ID is rejected. Catalog discovery by ID can reconcile a response lost after acceptance. A response timeout is not a rejection and must not trigger a new run ID.
 
 To change an anonymous conversation's working directory or model, send `start` with an `after` field alongside `spec`. Its value is the latest terminal run ID in that conversation. The daemon rejects a stale `after` before starting another run. An exact retry retains the original `after` and returns the already accepted run even after later turns. The accepted run records the change and describes it to the runtime. Codex attempts native session resume with the selected settings. The built-in runtime continues from retained conversation frames. The runtime kind remains fixed for a conversation.
 
@@ -115,7 +115,7 @@ exact retry identity. Its order is immaterial.
 | Capability | What the requirement selects |
 | --- | --- |
 | `live_steering` | Codex and Antigravity can inject input into an active native prompt. |
-| `queued_steering` | OpenRouter can queue input at its next inference boundary. |
+| `queued_steering` | The built-in inference runtime can queue input at its next inference boundary. |
 | `input_responses` | Codex and Antigravity accept responses to native input requests. The request specifies the response shape. |
 | `native_session_resume` | Codex and Antigravity attempt to resume a retained native session when one exists. |
 | `late_activity` | Codex and Antigravity retain tracked activity that continues after a native prompt ends. Antigravity can also expose a later reply from a tracked wake. |

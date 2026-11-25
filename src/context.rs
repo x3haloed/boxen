@@ -152,7 +152,7 @@ impl Source {
                         message: event.data,
                         provenance: if let Some(import)=&snapshot.record.transcript_import {
                             json!({"run_id":snapshot.record.spec.id,"thread_id":snapshot.record.spec.thread_id,"backend":"transcript_import","source":import.source,"source_message_id":event.seq.checked_sub(2).and_then(|i|import.message_ids.get(i as usize)),"model":import.source.model,"resident_id":snapshot.record.spec.resident_id,"imported_at":import.imported_at})
-                        } else {json!({"run_id":snapshot.record.spec.id,"thread_id":snapshot.record.spec.thread_id,"backend":snapshot.record.spec.backend,"model":if snapshot.record.spec.model.is_empty(){crate::inference::DEFAULT_MODEL}else{&snapshot.record.spec.model},"resident_id":snapshot.record.spec.resident_id,"scheduled":snapshot.record.scheduled})},
+                        } else {json!({"run_id":snapshot.record.spec.id,"thread_id":snapshot.record.spec.thread_id,"backend":snapshot.record.spec.backend,"model":snapshot.record.inference_model(),"resident_id":snapshot.record.spec.resident_id,"scheduled":snapshot.record.scheduled})},
                     });
                 } else {
                     self.events.push(json!({"id":format!("{}:{}",snapshot.record.spec.id,event.seq),"at":event.at,"kind":event.kind,"data":event.data}));
@@ -540,7 +540,7 @@ impl Source {
                     .and_then(|n| n["revision"].as_u64())
                     .unwrap_or(0)
                     + 1;
-                json!({"id":id,"revision":revision,"kind":if args["kind"]=="semantic_signpost"{"semantic_signpost"}else{"continuity_note"},"text":text,"sources":refs,"author":{"kind":if action=="draft"{"helper"}else{actor},"submitted_by":actor,"peer_id":run.snapshot().record.owner,"label":args["author_label"],"run_id":run.snapshot().record.spec.id,"model":run.snapshot().record.spec.model},"approved":action=="note","parent":ancestor.as_ref().map(|n|json!({"id":n["id"],"revision":n["revision"]})),"derivation_depth":ancestor.as_ref().and_then(|n|n["derivation_depth"].as_u64()).unwrap_or(0)+1,"created_at":jobs::now(),"source_exposure":{"boundary_id":self.boundary().map(|b|b["id"].clone()),"source_ids":refs,"detail":"Source pointers and prior input selection establish availability only, not reading or understanding."}})
+                json!({"id":id,"revision":revision,"kind":if args["kind"]=="semantic_signpost"{"semantic_signpost"}else{"continuity_note"},"text":text,"sources":refs,"author":{"kind":if action=="draft"{"helper"}else{actor},"submitted_by":actor,"peer_id":run.snapshot().record.owner,"label":args["author_label"],"run_id":run.snapshot().record.spec.id,"model":run.snapshot().record.inference_model()},"approved":action=="note","parent":ancestor.as_ref().map(|n|json!({"id":n["id"],"revision":n["revision"]})),"derivation_depth":ancestor.as_ref().and_then(|n|n["derivation_depth"].as_u64()).unwrap_or(0)+1,"created_at":jobs::now(),"source_exposure":{"boundary_id":self.boundary().map(|b|b["id"].clone()),"source_ids":refs,"detail":"Source pointers and prior input selection establish availability only, not reading or understanding."}})
             };
             if value.to_string().len() > 16384 {
                 return Err(

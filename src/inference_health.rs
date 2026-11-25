@@ -17,7 +17,9 @@ pub(crate) fn project(runs: &[Arc<Run>]) -> Result<Vec<Value>> {
     for run in ordered {
         let inner = run.inner.lock().unwrap();
         let s = &inner.snapshot;
-        if s.record.spec.backend != "openrouter" || s.record.transcript_import.is_some() {
+        if !crate::runtime::is_inference(&s.record.spec.backend)
+            || s.record.transcript_import.is_some()
+        {
             continue;
         }
         let mut headers: BTreeMap<(u64, String), Option<u64>> = BTreeMap::new();
@@ -89,7 +91,7 @@ pub(crate) fn project(runs: &[Arc<Run>]) -> Result<Vec<Value>> {
             v["last_at"] = json!(e.at);
             v["last_run_id"] = json!(s.record.spec.id);
             v["http_status"] = json!(status);
-            v["model"] = json!(s.record.spec.model);
+            v["model"] = json!(s.record.inference_model());
             v["description"] = json!(description);
             v["active"] = json!(true);
             v["resolved_at"] = Value::Null;
@@ -155,7 +157,7 @@ impl Jobs {
             jobs::valid_id(&id)?;
             let _transition = self.transitions.lock().unwrap();
             let prior = self.get(owner, failed)?.snapshot();
-            if prior.record.spec.backend != "openrouter" {
+            if !crate::runtime::is_inference(&prior.record.spec.backend) {
                 return Err("inference continuation applies to the built-in runtime".into());
             }
             let directions = format!(

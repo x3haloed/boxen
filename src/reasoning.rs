@@ -17,6 +17,9 @@ pub fn validate(backend: &str, effort: &str) -> Result<()> {
         "codex" => Err("Codex reasoning effort requires a model-advertised name of 1–64 lowercase letters, digits, underscores or hyphens, or default".into()),
         "antigravity" => Err("Antigravity thinking level requires a model-advertised name of 1–64 lowercase letters, digits, underscores or hyphens, or default".into()),
         "openrouter" => Err("OpenRouter reasoning effort accepts default, none, minimal, low, medium, high, xhigh or max; model and provider support vary".into()),
+        id if crate::runtime::Backend::parse(id).ok() == Some(crate::runtime::Backend::ChatCompletions) => {
+            Err("A named Chat Completions endpoint uses its own reasoning settings; Boxen accepts default".into())
+        }
         _ => Err("reasoning effort requires a supported backend".into()),
     }
 }
