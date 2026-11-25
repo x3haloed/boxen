@@ -26,15 +26,16 @@ threads:
 - Resident activations do not expose `boxen_threads` in `tools/list`, do not
   receive cross-thread orientation or `boxen_threads` runtime framing, and are
   rejected if they attempt to invoke it.
-- The calling non-resident thread is excluded from its own local `list` and
-  `search` results so queries do not echo the current prompt back at the model.
+- The calling non-resident thread is excluded from `list` and `search` on
+  each queried machine so retained copies of the same thread do not echo its
+  prompt back at the model.
 
 ## Actions
 
 | Action | Behavior |
 | --- | --- |
 | `list` | Returns other non-resident threads newest-first with UTC timestamps, human ages (`2h ago`, `8d ago`), run counts, latest status, and opening/latest previews. Supports `since_hours`, `until_hours`, `cwd`, `limit`, `offset`, `max_bytes`, and optional `machine`. |
-| `search` | Ranks matching non-resident threads across user prompts, steering inputs, assistant messages, attachments, and bounded tool summaries using IDF-weighted multi-term scoring, ASCII stemming, multi-term coverage, phrase bonus, and a mild recency tie-breaker. Returns best-matching turn excerpts plus each thread's latest preview. |
+| `search` | Queries this machine and admitted peers by default. An explicit `machine` limits the search to one host. Each network hit includes its source `machine` and `thread_id`, which together address a transcript. |
 | `read` | Projects a clean turn-oriented transcript across `codex`, `claude`, `antigravity`, `openrouter`, and `thread_import` run journals. Preserves terminal/uncertain statuses (`interrupted`, `failed`) and `status_detail`. Compact tool summaries fit long threads into a single read; `include_tool_output: true` expands tool bodies. |
 
 When `read` is called without `start_turn` on a thread that exceeds the byte
@@ -42,6 +43,19 @@ budget (default 24 KiB), Boxen retains turn 0 (opening intent) and packs as
 many latest turns as fit, reporting the exact omitted middle range in
 `omitted_middle` so late reversals and final statuses remain visible on the
 first read. Callers can page any range with `start_turn`, `limit`, and `order`.
+
+Each queried machine searches its own retained journals using IDF-weighted
+multi-term scoring and returns bounded candidates. Network search merges them
+by exact phrase match, number of query terms matched, local rank, then recency.
+The requested `limit` and `max_bytes` apply to the merged response. Up to eight
+hosts are queried concurrently per batch. Failed or unsupported peer requests
+leave available results usable. `complete_host_coverage` is false in that case,
+and the response includes counts and up to eight unavailable machine IDs.
+An empty partial search leaves unqueried history unknown.
+
+`list` and `read` default to the current machine and accept a source
+`machine` explicitly. A moved thread may have retained history on more than
+one host. Search hits identify the host that supplied the matching history.
 
 ## One-time session-start orientation
 
@@ -56,7 +70,9 @@ thread.
 
 ## Authenticated API and diagnostics
 
-Clients and paired peers can invoke the same read-only projection directly:
+Clients and paired peers can invoke the host-local projection directly. The
+receiving daemon queries its own journals, so authenticated peer requests do
+not trigger another network search.
 
 ```json
 {"op":"thread_history","args":{"action":"search","query":"webhook rotation"}}
@@ -67,6 +83,9 @@ off-by-default logging policy (`Target::Workload`), emitting action,
 thread ID, outcome, and returned counts without logging private payloads when
 payload capture is disabled. Run journals remain the sole authority; no second
 mutable thread index is maintained.
+Network search also records aggregate coverage and individual failed hosts
+through `thread_history.network_search` and
+`thread_history.search_host_unavailable`.
 
 ## Verification
 
@@ -76,7 +95,9 @@ mutable thread index is maintained.
 - `scripts/thread-history-smoke.py` runs two real paired daemons with
   controlled runtimes (no credentials), exercising multi-backend `list`,
   `search`, `read`, time filters, head+tail budgeting and middle paging,
-  strict direct/promoted resident exclusion, local and peer MCP tool access,
+  strict direct/promoted resident exclusion, default network search with
+  combined results, transcript reads using the machine ID from the hit,
+  partial coverage with an offline peer, local and peer MCP tool access,
   one-time session-start orientation, resident-caller exclusion, ordinary New
   Thread behavior with the default settings, and runtime diagnostic logging.
   It is included in `scripts/test-linux.py`.

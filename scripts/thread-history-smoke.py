@@ -8,7 +8,8 @@ Verifies:
 - Ranked BM25 search disambiguation over near-miss distractors, time windows, head+tail budgeting
   with `omitted_middle` pagination, and honest `interrupted` status preservation.
 - Live MCP tool access through controlled Codex runs (local + paired peer `machine` selector),
-  excluding the calling thread from its own `list`/`search`.
+  including default network search, transcript routing from a hit, partial coverage, and
+  exclusion of the calling thread from its own `list`/`search`.
 - One-time session-start orientation on run 1 of a new non-resident thread (absent on follow-ups
   and absent on resident activations).
 - An ordinary New Thread request receives neither history context nor the model-facing tool
@@ -132,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-history-') as temporary:
     t_sandbox = uid()
     seed_run(runs_a, keys[0], str(workspace), t_sandbox, t_sandbox,
              'Webhook HMAC rotation for sandbox staging',
-             'Use header X-Sandbox-Sig with a 2h grace window.',
+             'Use header X-Sandbox-Sig with a 2h grace window. Sandbox billing has no export.',
              now_ms - 12 * hour, backend='claude')
 
     t_interrupted = uid()
@@ -188,7 +189,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-history-') as temporary:
              now_ms - 8 * 24 * hour, backend='antigravity')
     t_remote_res = uid()
     seed_run(runs_b, keys[1], str(workspace), t_remote_res, t_remote_res,
-             'Remote private resident note', 'REMOTE_RESIDENT_CANARY',
+             'Remote private resident note', 'hiddenresidentcanary',
              now_ms - 2 * hour, resident=dict(res_obj, id=t_remote_res, owner=keys[1], machine_id=keys[1]))
 
     def launch(i, *, continuity=False):
@@ -303,12 +304,23 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-history-') as temporary:
         caller_thread = uid()
         steps = [
             step('boxen_threads', {'action': 'list'}, 'local_list'),
-            step('boxen_threads', {'action': 'search', 'query': 'merchant payout webhook'}, 'local_search'),
+            step('boxen_threads', {'action': 'search', 'machine': 'local', 'query': 'merchant payout webhook'}, 'local_search'),
             step('boxen_threads', {'action': 'read', 'thread_id': t_payout}, 'local_read'),
             step('boxen_threads', {'action': 'read', 'thread_id': t_res_promoted}, error=True),
             step('boxen_threads', {'action': 'search', 'machine': 'Peer', 'query': 'billing export retention'}, 'remote_search'),
             step('boxen_threads', {'action': 'read', 'machine': 'Peer', 'thread_id': t_remote}, 'remote_read'),
             step('boxen_threads', {'action': 'read', 'machine': 'Peer', 'thread_id': t_remote_res}, error=True),
+            step('boxen_threads', {'action': 'search', 'query': 'billing export', 'limit': 2, 'max_bytes': 4096},
+                 'network_search', {'hosts_searched': 2, 'complete_host_coverage': True, 'returned': 2,
+                                    'results.0.thread_id': t_remote, 'results.0.machine': keys[1],
+                                    'results.1.thread_id': t_sandbox, 'results.1.machine': keys[0]}),
+            step('boxen_threads', {'action': 'read', 'machine': {'$ref': 'network_search.results.0.machine'},
+                                   'thread_id': {'$ref': 'network_search.results.0.thread_id'}},
+                 'discovered_read', {'turns.0.assistant': 'Pipe-delimited files with 42-day Glacier archive retention.'}),
+            step('boxen_threads', {'action': 'search', 'query': 'billing export', 'since_hours': 24},
+                 expect={'total_matches': 1, 'results.0.thread_id': t_sandbox}),
+            step('boxen_threads', {'action': 'search', 'query': 'hiddenresidentcanary'},
+                 expect={'total_matches': 0, 'hosts_searched': 2}),
         ]
         api(0, {'op': 'start', 'spec': {
             'id': caller_thread, 'thread_id': caller_thread, 'backend': 'codex',
@@ -323,6 +335,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-history-') as temporary:
         assert 'X-Payout-Sig-V2' in mcp_out['local_read']['turns'][0]['assistant']
         assert mcp_out['remote_search']['results'][0]['thread_id'] == t_remote
         assert '42-day' in mcp_out['remote_read']['turns'][0]['assistant']
+        assert len(json.dumps(mcp_out['network_search'], separators=(',', ':'), ensure_ascii=False).encode()) <= 4096
 
         run2_id = uid()
         api(0, {'op': 'start', 'after': caller_thread, 'spec': {
@@ -394,6 +407,32 @@ with tempfile.TemporaryDirectory(prefix='boxen-thread-history-') as temporary:
                          if server.get('name') == 'boxen_work']
         assert tool_catalogs and all('boxen_threads' not in tools for tools in tool_catalogs), tool_catalogs
         print('PASS default New Thread omits cross-thread context and rejects direct calls to boxen_threads')
+
+        stop(1)
+        partial_diag = base / 'partial-search-diag.jsonl'
+        api(0, {'op': 'log_file', 'path': str(partial_diag),
+                'filter': {'level': 'debug', 'events': ['thread_history.']}})
+        partial_id = uid()
+        steps = [
+            step('boxen_threads', {'action': 'search', 'query': 'X-Sandbox-Sig'},
+                 expect={'hosts_searched': 1, 'hosts_unavailable': 1, 'unavailable_machines.0': keys[1],
+                         'complete_host_coverage': False, 'results.0.thread_id': t_sandbox}),
+            step('boxen_threads', {'action': 'search', 'query': 'qzxvnonexistent'},
+                 expect={'total_matches': 0, 'complete_host_coverage': False}),
+        ]
+        api(0, {'op': 'start', 'spec': {
+            'id': partial_id, 'thread_id': partial_id, 'backend': 'codex',
+            'cwd': str(workspace), 'model': 'fixture', 'prompt': 'WORK_INTERFACE:' + json.dumps(steps),
+        }})
+        partial = finish(0, partial_id)
+        assert partial['status'] == 'completed', partial
+        api(0, {'op': 'log_off'})
+        records = [json.loads(line) for line in partial_diag.read_text().splitlines()]
+        assert any(r['event'] == 'thread_history.search_host_unavailable' and r['fields']['machine'] == keys[1]
+                   for r in records), records
+        assert any(r['event'] == 'thread_history.network_search' and r['fields']['hosts_unavailable'] == 1
+                   for r in records), records
+        print('PASS network search ranks local and remote matches, routes reads by source, and reports an offline peer')
     finally:
         stop(0)
         stop(1)

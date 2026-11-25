@@ -3,6 +3,7 @@ use crate::{
     Result,
     jobs::{Jobs, Run, terminal},
     state::State,
+    thread_history::{self, MAX_SEARCH_RESULTS},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -82,11 +83,13 @@ fn resolve(jobs: &Jobs, selector: Option<&str>) -> Result<Machine> {
     if matches!(selector, "local" | "This machine") {
         return Ok(available[0].clone());
     }
+    if let Some(machine) = available.iter().find(|machine| machine.key == selector) {
+        return Ok(machine.clone());
+    }
     let found: Vec<_> = available
         .into_iter()
         .filter(|m| {
-            m.key == selector
-                || m.label.eq_ignore_ascii_case(selector)
+            m.label.eq_ignore_ascii_case(selector)
                 || (selector.len() >= 6 && m.key.starts_with(selector))
         })
         .collect();
@@ -869,35 +872,137 @@ pub fn is_tool(name: &str) -> bool {
     )
 }
 
+fn search_network(jobs: &Arc<Jobs>, run: &Run, args: &Value) -> Result<Value> {
+    const PARALLEL_HOSTS: usize = 8;
+    thread_history::search_query(args)?;
+    let limit = thread_history::search_limit(args);
+    let budget = thread_history::search_budget(args);
+    let mut leaf_args = args.clone();
+    leaf_args["limit"] = json!(MAX_SEARCH_RESULTS);
+    leaf_args.as_object_mut().unwrap().remove("max_bytes");
+    let request = json!({"op":"thread_history","args":leaf_args});
+    let owner = run.owner();
+    let available = machines(jobs)?;
+    let mut candidates = Vec::new();
+    let mut searched_threads = 0u64;
+    let mut total_matches = 0u64;
+    let mut unavailable = Vec::new();
+    let mut unavailable_count = 0;
+
+    for batch in available.chunks(PARALLEL_HOSTS) {
+        active(run)?;
+        let replies = std::thread::scope(|scope| {
+            batch
+                .iter()
+                .map(|machine| scope.spawn(|| machine.request(jobs, &owner, request.clone())))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|worker| worker.join().expect("history search worker"))
+                .collect::<Vec<_>>()
+        });
+        for (machine, reply) in batch.iter().zip(replies) {
+            let payload = reply.and_then(|mut reply| {
+                let searched = reply["searched_threads"].as_u64()
+                    .ok_or("Search response has no searched thread count")?;
+                let matches = reply["total_matches"].as_u64()
+                    .ok_or("Search response has no match count")?;
+                let rows = reply["results"].as_array_mut().map(std::mem::take)
+                    .ok_or("Search response has no result rows")?;
+                Ok((searched, matches, rows))
+            });
+            match payload {
+                Ok((searched, matches, rows)) => {
+                    searched_threads = searched_threads.saturating_add(searched);
+                    total_matches = total_matches.saturating_add(matches);
+                    for (rank, mut row) in rows.into_iter().take(MAX_SEARCH_RESULTS).enumerate() {
+                        if row["thread_id"].as_str().is_some() {
+                            row["machine"] = json!(machine.key);
+                            candidates.push((rank, row));
+                        }
+                    }
+                }
+                Err(error) => {
+                    unavailable_count += 1;
+                    if unavailable.len() < PARALLEL_HOSTS {
+                        unavailable.push(json!(machine.key));
+                    }
+                    run.diagnostic(
+                        crate::logging::Level::Warn,
+                        "thread_history.search_host_unavailable",
+                        || json!({"machine":machine.key}),
+                        || json!({"error":error.to_string()}),
+                    );
+                }
+            }
+        }
+        // BM25 scores depend on the source corpus. Compare phrase and term
+        // coverage across hosts, then use each host's ordering as a tie-breaker.
+        candidates.sort_by(|(rank_a, a), (rank_b, b)| {
+            let terms = |row: &Value| row["matched_terms"].as_array().map_or(0, Vec::len);
+            b["phrase_match"].as_bool().unwrap_or(false)
+                .cmp(&a["phrase_match"].as_bool().unwrap_or(false))
+                .then_with(|| terms(b).cmp(&terms(a)))
+                .then_with(|| rank_a.cmp(rank_b))
+                .then_with(|| b["updated_at"].as_str().cmp(&a["updated_at"].as_str()))
+                .then_with(|| a["machine"].as_str().cmp(&b["machine"].as_str()))
+                .then_with(|| a["thread_id"].as_str().cmp(&b["thread_id"].as_str()))
+        });
+        candidates.truncate(limit);
+    }
+
+    let mut result = json!({
+        "action":"search", "scope":"non_resident_threads",
+        "hosts_searched":available.len() - unavailable_count,
+        "hosts_unavailable":unavailable_count, "unavailable_machines":unavailable,
+        "complete_host_coverage":unavailable_count == 0,
+        "searched_threads":searched_threads, "total_matches":total_matches,
+        "returned":0, "results":[],
+    });
+    for (_, row) in candidates {
+        let results = result["results"].as_array_mut().unwrap();
+        results.push(row);
+        result["returned"] = json!(results.len());
+        if serde_json::to_vec(&result)?.len() > budget {
+            let results = result["results"].as_array_mut().unwrap();
+            results.pop();
+            result["returned"] = json!(results.len());
+        }
+    }
+    run.diagnostic(
+        crate::logging::Level::Debug,
+        "thread_history.network_search",
+        || json!({"hosts_searched":result["hosts_searched"],"hosts_unavailable":unavailable_count,
+                  "returned":result["returned"],"total_matches":total_matches}),
+        || Value::Null,
+    );
+    Ok(result)
+}
+
 fn threads(jobs: &Arc<Jobs>, run: &Arc<Run>, args: &Value) -> Result<Value> {
-    if !crate::thread_history::agent_continuity_enabled() {
+    if !thread_history::agent_continuity_enabled() {
         return Err("This daemon has experimental cross-thread continuity disabled".into());
     }
     let record = run.snapshot().record;
     if record.resident.is_some()
         || record.spec.resident_id.is_some()
-        || crate::thread_history::is_resident_thread(jobs, &record.spec.thread_id)
+        || thread_history::is_resident_thread(jobs, &record.spec.thread_id)
     {
         return Err(
             "boxen_threads is scoped to non-resident threads; resident conversations are excluded"
                 .into(),
         );
     }
-    let machine = if let Some(selector) = args["machine"].as_str() {
-        resolve(jobs, Some(selector))?
-    } else {
-        resolve(jobs, None)?
-    };
+    let selector = args["machine"].as_str();
     let mut forwarded = args.clone();
-    if let Some(obj) = forwarded.as_object_mut() {
-        obj.remove("machine");
-        if machine.local && matches!(args["action"].as_str(), Some("list" | "search")) {
-            obj.insert(
-                "exclude_thread_id".into(),
-                json!(record.spec.thread_id),
-            );
-        }
+    let obj = forwarded.as_object_mut().ok_or("History arguments must be an object")?;
+    obj.remove("machine");
+    if matches!(args["action"].as_str(), Some("list" | "search")) {
+        obj.insert("exclude_thread_id".into(), json!(record.spec.thread_id));
     }
+    if selector.is_none() && args["action"] == "search" {
+        return search_network(jobs, run, &forwarded);
+    }
+    let machine = resolve(jobs, selector)?;
     let mut result = machine.request(
         jobs,
         &run.owner(),
@@ -949,11 +1054,11 @@ pub fn tools_for(resident: bool) -> Vec<Value> {
         json!({"type":"function","name":"boxen_work","description":"This tool requests and follows ordinary work across admitted machines. list returns a bounded page of existing anonymous requests, optionally filtered by thread_id; next_cursor retrieves the following page. request starts an anonymous conversation or continues thread_id. handoff accepts the same arguments and records this originating run and tool call at the destination. Handoff acceptance means that the destination owns the new request; later execution still has its own outcome. after_request_id identifies an exact previous request instead of looking up a thread head; a stale predecessor is rejected by the destination. machine accepts a discovered name/id; omission follows a known request or thread handle in this conversation, otherwise local; new remote work gets an automatic destination workspace. request_id can be omitted or a short stable label; labels remain stable within this coordinating conversation, including reads and controls. Returned ids identify exact retries. Attachments are local file paths retained before transfer. The backend field accepts a backend ID advertised by the destination machine. required_capabilities restricts acceptance to a backend that offers all named capabilities. read returns bounded retained progress, next_after, current status and a final response; after replays from that sequence, wait_ms waits up to 20000 for new activity. Large projections are labeled truncated; event_seq retrieves one original event as paged JSON text with offset/next_offset. A long final response has next_response_offset for a response_offset read. steer adds input to active work, cancel requests interruption, and respond answers a retained backend request. Controls can have unknown outcomes and are not automatically repeated. A host/network failure does not establish workload failure. Execution continues independently of this observer. Work requests are distinct from resident mailbox correspondence.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["list","request","handoff","read","steer","cancel","respond"]},"machine":{"type":"string"},"request_id":{"type":"string"},"thread_id":{"type":"string"},"after_request_id":{"type":"string"},"cursor":{"type":"object"},"prompt":{"type":"string"},"backend":{"type":"string"},"required_capabilities":{"type":"array","items":{"type":"string","enum":crate::runtime::Capability::ALL}},"cwd":{"type":"string"},"model":{"type":"string"},"attachments":{"type":"array","items":{"type":"string"},"maxItems":8},"after":{"type":"integer","minimum":0},"event_seq":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"response_offset":{"type":"integer","minimum":0},"wait_ms":{"type":"integer","minimum":0,"maximum":20000},"backend_request_id":{},"result":{}},"required":["action"],"additionalProperties":false}}),
         crate::jobs::thread_workspace::tool(),
     ];
-    if !resident && crate::thread_history::agent_continuity_enabled() {
+    if !resident && thread_history::agent_continuity_enabled() {
         list.push(json!({
             "type": "function",
             "name": "boxen_threads",
-            "description": "This read-only tool discovers and reads prior non-resident Boxen threads without modifying them or replaying prior effects. Resident conversations are strictly excluded. list returns other non-resident threads newest-first with timestamps, human ages, run counts, latest statuses, and opening/latest previews (supports since_hours, until_hours, cwd, limit, offset). search ranks matching non-resident threads across prompts, assistant turns, and tool summaries using query terms and optional since_hours/until_hours/cwd filters, returning best-matching turn excerpts and each thread's latest preview. read returns a clean turn-oriented transcript for thread_id across all backends, preserving late turns, statuses, status details (including interrupted/uncertain outcomes), and compact tool summaries (set include_tool_output=true for fuller tool output, or start_turn/limit/order to page omitted middle turns). machine optionally selects an admitted peer; omission queries the local machine.",
+            "description": "This read-only tool discovers and reads prior non-resident Boxen threads without modifying them or replaying prior effects. Resident conversations are strictly excluded. search without machine queries this machine and admitted peers, ranks matches by query terms with optional since_hours/until_hours/cwd filters, and reports incomplete host coverage if any search fails. Each hit includes a machine ID and thread_id that together address its transcript. An explicit machine scopes search to that host. list returns other non-resident threads newest-first with opening/latest previews and supports since_hours, until_hours, cwd, limit, and offset. read returns a turn-oriented transcript for thread_id with statuses and compact tool summaries. include_tool_output=true expands tool output and start_turn/limit/order page omitted turns. list and read default to this machine when machine is omitted.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

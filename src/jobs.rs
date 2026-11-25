@@ -485,7 +485,7 @@ impl Record {
             && self.spec.resident_id.is_none()
         {
             text.push_str(
-                "\nPrior non-resident Boxen threads on this machine remain readable through the boxen_threads tool (list, search, read). When a message continues earlier work, refers to prior options, or shifts to another prior conversation, searching or listing recent non-resident threads supplies that history without modifying those threads or replaying prior effects. Self-contained requests do not depend on prior thread history. Resident conversations are excluded from boxen_threads.\n",
+                "\nThe boxen_threads tool searches prior non-resident Boxen threads on this machine and admitted peers without needing a machine name. Search hits include the machine and thread ID that address a transcript. A partial search leaves some hosts unsearched. When a message continues earlier work, refers to prior options, or shifts to another conversation, a search and transcript read can supply that history without modifying its source or replaying prior effects. Self-contained requests do not depend on prior thread history. Resident conversations are excluded from boxen_threads.\n",
             );
         }
         text.push('\n');

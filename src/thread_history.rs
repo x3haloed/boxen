@@ -13,6 +13,7 @@ use std::{
 
 const READ_BUDGET_BYTES: usize = 24 * 1024;
 const SEARCH_BUDGET_BYTES: usize = 24 * 1024;
+pub(crate) const MAX_SEARCH_RESULTS: usize = 20;
 const LIST_BUDGET_BYTES: usize = 24 * 1024;
 
 pub(crate) fn agent_continuity_enabled() -> bool {
@@ -712,7 +713,7 @@ fn list_action(jobs: &Jobs, args: &Value, exclude_thread: Option<&str>) -> Resul
     }))
 }
 
-fn search_action(jobs: &Jobs, args: &Value, exclude_thread: Option<&str>) -> Result<Value> {
+pub(crate) fn search_query(args: &Value) -> Result<(&str, Vec<String>)> {
     let query = args["query"]
         .as_str()
         .map(str::trim)
@@ -721,26 +722,37 @@ fn search_action(jobs: &Jobs, args: &Value, exclude_thread: Option<&str>) -> Res
     if query.len() > 2048 {
         return Err("Search query exceeds 2048 bytes".into());
     }
+    let mut terms = Vec::new();
+    for term in tokenize(query, true) {
+        if !terms.contains(&term) {
+            terms.push(term);
+        }
+    }
+    if terms.is_empty() {
+        return Err("Search query contains no searchable terms".into());
+    }
+    Ok((query, terms))
+}
+
+pub(crate) fn search_budget(args: &Value) -> usize {
+    args["max_bytes"]
+        .as_u64()
+        .unwrap_or(SEARCH_BUDGET_BYTES as u64)
+        .clamp(4096, SEARCH_BUDGET_BYTES as u64) as usize
+}
+
+pub(crate) fn search_limit(args: &Value) -> usize {
+    args["limit"].as_u64().unwrap_or(8).clamp(1, MAX_SEARCH_RESULTS as u64) as usize
+}
+
+fn search_action(jobs: &Jobs, args: &Value, exclude_thread: Option<&str>) -> Result<Value> {
+    let (query, query_terms) = search_query(args)?;
     let now_ms = crate::jobs::now();
     let since_hours = args["since_hours"].as_f64();
     let until_hours = args["until_hours"].as_f64();
     let cwd_filter = args["cwd"].as_str().filter(|s| !s.is_empty());
-    let limit = args["limit"].as_u64().unwrap_or(8).clamp(1, 20) as usize;
-    let budget = args["max_bytes"]
-        .as_u64()
-        .map(|v| (v as usize).clamp(4096, SEARCH_BUDGET_BYTES))
-        .unwrap_or(SEARCH_BUDGET_BYTES);
-
-    let query_terms_vec = tokenize(query, true);
-    let mut query_terms: Vec<String> = Vec::new();
-    for t in query_terms_vec {
-        if !query_terms.contains(&t) {
-            query_terms.push(t);
-        }
-    }
-    if query_terms.is_empty() {
-        return Err("Search query contains no searchable terms".into());
-    }
+    let limit = search_limit(args);
+    let budget = search_budget(args);
     let phrase_low = query.to_ascii_lowercase();
 
     let threads = collect_eligible_threads(
@@ -947,6 +959,7 @@ fn search_action(jobs: &Jobs, args: &Value, exclude_thread: Option<&str>) -> Res
         let item = json!({
             "thread_id": doc.group.thread_id,
             "score": (score * 100.0).round() / 100.0,
+            "phrase_match": doc.has_phrase,
             "matched_terms": matched_terms,
             "run_count": doc.group.runs.len(),
             "turn_count": doc.turns.len(),
@@ -1046,13 +1059,6 @@ fn read_action(jobs: &Jobs, args: &Value) -> Result<Value> {
         .ok_or("Read requires a non-resident thread_id")?;
     crate::jobs::valid_id(thread_id)?;
 
-    if is_resident_thread(jobs, thread_id) {
-        return Err(
-            "Resident conversations are excluded from boxen_threads; only non-resident threads are readable through this tool"
-                .into(),
-        );
-    }
-
     let now_ms = crate::jobs::now();
     let include_tool_output = args["include_tool_output"].as_bool().unwrap_or(false);
     let order = args["order"].as_str().unwrap_or("asc");
@@ -1071,6 +1077,14 @@ fn read_action(jobs: &Jobs, args: &Value) -> Result<Value> {
         .into_iter()
         .filter(|s| s.record.spec.thread_id == thread_id)
         .collect();
+    // The runs in this exact snapshot must be eligible. A promotion and activation
+    // between separate lookups could otherwise admit a newly attached run.
+    if excluded_resident_threads(jobs, &runs).contains(thread_id) {
+        return Err(
+            "Resident conversations are excluded from boxen_threads; only non-resident threads are readable through this tool"
+                .into(),
+        );
+    }
     if runs.is_empty() {
         return Err("This non-resident thread was not found on the selected machine".into());
     }
