@@ -115,10 +115,11 @@ headings respond across their full width, not only on their text.
   for Codex, Antigravity, and Claude Code. Choosing another machine moves the idle conversation once
   the destination reports its runtime configured,
   including its retained history and attachments. The draft follows the conversation
-  and remains ready to send. The composer is one line whose route hint names
-  the effect of sending (`→ steers run 42`, `→ starts run 6`, `→ held until run
-  12 settles`, `→ mail to Meridian`); clicking the hint or pressing Enter sends,
-  and Shift+Enter adds a line. **Cancel run** is in the pane's **···** menu.
+  and remains ready to send. **Send** and Enter submit the draft.
+  Shift+Enter adds a line. The editor grows to fit several lines, then
+  scrolls internally. The Send tooltip gives the effect for anonymous
+  threads when the current run can take input. **Cancel run** is in the
+  pane's **···** menu.
 
 Pending backend requests appear in the timeline as an amber gate with their original
 question and response controls. Pending command approvals sit above history in
@@ -517,8 +518,10 @@ Enter sends from the focused composer; Shift+Enter adds a line. A resident
 message can be sent during an activation. Reply explicitly selects an earlier
 message and leaves a removable quote in the draft. A pending resident send
 retains its own exact request while the next draft can be written. Anonymous
-updates stay tied to the intended run; if it ends, a separate action prepares
-the draft for a follow-up. No uncertain update is replayed automatically.
+updates stay tied to the intended run. In Codex, the editor stays available
+while a turn is starting or while an ended turn has outstanding work. Send
+becomes available when the turn can accept steering or the run has settled
+and can accept a follow-up. No uncertain update is replayed automatically.
 
 The composer accepts up to eight original files, up to 32 MiB each, through the
 file picker or a drop on the editor. Text is optional with a file. File chips

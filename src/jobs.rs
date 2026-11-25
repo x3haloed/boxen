@@ -1253,12 +1253,14 @@ fn project(snapshot: &mut Snapshot, event: &Event) {
         snapshot.backend_thread = event.data["id"].as_str().map(str::to_owned);
     } else if event.kind == "antigravity_prompt_state" {
         snapshot.native_prompt = event.data["state"].as_str().map(str::to_owned);
-    } else if event.kind == "backend_prompt_started" && event.data["backend"] == "claude" {
+    } else if event.kind == "backend_prompt_started"
+        && matches!(event.data["backend"].as_str(), Some("claude" | "codex"))
+    {
         snapshot.native_prompt = Some("active".into());
     } else if event.kind == "backend_prompt_ended"
         && matches!(
             event.data["backend"].as_str(),
-            Some("antigravity" | "claude")
+            Some("antigravity" | "claude" | "codex")
         )
     {
         snapshot.native_prompt = Some("ended".into());

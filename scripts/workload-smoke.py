@@ -89,7 +89,7 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
             if early:
                 after = early[-1]["seq"]
             if any(e["data"].get("method") == "item/commandExecution/outputDelta" for e in early):
-                assert not batch["done"] and not batch["snapshot"]["status"] == "completed"
+                assert not batch["done"] and batch["snapshot"]["native_prompt"] == "active"
                 break
         stream.close()
         assert any(e["data"].get("method") == "item/reasoning/summaryTextDelta" for e in early)
@@ -190,6 +190,7 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert not request({"op": "thread_result", "id": late["id"]})["done"]
         head = request({"op":"thread_head","thread_id":late["thread_id"]})
         assert head["record"]["spec"]["id"] == late["id"] and head["status"] == "running"
+        assert head["native_prompt"] == "ended", head
         late_update = secrets.token_hex(32)
         request({"op":"control","id":late["id"],"action":{
             "type":"steer","text":"The native prompt already ended","update_id":late_update}})

@@ -151,7 +151,9 @@ runtime cleanup and closes the control channel in the same transition. Restart
 recovery records uncertainty through that journal transition too. Codex can report a native turn outcome before tracked tool work and controls settle. The
 `backend_prompt_ended` record reports the outstanding counts. That run remains
 active until its outstanding work settles or its outcome becomes uncertain.
-A notification for a different native turn remains attributable to that turn.
+The run snapshot reports when the native turn can accept steering and when it
+has ended, independently of the workload's terminal status. A notification
+for a different native turn remains attributable to that turn.
 A successful anonymous request includes a conventional backend response.
 A resident activation can settle without assistant narration or a message send.
 

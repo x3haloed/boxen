@@ -17,6 +17,7 @@ pub struct View {
     anchor: Option<String>,
     latest: bool,
     at_latest: bool,
+    footer_height: Option<f32>,
     message_layouts: HashMap<String, (MessageLayout, egui::Rect)>,
 }
 
@@ -102,7 +103,6 @@ pub fn history(
     data: &mut Data,
     key: &ThreadKey,
     activity: bool,
-    reserved: f32,
     show: impl FnOnce(&mut egui::Ui, &mut Data),
 ) {
     let view = data.views.entry(key.clone()).or_default();
@@ -111,11 +111,13 @@ pub fn history(
         view.anchor = None;
     }
     view.visible = None;
-    let height = (ui.available_height() - reserved).max(32.);
+    let reserved = view.footer_height.unwrap_or(26.);
+    let height = (ui.available_height() - reserved).max(0.);
     let view = egui::ScrollArea::vertical()
         .id_salt(("conversation-history", key, activity))
         .auto_shrink([false, false])
         .max_height(height)
+        .min_scrolled_height(0.)
         .stick_to_bottom(true)
         .show_viewport(ui, |ui, _| {
             show(ui, data);
@@ -150,18 +152,22 @@ pub fn record(
         }
     }
 }
-pub fn reserve(text: &str, files: &[FileRef], extra: usize, width: f32) -> f32 {
-    let capacity = ((width - 170.) / 7.).max(10.) as usize;
-    let lines = text
-        .split('\n')
-        .map(|line| line.chars().count().max(1).div_ceil(capacity))
-        .sum::<usize>();
-    50. + (lines.saturating_sub(1).min(5) * 17) as f32
-        + if files.is_empty() { 0. } else { 25. }
-        + (extra * 22) as f32
+/// Use the laid-out footer, including wrapped notices and attachment chips,
+/// to give the history exactly the rest of the pane on the next frame.
+pub fn footer(
+    ui: &mut egui::Ui,
+    data: &mut Data,
+    key: &ThreadKey,
+    show: impl FnOnce(&mut egui::Ui, &mut Data),
+) {
+    let bounds = ui.scope(|ui| show(ui, data)).response.rect;
+    let height = bounds.height() + ui.spacing().item_spacing.y;
+    let view = data.views.entry(key.clone()).or_default();
+    if view.footer_height != Some(height) {
+        view.footer_height = Some(height);
+        ui.ctx().request_repaint();
+    }
 }
-
-const ACCENT_HINT: egui::Color32 = crate::console_style::ACCENT;
 
 pub struct Composition {
     pub send: bool,
@@ -171,10 +177,7 @@ pub struct Composer<'a> {
     pub text: &'a mut String,
     pub files: &'a mut Vec<FileRef>,
     pub target: Target,
-    pub label: &'a str,
-    /// Route hint shown inside the composer; clicking it sends.
-    pub hint: Option<String>,
-    pub placeholder: String,
+    pub send_detail: Option<String>,
     pub limit: usize,
     pub blocked: bool,
 }
@@ -214,9 +217,7 @@ pub fn composer(
         text,
         files,
         target,
-        label,
-        hint,
-        placeholder,
+        send_detail,
         limit,
         blocked,
     } = composer;
@@ -227,78 +228,101 @@ pub fn composer(
     let working = preparing.get(&target).is_some_and(|p| p.working);
     let editor_id = ui.make_persistent_id(("composer", &target));
     let enter = send_on_enter(ui, editor_id);
+    let max_height = (ui.clip_rect().height() * 0.32).clamp(22., 104.);
     let (editor, valid, click) = ui
-        .horizontal(|ui| {
+        .horizontal_top(|ui| {
+            use crate::console_style::{ACCENT, EDGE, FIELD, MIN_TARGET};
             let attach = ui
                 .add_enabled(
                     !working && files.len() < attachments::MAX_FILES,
                     crate::console_style::icon_button(if working { "…" } else { "+" }),
                 )
-                .on_hover_text("Attach files · or drop files onto the composer")
-                .clicked();
-            let send_text = match &hint {
-                Some(hint) => format!("{hint} ↵"),
-                None => format!("{label} ↵"),
-            };
-            let send_font = egui::FontId::monospace(10.5);
-            let send_width = ui.fonts_mut(|f| {
-                f.layout_no_wrap(send_text.clone(), send_font.clone(), egui::Color32::WHITE)
-                    .size()
-                    .x
-            }) + ui.spacing().button_padding.x * 2.
-                + 4.;
-            let send_width = send_width.min(ui.available_width() * 0.6);
-            let width = (ui.available_width() - send_width - ui.spacing().item_spacing.x).max(40.);
+                .on_hover_text("Attach files · or drop files onto the composer");
+            ui.ctx()
+                .accesskit_node_builder(attach.id, |node| node.set_label("Attach files"));
+            let send_width = 42.;
+            let width = (ui.available_width() - send_width - ui.spacing().item_spacing.x).max(0.);
+            let input_rect =
+                egui::Rect::from_min_size(ui.next_widget_position(), egui::vec2(width, max_height));
             let editor = ui
-                .allocate_ui_with_layout(
-                    egui::vec2(width, 0.),
-                    egui::Layout::top_down(egui::Align::Min),
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(input_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
                     |ui| {
-                        ui.set_width(width);
-                        egui::ScrollArea::vertical()
-                            .id_salt(("composer-input", &target))
-                            .max_height(104.)
-                            .auto_shrink([false, true])
+                        let border = if ui.memory(|memory| memory.has_focus(editor_id)) {
+                            ACCENT
+                        } else {
+                            EDGE
+                        };
+                        egui::Frame::new()
+                            .fill(FIELD)
+                            .stroke(egui::Stroke::new(1., border))
+                            .inner_margin(egui::Margin::symmetric(5, 3))
+                            .corner_radius(3)
                             .show(ui, |ui| {
-                                ui.add(
-                                    egui::TextEdit::multiline(text)
-                                        .id(editor_id)
-                                        .return_key(egui::KeyboardShortcut::new(
-                                            egui::Modifiers::SHIFT,
-                                            egui::Key::Enter,
-                                        ))
-                                        .hint_text(placeholder.as_str())
-                                        .frame(egui::Frame::NONE)
-                                        .desired_rows(1)
-                                        .desired_width(f32::INFINITY),
-                                )
+                                ui.visuals_mut().clip_rect_margin = 0.;
+                                ui.spacing_mut().scroll = egui::style::ScrollStyle {
+                                    foreground_color: true,
+                                    fade: egui::style::ScrollFadeStyle { strength: 0., size: 0. },
+                                    ..egui::style::ScrollStyle::solid()
+                                };
+                                egui::ScrollArea::vertical()
+                                    .id_salt(("composer-input", &target))
+                                    .auto_shrink([false, true])
+                                    .animated(false)
+                                    .show(ui, |ui| {
+                                        // egui lays out its built-in hint using the pre-edit text
+                                        // on the first keystroke. Paint the hint separately so a
+                                        // paste into an empty draft can reveal its caret immediately.
+                                        let output = egui::TextEdit::multiline(text)
+                                            .id(editor_id)
+                                            .return_key(egui::KeyboardShortcut::new(
+                                                egui::Modifiers::SHIFT,
+                                                egui::Key::Enter,
+                                            ))
+                                            .frame(egui::Frame::NONE)
+                                            .desired_rows(1)
+                                            .desired_width(f32::INFINITY)
+                                            .show(ui);
+                                        if text.is_empty() {
+                                            ui.painter()
+                                                .with_clip_rect(output.text_clip_rect)
+                                                .text(
+                                                    output.galley_pos,
+                                                    egui::Align2::LEFT_TOP,
+                                                    "Message…",
+                                                    egui::TextStyle::Body.resolve(ui.style()),
+                                                    ui.visuals().weak_text_color(),
+                                                );
+                                        }
+                                        output.response
+                                    })
+                                    .inner
                             })
                             .inner
                     },
                 )
                 .inner;
+            ui.ctx().accesskit_node_builder(editor.id, |node| {
+                node.set_label("Message");
+                node.set_placeholder("Message…");
+            });
             let valid = !blocked
                 && !working
                 && (!text.trim().is_empty() || !files.is_empty())
                 && text.len() <= limit;
+            let mut tooltip = "Enter sends · Shift+Enter adds a line".to_owned();
+            if let Some(detail) = send_detail {
+                tooltip = format!("{detail}\n{tooltip}");
+            }
             let click = ui
-                .add_enabled_ui(valid, |ui| {
-                    ui.add_sized(
-                        egui::vec2(send_width, crate::console_style::MIN_TARGET),
-                        egui::Button::new(RichText::new(&send_text).font(send_font).color(
-                            if valid {
-                                ACCENT_HINT
-                            } else {
-                                ui.visuals().weak_text_color()
-                            },
-                        ))
-                        .frame(false)
-                        .truncate(),
-                    )
-                })
-                .inner
-                .on_hover_text(format!("{label} · Enter sends · Shift+Enter adds a line"))
-                .on_disabled_hover_text(send_text.clone())
+                .add_enabled(
+                    valid,
+                    egui::Button::new("Send").min_size(egui::vec2(send_width, MIN_TARGET)),
+                )
+                .on_hover_text(&tooltip)
+                .on_disabled_hover_text(&tooltip)
                 .clicked();
             attachments::add_files(
                 ui,
@@ -306,7 +330,7 @@ pub fn composer(
                 target.clone(),
                 files.len(),
                 !working,
-                attach,
+                attach.clicked(),
                 actions,
             );
             (editor, valid, click)
@@ -1126,6 +1150,139 @@ mod tests {
     use super::*;
 
     #[test]
+    fn composer_stays_at_the_bottom_and_scrolls_long_drafts() {
+        use crate::console_style::FIELD;
+
+        let ctx = egui::Context::default();
+        crate::console_style::install(&ctx);
+        let mut data = Data::default();
+        let key = ThreadKey {
+            peer: "fixture".into(),
+            id: "thread".into(),
+        };
+        let target = Target::Thread(key.clone());
+        let mut files = Vec::new();
+
+        for (width, height) in [(680., 450.), (400., 200.)] {
+            let mut previous_height = 0.;
+            for (count, draft) in [
+                (1, "One line".to_owned()),
+                (3, "One line\nTwo lines\nThree lines".to_owned()),
+                (35, "Long wrapped text for a narrow pane. ".repeat(35)),
+                (1, String::new()),
+            ] {
+                let mut text = draft;
+                let mut frame = || {
+                    ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, height),
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| {
+                            history(ui, &mut data, &key, false, |ui, _| {
+                                ui.label("History");
+                            });
+                            footer(ui, &mut data, &key, |ui, data| {
+                                composer(
+                                    ui, data,
+                                    Composer {
+                                        text: &mut text,
+                                        files: &mut files,
+                                        target: target.clone(),
+                                        send_detail: None,
+                                        limit: 32 * 1024,
+                                        blocked: false,
+                                    },
+                                    &mut Vec::new(),
+                                );
+                            });
+                        },
+                    )
+                };
+                frame();
+                frame();
+                let output = frame();
+                let editor = output
+                    .shapes
+                    .iter()
+                    .find_map(|clipped| match &clipped.shape {
+                        egui::Shape::Rect(shape)
+                            if shape.fill == FIELD && shape.rect.width() > 200. =>
+                        {
+                            Some((shape.rect, clipped.clip_rect))
+                        }
+                        _ => None,
+                    })
+                    .expect("editor surface");
+                assert!(
+                    (editor.0.bottom() - editor.1.bottom()).abs() <= 1.,
+                    "{width}×{height}, {count}: {editor:?}"
+                );
+                assert!(editor.0.height() <= 104.);
+                if count > 1 {
+                    assert!(editor.0.height() > previous_height);
+                }
+                if count == 35 {
+                    assert!(output.shapes.iter().any(|clipped| {
+                        matches!(&clipped.shape, egui::Shape::Text(shape)
+                            if shape.galley.size().y > editor.0.height()
+                                && clipped.clip_rect.height() <= editor.0.height())
+                    }));
+                }
+                previous_height = editor.0.height();
+            }
+        }
+    }
+
+    #[test]
+    fn pasting_into_an_empty_composer_reveals_the_end_of_the_draft() {
+        let ctx = egui::Context::default();
+        let mut data = Data::default();
+        let mut text = String::new();
+        let mut files = Vec::new();
+        let target = Target::Mail("fixture".into());
+        let draft = "A line of pasted text\n".repeat(32) + "End of draft";
+        let mut frame = |events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let id = ui.make_persistent_id(("composer", &target));
+                    ui.memory_mut(|memory| memory.request_focus(id));
+                    composer(
+                        ui,
+                        &mut data,
+                        Composer {
+                            text: &mut text,
+                            files: &mut files,
+                            target: target.clone(),
+                            send_detail: None,
+                            limit: 32 * 1024,
+                            blocked: false,
+                        },
+                        &mut Vec::new(),
+                    );
+                },
+            )
+        };
+        frame(vec![]);
+        frame(vec![egui::Event::Paste(draft.clone())]);
+        let output = frame(vec![]);
+        assert!(output.shapes.iter().any(|clipped| {
+            let egui::Shape::Text(shape) = &clipped.shape else {
+                return false;
+            };
+            shape.galley.job.text == draft
+                && clipped.clip_rect.y_range().contains(shape.pos.y + shape.galley.rect.bottom() - 1.)
+        }));
+    }
+
+    #[test]
     fn focused_composer_inserts_shift_enter_and_sends_on_plain_enter() {
         let ctx = egui::Context::default();
         let mut data = Data::default();
@@ -1166,9 +1323,7 @@ mod tests {
                         text: &mut text,
                         files: &mut files,
                         target: target.clone(),
-                        label: "Send",
-                        hint: None,
-                        placeholder: "Message…".into(),
+                        send_detail: None,
                         limit: 32768,
                         blocked: false,
                     },

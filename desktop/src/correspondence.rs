@@ -1255,7 +1255,6 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
         conversation as view,
     };
     let local = view::local(data);
-    let resident_name = agent_name(data, key);
     let scope = ui.make_persistent_id(("resident-mail-scope", key));
     let mut all = ui
         .data_mut(|memory| memory.get_temp::<bool>(scope))
@@ -1370,14 +1369,6 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
     let mut choose_reply = None;
     let mut switch = None;
     let mut message_anchor = None;
-    let extra = 1
-        + usize::from(draft.parent.is_some())
-        + usize::from(!pending.is_empty())
-        + usize::from(
-            data.preparing
-                .get(&target)
-                .is_some_and(|p| !p.errors.is_empty()),
-        );
     if activity {
         ui.weak("Private execution and delivered messages");
         crate::activity::earlier(ui, data, key);
@@ -1414,7 +1405,6 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
         data,
         key,
         activity,
-        view::reserve(&draft.body, &draft.files, extra, ui.available_width()),
         |ui, data| {
             let mut runs = runs.iter().peekable();
             if messages.is_empty() && runs.peek().is_none() {
@@ -1514,101 +1504,82 @@ pub fn chat(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut V
         draft.parent = Some(parent);
         actions.push(Action::Mail(MailAction::Pin(Pane::Chat(key.clone()))));
     }
-    if let Some(parent) = draft.parent.clone() {
-        let title = messages
-            .iter()
-            .find(|(i, _)| i == &parent.id)
-            .map(|(_, (_, m))| snippet(m))
-            .unwrap_or_else(|| "Earlier message".into());
-        ui.horizontal_wrapped(|ui| {
-            if ui.button(format!("Replying to: {title}")).clicked() {
-                view::switch(data, key, activity, Some(parent.id.clone()));
-            }
-            if ui.button("Remove reply").clicked() {
-                draft.parent = None;
-            }
-        });
-    }
-    if !pending.is_empty() {
-        ui.menu_button(format!("{} awaiting confirmation", pending.len()), |ui| {
-            for (id, error, sending) in &pending {
-                ui.push_id(id, |ui| {
-                    let msg = if id == &draft.id {
-                        draft.pending.as_ref()
-                    } else {
-                        data.saved
-                            .mail
-                            .drafts
-                            .iter()
-                            .find(|d| d.id == *id)
-                            .and_then(|d| d.pending.as_ref())
-                    };
-                    if let Some(msg) = msg {
-                        let body = msg.request["message"]["body"].as_str().unwrap_or("");
-                        let brief: String = body.chars().take(80).collect();
-                        ui.label(if brief.is_empty() {
-                            "Message with files".into()
+    view::footer(ui, data, key, |ui, data| {
+        if let Some(parent) = draft.parent.clone() {
+            let title = messages
+                .iter()
+                .find(|(i, _)| i == &parent.id)
+                .map(|(_, (_, m))| snippet(m))
+                .unwrap_or_else(|| "Earlier message".into());
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(format!("Replying to: {title}")).clicked() {
+                    view::switch(data, key, activity, Some(parent.id.clone()));
+                }
+                if ui.button("Remove reply").clicked() {
+                    draft.parent = None;
+                }
+            });
+        }
+        if !pending.is_empty() {
+            ui.menu_button(format!("{} awaiting confirmation", pending.len()), |ui| {
+                for (id, error, sending) in &pending {
+                    ui.push_id(id, |ui| {
+                        let msg = if id == &draft.id {
+                            draft.pending.as_ref()
                         } else {
-                            brief
-                        });
-                    }
-                    if *sending {
-                        ui.weak("Checking acceptance…");
-                    } else {
-                        if let Some(error) = error {
-                            ui.label(error);
+                            data.saved
+                                .mail
+                                .drafts
+                                .iter()
+                                .find(|d| d.id == *id)
+                                .and_then(|d| d.pending.as_ref())
+                        };
+                        if let Some(msg) = msg {
+                            let body = msg.request["message"]["body"].as_str().unwrap_or("");
+                            let brief: String = body.chars().take(80).collect();
+                            ui.label(if brief.is_empty() {
+                                "Message with files".into()
+                            } else {
+                                brief
+                            });
                         }
-                        if ui.button("Retry same message").clicked() {
-                            actions.push(Action::Mail(MailAction::Retry(id.clone())));
+                        if *sending {
+                            ui.weak("Checking acceptance…");
+                        } else {
+                            if let Some(error) = error {
+                                ui.label(error);
+                            }
+                            if ui.button("Retry same message").clicked() {
+                                actions.push(Action::Mail(MailAction::Retry(id.clone())));
+                            }
                         }
-                    }
-                    ui.separator();
-                });
-            }
-        });
-    }
-    let resident = data.agents.resident(key);
-    let name = resident
-        .and_then(|resident| resident["name"].as_str())
-        .map_or_else(
-            // Before the resident catalog loads, the fallback carries the machine too.
-            || {
-                resident_name
-                    .split(" · ")
-                    .next()
-                    .unwrap_or("resident")
-                    .to_owned()
+                        ui.separator();
+                    });
+                }
+            });
+        }
+        let blocked = draft.pending.is_some() || data.local_key.is_empty();
+        let result = view::composer(
+            ui,
+            data,
+            view::Composer {
+                text: &mut draft.body,
+                files: &mut draft.files,
+                target,
+                send_detail: None,
+                limit: 32 * 1024,
+                blocked,
             },
-            str::to_owned,
+            actions,
         );
-    let activation = if resident.is_some_and(|resident| resident["auto_activate"] == false) {
-        " · auto-activation off"
-    } else {
-        ""
-    };
-    let blocked = draft.pending.is_some() || data.local_key.is_empty();
-    let result = view::composer(
-        ui,
-        data,
-        view::Composer {
-            text: &mut draft.body,
-            files: &mut draft.files,
-            target,
-            label: "Send",
-            hint: Some(format!("→ mail to {name}{activation}")),
-            placeholder: format!("Message {name}…"),
-            limit: 32 * 1024,
-            blocked,
-        },
-        actions,
-    );
-    if result.changed {
-        actions.push(Action::Mail(MailAction::Pin(Pane::Chat(key.clone()))));
-    }
-    data.saved.mail.drafts[index] = draft;
-    if result.send {
-        actions.push(Action::Mail(MailAction::Send(draft_id)));
-    }
+        if result.changed {
+            actions.push(Action::Mail(MailAction::Pin(Pane::Chat(key.clone()))));
+        }
+        data.saved.mail.drafts[index] = draft;
+        if result.send {
+            actions.push(Action::Mail(MailAction::Send(draft_id)));
+        }
+    });
 }
 fn snippet(m: &Value) -> String {
     let text = m["body"]

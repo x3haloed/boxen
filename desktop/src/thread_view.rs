@@ -196,6 +196,11 @@ fn send_route(head: &Value, after_refusal: bool) -> SendRoute {
         SendRoute::Followup
     } else if after_refusal || head["native_prompt"] == "ended" || head["status"] == "cancelling" {
         SendRoute::Draft
+    } else if head["record"]["spec"]["backend"] == "codex"
+        && head["status"] == "starting"
+        && head["native_prompt"] != "active"
+    {
+        SendRoute::Draft
     } else if head["record"]["spec"]["backend"] == "claude" {
         SendRoute::Hold
     } else if matches!(
@@ -930,10 +935,6 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
         .map(|(i, p)| (i, p.spec["id"].as_str().unwrap_or("").to_owned()));
     let waiting = data.saved.steering.iter().find(|s| s.key == *key).cloned();
     let target = Target::Thread(key.clone());
-    let errors = data
-        .preparing
-        .get(&target)
-        .map_or(0, |p| usize::from(!p.errors.is_empty()));
     let mut draft = data
         .saved
         .drafts
@@ -1014,24 +1015,11 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             backend_request(ui, row, key, live_id, actions);
         }
     }
-    let extra = errors
-        + usize::from(last.is_some())
-        + usize::from(data.send_checking.contains(key))
-        + usize::from(moving)
-        + usize::from(waiting.is_some())
-        + usize::from(pending.is_some())
-        + usize::from(data.thread_issues.contains_key(key))
-        + usize::from(
-            data.preparing_followups
-                .values()
-                .any(|intent| &intent.key == key),
-        );
     view::history(
         ui,
         data,
         key,
         activity,
-        view::reserve(&draft, &files, extra, ui.available_width()),
         |ui, data| {
             if runs.is_empty() && pending.is_none() {
                 ui.weak("No retained messages yet.");
@@ -1233,118 +1221,123 @@ pub fn panel(ui: &mut egui::Ui, data: &mut Data, key: &ThreadKey, actions: &mut 
             }
         },
     );
-    if moving {
-        ui.horizontal_wrapped(|ui| {
-            if data.moving.contains(key) {
-                ui.label("Moving conversation…");
-            } else if ui.button("Retry same move").clicked() {
-                actions.push(Action::RetryMove(key.clone()));
-            }
-        });
-    }
-    if let Some((index, id)) = &pending {
-        ui.horizontal_wrapped(|ui| {
-            let sending = data.sending.contains(id);
-            ui.label(if sending {
-                "Sending…"
-            } else {
-                "Request acceptance is unconfirmed."
-            });
-            if !sending && ui.button("Retry same request").clicked() {
-                actions.push(Action::Retry(*index));
-            }
-        });
-    }
-    if data
-        .preparing_followups
-        .values()
-        .any(|intent| &intent.key == key)
-    {
-        ui.weak("Preparing follow-up…");
-    }
-    if data.send_checking.contains(key) {
-        ui.weak("Checking which run owns input…");
-    }
-    if let Some(issue) = data.thread_issues.get(key) {
-        ui.label(issue);
-    }
-    if let Some(steering) = waiting {
-        ui.horizontal_wrapped(|ui| {
-            let tag = run_key(&key.peer, &steering.run);
-            let queued = data
-                .transcripts
-                .get(&tag)
-                .is_some_and(|t| t.queued_updates.contains(&steering.id));
-            if queued {
-                if let Some(index) = runs
-                    .iter()
-                    .position(|run| run["record"]["spec"]["id"] == steering.run)
-                {
-                    ui.weak(format!("○ queued for run {}", index + 1));
-                } else {
-                    ui.weak("○ queued");
+    view::footer(ui, data, key, |ui, data| {
+        if moving {
+            ui.horizontal_wrapped(|ui| {
+                if data.moving.contains(key) {
+                    ui.label("Moving conversation…");
+                } else if ui.button("Retry same move").clicked() {
+                    actions.push(Action::RetryMove(key.clone()));
                 }
-            } else if data.active_steering.contains(key) {
-                ui.weak("Sending…");
-            } else if running.as_deref() != Some(&steering.run)
-                || data.thread_issues.contains_key(key)
-            {
-                ui.weak("? not confirmed · draft kept");
-            } else {
-                ui.weak("Awaiting runtime");
-            }
-            if !data.active_steering.contains(key) && ui.button("Keep as draft").clicked() {
-                actions.push(Action::RestoreSteer(steering));
-            }
-        });
-    }
-    let hint = last.map(|run| match send_route(run, false) {
-        SendRoute::Hold => format!("→ held until run {} settles", runs.len()),
-        SendRoute::Followup => format!("→ starts run {}", runs.len() + 1),
-        SendRoute::Steer if run["record"]["spec"]["backend"] == "openrouter" => {
-            "→ queued for next step".into()
+            });
         }
-        SendRoute::Steer => format!("→ steers run {}", runs.len()),
-        SendRoute::Draft => "→ waiting for a sendable run".into(),
-    });
-    let frozen = moving
-        || data.send_checking.contains(key)
-        || data.hold_pending.contains(key)
-        || pending.is_some()
-        || data.saved.steering.iter().any(|s| s.key == *key)
-        || data
+        if let Some((index, id)) = &pending {
+            ui.horizontal_wrapped(|ui| {
+                let sending = data.sending.contains(id);
+                ui.label(if sending {
+                    "Sending…"
+                } else {
+                    "Request acceptance is unconfirmed."
+                });
+                if !sending && ui.button("Retry same request").clicked() {
+                    actions.push(Action::Retry(*index));
+                }
+            });
+        }
+        if data
             .preparing_followups
             .values()
-            .any(|intent| &intent.key == key);
-    let compose = view::composer(
-        ui,
-        data,
-        view::Composer {
-            text: &mut draft,
-            files: &mut files,
-            target,
-            label: "Send",
-            hint,
-            placeholder: "Message…".into(),
-            limit: 256 * 1024,
-            blocked: frozen || last.is_none(),
-        },
-        actions,
-    );
-    if compose.changed && (!draft.is_empty() || !files.is_empty()) {
-        actions.push(Action::Pin(key.clone()));
-    }
-    data.saved.drafts.retain(|(k, _)| k != key);
-    data.saved.thread_files.retain(|(k, _)| k != key);
-    if !draft.is_empty() {
-        data.saved.drafts.push((key.clone(), draft));
-    }
-    if !files.is_empty() {
-        data.saved.thread_files.push((key.clone(), files));
-    }
-    if compose.send {
-        actions.push(Action::Send(key.clone()));
-    }
+            .any(|intent| &intent.key == key)
+        {
+            ui.weak("Preparing follow-up…");
+        }
+        if data.send_checking.contains(key) {
+            ui.weak("Checking which run owns input…");
+        }
+        if let Some(issue) = data.thread_issues.get(key) {
+            ui.label(issue);
+        }
+        if let Some(steering) = waiting {
+            ui.horizontal_wrapped(|ui| {
+                let tag = run_key(&key.peer, &steering.run);
+                let queued = data
+                    .transcripts
+                    .get(&tag)
+                    .is_some_and(|t| t.queued_updates.contains(&steering.id));
+                if queued {
+                    if let Some(index) = runs
+                        .iter()
+                        .position(|run| run["record"]["spec"]["id"] == steering.run)
+                    {
+                        ui.weak(format!("○ queued for run {}", index + 1));
+                    } else {
+                        ui.weak("○ queued");
+                    }
+                } else if data.active_steering.contains(key) {
+                    ui.weak("Sending…");
+                } else if running.as_deref() != Some(&steering.run)
+                    || data.thread_issues.contains_key(key)
+                {
+                    ui.weak("? not confirmed · draft kept");
+                } else {
+                    ui.weak("Awaiting runtime");
+                }
+                if !data.active_steering.contains(key) && ui.button("Keep as draft").clicked() {
+                    actions.push(Action::RestoreSteer(steering));
+                }
+            });
+        }
+        let route = last.map_or(SendRoute::Draft, |run| send_route(run, false));
+        let hint = last.map(|run| match route {
+            SendRoute::Hold => format!("Holds the message until run {} settles", runs.len()),
+            SendRoute::Followup => format!("Starts run {}", runs.len() + 1),
+            SendRoute::Steer if run["record"]["spec"]["backend"] == "openrouter" => {
+                "Queues the message for the next step".into()
+            }
+            SendRoute::Steer => format!("Steers run {}", runs.len()),
+            SendRoute::Draft if run["native_prompt"] == "ended" => {
+                "The turn ended. Send becomes available when outstanding work finishes.".into()
+            }
+            SendRoute::Draft if run["status"] == "starting" => "Waiting for the turn to start".into(),
+            SendRoute::Draft => "Send is available when the conversation can accept input".into(),
+        });
+        let frozen = moving
+            || data.send_checking.contains(key)
+            || data.hold_pending.contains(key)
+            || pending.is_some()
+            || data.saved.steering.iter().any(|s| s.key == *key)
+            || data
+                .preparing_followups
+                .values()
+                .any(|intent| &intent.key == key);
+        let compose = view::composer(
+            ui,
+            data,
+            view::Composer {
+                text: &mut draft,
+                files: &mut files,
+                target,
+                send_detail: hint,
+                limit: 256 * 1024,
+                blocked: frozen || route == SendRoute::Draft,
+            },
+            actions,
+        );
+        if compose.changed && (!draft.is_empty() || !files.is_empty()) {
+            actions.push(Action::Pin(key.clone()));
+        }
+        data.saved.drafts.retain(|(k, _)| k != key);
+        data.saved.thread_files.retain(|(k, _)| k != key);
+        if !draft.is_empty() {
+            data.saved.drafts.push((key.clone(), draft));
+        }
+        if !files.is_empty() {
+            data.saved.thread_files.push((key.clone(), files));
+        }
+        if compose.send {
+            actions.push(Action::Send(key.clone()));
+        }
+    });
 }
 fn render_rows(
     ui: &mut egui::Ui,
@@ -1940,10 +1933,14 @@ mod tests {
     }
 
     #[test]
-    fn ended_antigravity_prompt_exposes_ordinary_send_for_background_work() {
-        for (state, hint) in [
-            ("ready", "→ starts run 2 ↵"),
-            ("ended", "→ waiting for a sendable run ↵"),
+    fn send_control_tracks_the_native_turn_and_keeps_the_draft_visible() {
+        for (backend, status, state, sendable) in [
+            ("antigravity", "running", "ready", true),
+            ("antigravity", "running", "ended", false),
+            ("codex", "starting", "", false),
+            ("codex", "starting", "active", true),
+            ("codex", "running", "ended", false),
+            ("codex", "completed", "ended", true),
         ] {
             let ctx = egui::Context::default();
             let key = ThreadKey {
@@ -1952,14 +1949,10 @@ mod tests {
             };
             let mut data = Data::default();
             data.saved.drafts.push((key.clone(), "A new prompt".into()));
-            data.thread_issues.insert(
-                key.clone(),
-                "Antigravity steering requires an active prompt. The draft is still here.".into(),
-            );
             view::switch(&mut data, &key, false, None);
             let runs = [
-                json!({"status":"running","native_prompt":state,"record":{"spec":{
-                    "id":"fixture-run","thread_id":key.id,"backend":"antigravity","prompt":"Fixture"
+                json!({"status":status,"native_prompt":state,"record":{"spec":{
+                    "id":"fixture-run","thread_id":key.id,"backend":backend,"prompt":"Fixture"
                 }}}),
             ];
             data.catalogs
@@ -1980,15 +1973,17 @@ mod tests {
             let (output, _) = frame(vec![]);
             assert!(visible_text(&output, "Running").is_none());
             assert!(visible_text(&output, "Send update").is_none());
-            assert!(visible_text(&output, hint).is_some());
+            assert!(visible_text(&output, "A new prompt").is_some());
             // Context fullness is no longer shown; the runtime sits in the pane's title bar.
             assert!(visible_text(&output, "ctx unknown").is_none());
-            let send = visible_text(&output, hint).expect("ordinary send control");
+            let send = visible_text(&output, "Send").expect("ordinary send control");
             let (_, actions) = click(&mut frame, send);
-            assert!(
+            assert_eq!(
                 actions
                     .iter()
-                    .any(|action| matches!(action, Action::Send(target) if *target == key))
+                    .any(|action| matches!(action, Action::Send(target) if *target == key)),
+                sendable,
+                "{backend} {status} {state}",
             );
         }
     }

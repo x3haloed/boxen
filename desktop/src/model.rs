@@ -710,9 +710,13 @@ impl Transcript {
             ),
             "control_error" => {
                 if let Some(id) = data["update"]["update_id"].as_str() {
-                    self.rejected_updates.insert(id.into(), (text("message"), data["dispatch"] == "not_sent"));
+                    let reason = text("message");
+                    self.rejected_updates
+                        .insert(id.into(), (reason.clone(), data["dispatch"] == "not_sent"));
+                    self.put(format!("event-{seq}"), "Incident", reason, false);
+                } else {
+                    self.put(format!("event-{seq}"), "Incident", display(data), false);
                 }
-                self.put(format!("event-{seq}"), "Incident", display(data), false);
             }
             "execution_settings_changed" => {
                 self.put(format!("event-{seq}"), "Run settings changed", display(data), false);

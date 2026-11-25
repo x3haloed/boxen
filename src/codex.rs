@@ -336,6 +336,21 @@ impl Rpc {
                 .is_none_or(|turn| self.turn.as_deref().is_none_or(|active| active == turn))
     }
 
+    fn observe_turn_start(&mut self, turn: &str) -> Result<()> {
+        if self.turn.is_none() {
+            self.turn = Some(turn.to_owned());
+            self.run
+                .append("backend_prompt_started", json!({"backend":"codex"}))?;
+            self.run.diagnostic(
+                Level::Info,
+                "backend.prompt_started",
+                || json!({"turn_id":turn}),
+                || Value::Null,
+            );
+        }
+        Ok(())
+    }
+
     fn observe_turn(&mut self, method: &str, params: &Value) -> Result<()> {
         if !self.tracks_turn(params) {
             return Ok(());
@@ -344,7 +359,7 @@ impl Rpc {
         match method {
             "turn/started" => {
                 if let Some(turn) = params["turn"]["id"].as_str() {
-                    self.turn.get_or_insert_with(|| turn.to_owned());
+                    self.observe_turn_start(turn)?;
                 }
             }
             "item/started"
@@ -949,7 +964,6 @@ pub fn execute(
             "Cancelled before inference started".into(),
         ));
     }
-    run.status("running", "Starting Codex turn")?;
     let mut turn = json!({"threadId":thread,"input":input,"summary":"auto"});
     if let Some(effort) = &effort {
         turn["effort"] = json!(effort);
@@ -966,7 +980,9 @@ pub fn execute(
         if rpc.turn.as_deref().is_some_and(|observed| observed != id) {
             return Err("Codex acknowledged a different active turn".into());
         }
-        rpc.turn.get_or_insert_with(|| id.to_owned());
+        if rpc.native_outcome.is_none() && rpc.outcome.is_none() {
+            rpc.observe_turn_start(id)?;
+        }
     }
     if rpc.outcome.is_none() && rpc.native_outcome.is_none() && rpc.pending.is_empty() {
         run.status("running", "Codex is executing on this machine")?;
