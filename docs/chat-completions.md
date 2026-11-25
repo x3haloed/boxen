@@ -86,6 +86,13 @@ bytes, OpenRouter policy compatibility, and interruption and recovery through
 a controlled provider. Pass `--live-endpoint URL --model MODEL` to exercise a
 real server with synthetic images, tool calls, daemon restart, and cancellation.
 
+The native macOS live test with Bonsai verified a structured `boxen_read`
+call, correct shape, color, and count on two synthetic images, and a follow-up
+after deleting the source image and restarting the daemon. During streamed
+cancellation, the model service closed its generation iterator after the
+connection ended. A later request completed. Those server-side cancellation
+results apply to the local Bonsai serving adapter used in the test.
+
 The PrismML Bonsai 2.5 27B MLX checkpoint uses the vendor's bundled loader for
 packed language weights and the FP16 vision tower. A local serving adapter
 can render each retained image at its message position, render the trailing

@@ -1343,7 +1343,7 @@ pub fn execute(
             || Value::Null,
         );
         if missing > 0 {
-            run.append("artifact_unavailable", json!({"step":step,"count":missing,"detail":"Missing or damaged snapshots were replaced by explicit unavailability notices; source files were not reread"}))?;
+            run.append("artifact_unavailable", json!({"step":step,"count":missing,"detail":"Snapshots unavailable for this request were replaced by explicit notices; source files were not reread"}))?;
             run.diagnostic(
                 Level::Warn,
                 "inference.media.unavailable",

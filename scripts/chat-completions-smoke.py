@@ -263,6 +263,16 @@ def controlled(pair, provider):
     assert pair.result(follow) == "fixture response"
     assert pair.collect(follow, after=follow_events[1]["seq"])[0] == follow_events[2:]
 
+    config["vision"]["images"] = False
+    pair.provider_file.write_text(json.dumps(config))
+    pair.daemon(1)
+    text_only_follow = pair.submit("Follow up on a text-only endpoint", thread=ident)
+    events, state = pair.collect(text_only_follow)
+    assert state["status"] == "completed"
+    assert any(event["kind"] == "artifact_unavailable" for event in events)
+    projected = json.dumps(provider.observed[-1][2]["messages"])
+    assert "does not accept native image input" in projected and "data:image/" not in projected
+
     (pair.directory / "text-profile-picture").write_bytes(IMAGE)
     other = pair.submit("Read: text-profile-picture", backend="chat-completions:text")
     other_events, other_status = pair.collect(other)
