@@ -88,7 +88,7 @@ pub fn run(
             ui.label(format!("Reconnecting observation · {error}"));
         }
         let anchored = data.views.get(key).is_some_and(|view| view.anchors_run(id));
-        let details = egui::CollapsingHeader::new(title)
+        let details = conversation::detail_header(ui, &title)
             .open(anchored.then_some(true))
             .default_open(!terminal(run) || matches!(status, "failed" | "interrupted"))
             .show(ui, |ui| {
@@ -110,7 +110,7 @@ pub fn run(
                                         1 => "Activation input · 1 mail presented".into(),
                                         n => format!("Activation input · {n} mails presented"),
                                     };
-                                    egui::CollapsingHeader::new(title).id_salt(&row.id).show(
+                                    conversation::detail_header(ui, &title).id_salt(&row.id).show(
                                         ui,
                                         |ui| {
                                             ui.add(
@@ -134,7 +134,7 @@ pub fn run(
                 }
             });
         let collapsed = details.fully_closed();
-        details.header_response.on_hover_text(format!("Run {id}"));
+        details.header_response.on_hover_text(format!("{title}\nRun {id}"));
         if collapsed
             && let Some(note) = data.transcripts.get(&tag).and_then(|t| {
                 t.rows

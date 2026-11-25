@@ -113,13 +113,22 @@ pub fn history(
     view.visible = None;
     let reserved = view.footer_height.unwrap_or(26.);
     let height = (ui.available_height() - reserved).max(0.);
+    // A vertical ScrollArea can grow horizontally to fit a child. Allocate its
+    // viewport separately so overflow inside history cannot resize the footer.
+    let (_, bounds) = ui.allocate_space(egui::vec2(ui.available_width(), height));
+    let mut viewport = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("history-viewport", key, activity))
+            .max_rect(bounds),
+    );
+    viewport.set_clip_rect(viewport.clip_rect().intersect(bounds));
     let view = egui::ScrollArea::vertical()
         .id_salt(("conversation-history", key, activity))
         .auto_shrink([false, false])
         .max_height(height)
         .min_scrolled_height(0.)
         .stick_to_bottom(true)
-        .show_viewport(ui, |ui, _| {
+        .show_viewport(&mut viewport, |ui, _| {
             show(ui, data);
             if data.views.get(key).is_some_and(|v| v.latest) {
                 ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
@@ -1008,6 +1017,18 @@ pub fn activity_rows(ui: &mut egui::Ui, rows: &[Row]) {
     }
 }
 
+pub fn detail_header(ui: &egui::Ui, title: &str) -> egui::CollapsingHeader {
+    let width = (ui.available_width() - ui.spacing().indent - ui.spacing().button_padding.x)
+        .max(0.);
+    let galley = egui::WidgetText::from(title).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        width,
+        egui::TextStyle::Button,
+    );
+    egui::CollapsingHeader::new(galley)
+}
+
 pub fn activity_row(ui: &mut egui::Ui, row: &Row) {
     ui.push_id(&row.id, |ui| {
         if row.answer.is_some()
@@ -1081,7 +1102,7 @@ pub fn activity_row(ui: &mut egui::Ui, row: &Row) {
         } else {
             format!("{label} · {preview}")
         };
-        egui::CollapsingHeader::new(title)
+        detail_header(ui, &title)
             .default_open(incident(row) || row.label == "Agent")
             .show(ui, |ui| {
                 ui.add(egui::Label::new(&row.text).wrap().selectable(true));
@@ -1099,7 +1120,9 @@ pub fn activity_row(ui: &mut egui::Ui, row: &Row) {
                         ui.add(egui::Label::new(result).wrap().selectable(true));
                     }
                 }
-            });
+            })
+            .header_response
+            .on_hover_text(title);
     });
 }
 
@@ -1148,6 +1171,79 @@ mod inline_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_history_does_not_push_send_out_of_the_pane() {
+        let ctx = egui::Context::default();
+        crate::console_style::install(&ctx);
+        let mut data = Data::default();
+        let key = ThreadKey {
+            peer: "fixture".into(),
+            id: "thread".into(),
+        };
+        let mut transcript = crate::model::Transcript::default();
+        let detail = format!("Interrupted while reading {}", "WWW".repeat(70));
+        transcript
+            .apply(&serde_json::json!({"seq":1,"kind":"status","data":{
+                "status":"interrupted","detail":detail
+            }}))
+            .unwrap();
+        let mut text = "Draft reply".to_owned();
+        let mut files = Vec::new();
+        let pane = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400., 400.));
+        let mut frame = || {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(pane),
+                    ..Default::default()
+                },
+                |ui| {
+                    history(ui, &mut data, &key, false, |ui, _| {
+                        activity_row(ui, &transcript.rows[0]);
+                        message_row(ui, None, MessageAuthor::Agent, &detail, true, |_| {});
+                        // Even a history widget that insists on its full
+                        // width cannot resize the enclosing pane.
+                        ui.allocate_space(egui::vec2(800., 2.));
+                    });
+                    footer(ui, &mut data, &key, |ui, data| {
+                        composer(
+                            ui,
+                            data,
+                            Composer {
+                                text: &mut text,
+                                files: &mut files,
+                                target: Target::Thread(key.clone()),
+                                send_detail: None,
+                                limit: 32 * 1024,
+                                blocked: false,
+                            },
+                            &mut Vec::new(),
+                        );
+                    });
+                },
+            )
+        };
+        frame();
+        let output = frame();
+        let text_shapes = || {
+            output.shapes.iter().filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text),
+                _ => None,
+            })
+        };
+        let send = text_shapes()
+            .find(|text| text.galley.job.text == "Send")
+            .expect("Send must be rendered inside the pane");
+        assert!(pane.contains(send.pos + send.galley.size()));
+        let status = text_shapes()
+            .find(|text| text.galley.job.text.starts_with("Status · interrupted"))
+            .expect("status heading");
+        assert!(status.galley.elided);
+        assert!(pane.x_range().contains(status.pos.x + status.galley.size().x));
+        assert!(text_shapes().any(|text| text.galley.job.text == detail
+            && text.galley.rows.len() > 1
+            && text.pos.x + text.galley.size().x <= pane.right()));
+    }
 
     #[test]
     fn composer_stays_at_the_bottom_and_scrolls_long_drafts() {
