@@ -273,11 +273,15 @@ struct Group<'a> {
     definition: Option<String>,
     residents: Vec<&'a Value>,
 }
-fn groups(p: &Peer) -> Vec<Group<'_>> {
+fn groups(p: &Peer, include_promoted_threads: bool) -> Vec<Group<'_>> {
     let mut classes: BTreeMap<String, Group<'_>> = BTreeMap::new();
     let mut out = vec![];
     for r in &p.residents {
-        if let Some(id) = r["definition"]["id"].as_str() {
+        let mut definition = r["definition"]["id"].as_str();
+        if definition.is_none() && include_promoted_threads {
+            definition = promoted_thread_definition(p, r);
+        }
+        if let Some(id) = definition {
             classes
                 .entry(id.into())
                 .or_insert_with(|| Group {
@@ -309,6 +313,21 @@ fn groups(p: &Peer) -> Vec<Group<'_>> {
     out.sort_by_key(|g| (g.name.to_lowercase(), g.definition.clone()));
     out
 }
+// Earlier threaded residents were promoted with a generated name and
+// kept promotion provenance instead of a definition association.
+fn promoted_thread_definition<'a>(peer: &'a Peer, resident: &Value) -> Option<&'a str> {
+    if resident["promoted"] != true {
+        return None;
+    }
+    let (name, suffix) = resident["name"].as_str()?.rsplit_once('~')?;
+    if resident["id"].as_str()? != suffix {
+        return None;
+    }
+    let mut matches = peer.definitions.iter().filter(|(_, label)| label.as_str() == name);
+    let (id, _) = matches.next()?;
+    matches.next().is_none().then_some(id.as_str())
+}
+
 fn aggregate(signals: &[Signal]) -> Signal {
     if signals.contains(&Signal::Failed) {
         Signal::Failed
@@ -379,19 +398,14 @@ pub fn watchlist(
         let Some(peer) = data.agents.peers.get(&destination.key) else {
             continue;
         };
-        let mut residents: Vec<_> = peer
-            .residents
-            .iter()
-            .filter(|resident| {
-                resident["name"]
-                    .as_str()
-                    .is_some_and(|name| name.to_lowercase().contains(query))
-            })
-            .collect();
-        residents
-            .sort_by_key(|resident| resident["name"].as_str().unwrap_or_default().to_lowercase());
-        for resident in residents {
-            watch_resident(ui, data, destination, peer, resident, actions);
+        for group in groups(peer, true) {
+            if let Some(id) = &group.definition {
+                ui.push_id(("resident-family", &destination.key, id), |ui| {
+                    watch_family(ui, data, destination, peer, &group, Some(query), actions);
+                });
+            } else if group.name.to_lowercase().contains(query) {
+                watch_resident(ui, data, destination, peer, group.residents[0], actions);
+            }
         }
     }
 
@@ -400,7 +414,7 @@ pub fn watchlist(
         let Some(peer) = data.agents.peers.get(&destination.key) else {
             continue;
         };
-        let classes = groups(peer);
+        let classes = groups(peer, false);
         let mut definitions: BTreeMap<_, _> = peer
             .definitions
             .iter()
@@ -418,83 +432,116 @@ pub fn watchlist(
                 continue;
             }
             ui.push_id(("definition", &destination.key, id), |ui| {
-                let signals: Vec<_> = residents
-                    .iter()
-                    .map(|r| status(peer, r["id"].as_str().unwrap_or_default()).0)
-                    .collect();
-                let running = signals
-                    .iter()
-                    .filter(|&&signal| signal == Signal::Running)
-                    .count();
-                let failed = signals
-                    .iter()
-                    .filter(|&&signal| signal == Signal::Failed)
-                    .count();
-                let ready = signals
-                    .iter()
-                    .filter(|&&signal| signal == Signal::Healthy)
-                    .count();
-                let unknown = signals
-                    .iter()
-                    .filter(|&&signal| signal == Signal::Unknown)
-                    .count();
-                let offline =
-                    data.errors.contains_key(&destination.key) || peer.metadata_error.is_some();
-                let (state, color) = if offline {
-                    ("unseen".into(), Signal::Unknown.color())
-                } else if running > 0 {
-                    (format!("{running} run"), Signal::Running.color())
-                } else if ready > 0 || residents.is_empty() {
-                    (format!("{ready} idle"), ui.visuals().weak_text_color())
-                } else if failed > 0 {
-                    (format!("{failed} stopped"), Signal::Failed.color())
-                } else {
-                    (format!("{unknown} unseen"), Signal::Unknown.color())
+                let group = Group {
+                    name: name.to_owned(),
+                    definition: Some(id.to_owned()),
+                    residents,
                 };
-                let expanded = ui.make_persistent_id("expanded");
-                let mut open = ui
-                    .data(|memory| memory.get_temp::<bool>(expanded))
-                    .unwrap_or(false);
-                let last = if offline {
-                    "offline".into()
-                } else if failed > 0 {
-                    format!("{failed} fail")
-                } else {
-                    "—".into()
-                };
-                let response = crate::watchlist::Row {
-                    title: name,
-                    state: &state,
-                    color,
-                    last: &last,
-                    age: "—",
-                    selected: open,
-                    muted: offline,
-                    context: None,
-                    identity: Some(crate::marks::Identity::Family { definition: id }),
-                }
-                .show(ui, data)
-                .on_hover_text(format!(
-                    "{} · {} independent instances",
-                    destination.label,
-                    residents.len()
-                ));
-                if crate::watchlist::opens(ui, &response).is_some() {
-                    open = !open;
-                    ui.data_mut(|memory| memory.insert_temp(expanded, open));
-                }
-                if open {
-                    ui.indent("instances", |ui| {
-                        if residents.is_empty() {
-                            ui.weak("No instances");
-                        }
-                        for resident in residents {
-                            watch_resident(ui, data, destination, peer, resident, actions);
-                        }
-                    });
-                }
+                watch_family(ui, data, destination, peer, &group, None, actions);
             });
         }
+    }
+}
+
+fn watch_family(
+    ui: &mut egui::Ui,
+    data: &Data,
+    destination: &Destination,
+    peer: &Peer,
+    group: &Group<'_>,
+    resident_filter: Option<&str>,
+    actions: &mut Vec<Action>,
+) {
+    let query = resident_filter.unwrap_or_default();
+    let residents = &group.residents;
+    let matches_name = group.name.to_lowercase().contains(query);
+    let visible: Vec<_> = residents
+        .iter()
+        .copied()
+        .filter(|resident| {
+            matches_name
+                || resident["name"].as_str().is_some_and(|name| name.to_lowercase().contains(query))
+        })
+        .collect();
+    if !matches_name && visible.is_empty() {
+        return;
+    }
+    let signals: Vec<_> = residents
+        .iter()
+        .map(|r| status(peer, r["id"].as_str().unwrap_or_default()).0)
+        .collect();
+    let running = signals
+        .iter()
+        .filter(|&&signal| signal == Signal::Running)
+        .count();
+    let failed = signals
+        .iter()
+        .filter(|&&signal| signal == Signal::Failed)
+        .count();
+    let ready = signals
+        .iter()
+        .filter(|&&signal| signal == Signal::Healthy)
+        .count();
+    let unknown = signals
+        .iter()
+        .filter(|&&signal| signal == Signal::Unknown)
+        .count();
+    let offline =
+        data.errors.contains_key(&destination.key) || peer.metadata_error.is_some();
+    let (state, color) = if offline {
+        ("unseen".into(), Signal::Unknown.color())
+    } else if running > 0 {
+        (format!("{running} run"), Signal::Running.color())
+    } else if ready > 0 || residents.is_empty() {
+        (format!("{ready} idle"), ui.visuals().weak_text_color())
+    } else if failed > 0 {
+        (format!("{failed} stopped"), Signal::Failed.color())
+    } else {
+        (format!("{unknown} unseen"), Signal::Unknown.color())
+    };
+    let expanded = ui.make_persistent_id(("expanded", !query.is_empty()));
+    let mut open = ui
+        .data(|memory| memory.get_temp::<bool>(expanded))
+        .unwrap_or(!matches_name);
+    let last = if offline {
+        "offline".into()
+    } else if failed > 0 {
+        format!("{failed} fail")
+    } else {
+        "—".into()
+    };
+    let response = crate::watchlist::Row {
+        title: &group.name,
+        state: &state,
+        color,
+        last: &last,
+        age: "—",
+        selected: open,
+        muted: offline,
+        context: None,
+        identity: group.definition.as_deref().map(|definition| {
+            crate::marks::Identity::Family { definition }
+        }),
+    }
+    .show_with_disclosure(ui, data, resident_filter.map(|_| open))
+    .on_hover_text(format!(
+        "{} · {} independent instances",
+        destination.label,
+        residents.len()
+    ));
+    if crate::watchlist::opens(ui, &response).is_some() {
+        open = !open;
+        ui.data_mut(|memory| memory.insert_temp(expanded, open));
+    }
+    if open {
+        ui.indent("instances", |ui| {
+            if visible.is_empty() {
+                ui.weak("No instances");
+            }
+            for resident in visible {
+                watch_resident(ui, data, destination, peer, resident, actions);
+            }
+        });
     }
 }
 
@@ -582,7 +629,7 @@ pub fn panel(ui: &mut egui::Ui, data: &Data, actions: &mut Vec<Action>) {
                     ui.weak(format!("{} · connecting…", destination.label));
                     continue;
                 };
-                let list = groups(p);
+                let list = groups(p, false);
                 if list.is_empty() {
                     if let Some(e) = &p.metadata_error {
                         ui.weak(format!("{} · unavailable", destination.label)).on_hover_text(e);
@@ -701,7 +748,7 @@ mod tests {
         let mut s = State::default();
         s.metadata("p",&Ok(vec![json!({"id":"one","name":"Worker 1","definition":{"id":"class-a"}}),json!({"id":"two","name":"Worker 2","definition":{"id":"class-a"}}),json!({"id":"three","name":"Solo"}),json!({"id":"four","name":"Other","definition":{"id":"class-b"}})]),Ok(json!({"definitions":[{"id":"class-a","name":"Workers"},{"id":"class-b","name":"Workers"}]})),Ok(json!({"incidents":[]})));
         let p = &s.peers["p"];
-        let gs = groups(p);
+        let gs = groups(p, false);
         assert_eq!(gs.len(), 3);
         assert_eq!(gs.iter().filter(|g| g.name == "Workers").count(), 2);
         assert_eq!(
@@ -813,6 +860,77 @@ mod tests {
         }]);
         assert!(matches!(&actions[..], [Action::OpenActivity(k, _)] if k.id == "resident"));
     }
+    #[test]
+    fn watchlist_reveals_definition_instances_on_expand_or_search() {
+        use egui::{Event, Modifiers, PointerButton, pos2, vec2};
+
+        let mut data = Data::default();
+        let destinations = [Destination {
+            key: "p".into(),
+            label: "Fixture host".into(),
+            address: String::new(),
+        }];
+        data.agents.metadata(
+            "p",
+            &Ok(vec![
+                json!({"id":"one","name":"coder~one","definition":{"id":"class"}}),
+                json!({"id":"two","name":"Renamed instance","definition":{"id":"class"}}),
+                json!({"id":"early","name":"coder~early","promoted":true}),
+                json!({"id":"solo","name":"coder~solo"}),
+            ]),
+            Ok(json!({"definitions":[{"id":"class","name":"coder"}]})),
+            Ok(json!({"incidents":[]})),
+        );
+        let ctx = egui::Context::default();
+        let frame = |query, events| {
+            let mut actions = vec![];
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(pos2(0., 0.), vec2(280., 500.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| watchlist(ui, &data, &destinations, query, &mut actions),
+            );
+            (output, actions)
+        };
+        let position = |output: &egui::FullOutput, name: &str| {
+            output.shapes.iter().find_map(|clipped| {
+                let egui::Shape::Text(text) = &clipped.shape else {
+                    return None;
+                };
+                (text.galley.job.text == name).then_some(text.pos + text.galley.size() / 2.)
+            })
+        };
+        let (filtered, _) = frame("renamed instance", vec![]);
+        assert!(position(&filtered, "coder").is_some());
+        assert!(position(&filtered, "Renamed instance").is_some());
+        assert!(position(&filtered, "coder~one").is_none());
+
+        let (collapsed, _) = frame("", vec![]);
+        assert!(position(&collapsed, "coder~solo").is_some());
+        let group = position(&collapsed, "coder").expect("definition disclosure");
+        for name in ["coder~one", "Renamed instance", "coder~early"] {
+            assert!(position(&collapsed, name).is_none());
+        }
+        for pressed in [true, false] {
+            let (_, actions) = frame("", vec![
+                Event::PointerMoved(group),
+                Event::PointerButton {
+                    pos: group,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                },
+            ]);
+            assert!(actions.is_empty());
+        }
+        let (expanded, _) = frame("", vec![]);
+        for name in ["coder~one", "Renamed instance", "coder~early"] {
+            assert!(position(&expanded, name).is_some(), "{name}");
+        }
+    }
+
     #[test]
     fn class_name_click_expands_instances() {
         use egui::{Event, Modifiers, PointerButton, pos2, vec2};
@@ -930,7 +1048,7 @@ mod tests {
         let rows = client.operation(&dest, json!({"op":"list"})).unwrap();
         state.activity(&dest.key, &Ok(rows.as_array().unwrap().clone()));
         let peer = &state.peers[&dest.key];
-        let grouped = groups(peer);
+        let grouped = groups(peer, false);
         let class = grouped
             .iter()
             .find(|g| g.definition.as_deref() == Some(definition.as_str()))

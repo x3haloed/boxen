@@ -89,6 +89,15 @@ pub struct Row<'a> {
 
 impl Row<'_> {
     pub fn show(self, ui: &mut egui::Ui, data: &Data) -> egui::Response {
+        self.show_with_disclosure(ui, data, None)
+    }
+
+    pub fn show_with_disclosure(
+        self,
+        ui: &mut egui::Ui,
+        data: &Data,
+        disclosure: Option<bool>,
+    ) -> egui::Response {
         let c = columns(ui);
         if self.selected {
             ui.painter()
@@ -115,8 +124,17 @@ impl Row<'_> {
             ui.next_auto_id().with(("watchlist-row", self.title)),
             egui::Sense::click(),
         );
-        response
-            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, self.title));
+        response.widget_info(|| {
+            let kind = if disclosure.is_some() {
+                egui::WidgetType::CollapsingHeader
+            } else {
+                egui::WidgetType::Button
+            };
+            egui::WidgetInfo::labeled(kind, true, self.title)
+        });
+        if let Some(open) = disclosure {
+            ui.ctx().accesskit_node_builder(response.id, |node| node.set_expanded(open));
+        }
         cell(
             ui,
             c.name,
@@ -125,11 +143,17 @@ impl Row<'_> {
                 .halign(egui::Align::Min)
                 .selectable(false),
         );
-        if let Some(identity) = self.identity {
-            let mark = egui::Rect::from_center_size(
-                c.mark.left_center() + egui::vec2(5., 0.),
-                egui::vec2(10., 10.),
+        let mark = egui::Rect::from_center_size(
+            c.mark.left_center() + egui::vec2(5., 0.),
+            egui::vec2(10., 10.),
+        );
+        if let Some(open) = disclosure {
+            egui::collapsing_header::paint_default_icon(
+                ui,
+                if open { 1. } else { 0. },
+                &response.clone().with_new_rect(mark),
             );
+        } else if let Some(identity) = self.identity {
             let background = if self.selected {
                 ui.visuals().selection.bg_fill
             } else {

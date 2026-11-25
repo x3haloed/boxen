@@ -141,7 +141,11 @@ its active controls.
 The Watchlist presents anonymous threads, residents and resident definitions
 under shared columns. Thread state follows the current input owner, with
 `+bg` when an older run is still active. Resident state comes from the latest
-activation and definitions aggregate independent instances on each machine.
+activation. Under **Residents**, instances appear beneath a collapsed row named
+for their definition on that machine. Expand it to open individual residents.
+Searching for an instance also finds it inside its group. An older promoted
+thread named `DEFINITION~RESIDENT_ID` joins the group when its own ID and a
+unique definition on that machine match. Standalone residents appear directly.
 Event age comes only from replayed or live visible events. A thread or resident
 row peeks on a single click and opens on the grid with Enter or a double-click.
 The inspector follows the selected conversation. Its repository probe runs on
