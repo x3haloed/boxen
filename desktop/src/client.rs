@@ -57,6 +57,7 @@ pub enum Update {
     ),
     Moved(crate::model::ThreadKey, Result<Value, String>),
     Discovered(Result<Value, String>),
+    MachineRenamed(crate::connections::Edit, Result<String, String>),
     Catalog(Destination, Result<Vec<Value>, String>),
     Batch(String, u64, Value),
     WatchError(String, u64, String),

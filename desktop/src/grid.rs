@@ -626,10 +626,16 @@ impl Desktop {
                 crate::console_style::icon_button(RichText::new("⚙").size(13.)),
             )
             .ui(ui, |ui| {
-                if ui.button("Settings…").clicked() {
-                    self.data.tool_approvals.open();
-                    ui.close();
-                }
+                ui.menu_button("Settings", |ui| {
+                    if ui.button("Machine connections…").clicked() {
+                        self.connections.open = true;
+                        ui.close();
+                    }
+                    if ui.button("Tool approvals…").clicked() {
+                        self.data.tool_approvals.open();
+                        ui.close();
+                    }
+                });
                 if ui.button("Live pulse").clicked() {
                     self.grid_mut().open(Pane::LivePulse, true);
                     ui.close();

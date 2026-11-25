@@ -30,6 +30,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-network-') as temp:
   r=urllib.request.Request(f'http://127.0.0.1:{uis[i]}/api/operation',headers={'Authorization':'Bearer '+tokens[i],'Content-Type':'application/json'},data=json.dumps(data).encode())
   return json.load(urllib.request.urlopen(r,timeout=20))
  def peers(i):return json.loads(cli(i,'peers'))
+ def status(i):
+  request=urllib.request.Request(f'http://127.0.0.1:{uis[i]}/api/status',headers={'Authorization':'Bearer '+tokens[i]})
+  return json.load(urllib.request.urlopen(request,timeout=5))
  try:
   for i in range(3):launch(i)
   # One real initial connection discovers the endpoint in each original pairing.
@@ -39,6 +42,22 @@ with tempfile.TemporaryDirectory(prefix='boxen-network-') as temp:
   assert len(api(0,0,{'op':'network','args':{'action':'status'}})['members'])==3
   assert len(api(0,2,{'op':'network','args':{'action':'status'}})['members'])==3
   assert json.loads(cli(0,'ping',f'127.0.0.1:{ports[2]}',keys[2],'introduced fixture'))['message']=='introduced fixture'
+  # A desktop can rename any active member through its own daemon. The shared
+  # record propagates through the existing synchronization and survives restart.
+  original=next(p for p in status(0)['peers'] if p['key']==keys[1])
+  rename={'op':'network','args':{'action':'rename','key':keys[1],
+         'expected_label':original['label'],'label':'Build fixture'}}
+  renamed=api(0,0,rename)['member']
+  assert renamed['label']=='Build fixture' and renamed['address']==original['address']
+  assert renamed['generation']==original['generation'] and renamed['endpoint_revision']>original['endpoint_revision']
+  assert api(0,0,rename)['member']==renamed
+  try:
+   api(0,0,rename|{'args':rename['args']|{'label':'Conflicting name'}})
+   raise AssertionError('A stale name edit was accepted')
+  except urllib.error.HTTPError as error:
+   assert error.code==422
+  wait(lambda:status(1)['local_label']=='Build fixture' and any(
+   p['key']==keys[1] and p['label']=='Build fixture' for p in status(2)['peers']))
   other=secrets.token_hex(32)
   api(2,2,{'op':'resident_create','spec':{'id':other,'name':'Revocation fixture','cwd':temp,'model':'fixture','auto_activate':False}})
   resident=secrets.token_hex(32);run=secrets.token_hex(32)
@@ -66,6 +85,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-network-') as temp:
   except urllib.error.HTTPError as error:assert error.code==422
   journal=homes[1]/'mailboxes/events.jsonl';saved=journal.with_name('original.jsonl');journal.rename(saved);journal.mkdir()
   launch(1)
+  assert status(1)['local_label']=='Build fixture'
   wait(lambda:bool(api(0,0,{'op':'messaging','args':{'action':'status','id':message_id}})['delivery'].get('last_error')),35)
   assert api(0,0,{'op':'messaging','args':{'action':'status','id':message_id}})['delivery']['status']=='queued'
   assert api(0,1,{'op':'mailbox_status'})['available']==False

@@ -44,9 +44,13 @@ query strings, and the client rejects non-loopback origins.
 
 The Threads pane includes this machine and already-paired peers discovered
 from the daemon. `lan-peer.json`, when present, supplies the development peer's
-address. You can also set it with **Machine connections** in the command palette.
-The optional `--peer PUBLIC_KEY --address HOST:PORT` overrides one peer's address.
-A peer address locates an already-pinned identity; it grants no new trust.
+address. **Settings → Machine connections** also opens from the command palette.
+**Display name** edits the shared name shown to paired machines. **This machine**
+appears first and shows the name it advertises. **Peer address** sets this
+desktop's connection override for a paired machine. Clearing it uses the
+advertised address. **Save** applies each machine's edits and **Details** shows
+the public key. The optional `--peer PUBLIC_KEY --address HOST:PORT` supplies a
+launch-time override.
 
 The desktop embeds Inter and IBM Plex Mono for console typography. Desktop
 builds include their SIL Open Font License notices. [Inter](https://github.com/rsms/inter) · [IBM Plex](https://github.com/IBM/plex)

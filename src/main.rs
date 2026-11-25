@@ -228,8 +228,7 @@ Workloads use managed CLIs or the built-in inference runtime with Full access on
                 take_option(&mut args, "--listen")?.unwrap_or_else(|| "0.0.0.0:42424".into());
             let ui = take_option(&mut args, "--ui")?.unwrap_or_else(|| "127.0.0.1:42425".into());
             let advertise = take_option(&mut args, "--advertise")?.unwrap_or_default();
-            let name = take_option(&mut args, "--name")?
-                .unwrap_or_else(|| format!("Machine {}", &state.public_key()[..8]));
+            let name = take_option(&mut args, "--name")?;
             if !args.is_empty() {
                 return Err("unexpected serve arguments".into());
             }
@@ -250,7 +249,7 @@ Workloads use managed CLIs or the built-in inference runtime with Full access on
                 antigravity,
                 claude,
             )?;
-            network::configure(&state, &name, &advertise)?;
+            network::configure(&state, name.as_deref(), &advertise)?;
             infrastructure::install(state.directory(), state.public_key())?;
             network::start(
                 state.clone(),

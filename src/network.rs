@@ -197,13 +197,17 @@ pub fn remove(state: &State, key: &str) -> Result<()> {
     p.removed = true;
     write(state, &p)
 }
-pub fn configure(state: &State, label: &str, address: &str) -> Result<()> {
+pub fn configure(state: &State, label: Option<&str>, address: &str) -> Result<()> {
     let _guard = lock(state)?;
     let all = members(state)?;
     let old = all.iter().find(|p| p.key == state.public_key());
     if old.is_some_and(|p| p.removed) {
         return Ok(());
     }
+    let default_label = format!("Machine {}", &state.public_key()[..8]);
+    let label = label
+        .or_else(|| old.map(|peer| peer.label.as_str()))
+        .unwrap_or(&default_label);
     let mut p = old.cloned().unwrap_or(Peer {
         key: state.public_key().into(),
         label: label.into(),
@@ -217,13 +221,7 @@ pub fn configure(state: &State, label: &str, address: &str) -> Result<()> {
         if !address.is_empty() {
             p.address = address.into();
         }
-        p.endpoint_revision = all
-            .iter()
-            .map(|p| p.endpoint_revision)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or("endpoint revision exhausted")?;
+        p.endpoint_revision = next_endpoint_revision(&all)?;
         write(state, &p)?;
     }
     Ok(())
@@ -643,11 +641,17 @@ pub fn operation(state: &State, args: &Value) -> Result<Value> {
                 }
                 Ok(json!({"accepted":true,"members":members(state)?}))
             }
+            "rename" => {
+                let key = args["key"].as_str().ok_or("Machine identity is missing")?;
+                let label = args["label"].as_str().ok_or("Display name is missing")?;
+                let expected = args["expected_label"].as_str().ok_or("Previous display name is missing")?;
+                Ok(json!({"member": rename(state, key, label, expected)?}))
+            }
             "remove" => {
                 remove(state, args["key"].as_str().ok_or("member key required")?)?;
                 Ok(json!({"accepted":true,"members":members(state)?}))
             }
-            _ => Err("network actions are status, admit and remove".into()),
+            _ => Err("Network actions are status, admit, rename and remove".into()),
         }
     })();
     logging::record(
@@ -664,6 +668,40 @@ pub fn operation(state: &State, args: &Value) -> Result<Value> {
     );
     result
 }
+fn rename(state: &State, key: &str, label: &str, expected: &str) -> Result<Peer> {
+    let label = label.trim();
+    if label.is_empty() || label.len() > 100 || label.chars().any(char::is_control) {
+        return Err("A display name contains 1–100 UTF-8 bytes of printable text".into());
+    }
+    let _guard = lock(state)?;
+    let all = members(state)?;
+    let mut peer = all
+        .iter()
+        .find(|peer| peer.key == key && !peer.removed)
+        .ok_or("Machine is no longer a network member")?
+        .clone();
+    if peer.label == label {
+        return Ok(peer);
+    }
+    if peer.label != expected {
+        return Err("Display name changed. Reopen Machine connections to see the current name.".into());
+    }
+    peer.label = label.into();
+    peer.endpoint_revision = next_endpoint_revision(&all)?;
+    write(state, &peer)?;
+    Ok(peer)
+}
+
+fn next_endpoint_revision(members: &[Peer]) -> Result<u64> {
+    members
+        .iter()
+        .map(|p| p.endpoint_revision)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "endpoint revision exhausted".into())
+}
+
 pub fn set_endpoint(state: &State, key: &str, address: &str) -> Result<()> {
     let _guard = lock(state)?;
     let all = members(state)?;
@@ -676,13 +714,7 @@ pub fn set_endpoint(state: &State, key: &str, address: &str) -> Result<()> {
         return Ok(());
     }
     peer.address = address.into();
-    peer.endpoint_revision = all
-        .iter()
-        .map(|p| p.endpoint_revision)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or("endpoint revision exhausted")?;
+    peer.endpoint_revision = next_endpoint_revision(&all)?;
     write(state, &peer)
 }
 
@@ -697,7 +729,7 @@ mod tests {
         let b = State::open(root.join("b")).unwrap();
         let c = State::open(root.join("c")).unwrap();
         for s in [&a, &b, &c] {
-            configure(s, "Fixture", "127.0.0.1:42424").unwrap();
+            configure(s, Some("Fixture"), "127.0.0.1:42424").unwrap();
         }
         a.trust(b.public_key(), "B").unwrap();
         b.trust(a.public_key(), "A").unwrap();
@@ -715,7 +747,7 @@ mod tests {
         let reopened = State::open(root.join("a")).unwrap();
         assert!(reopened.require_trust(c.public_key()).is_err());
         // A normal endpoint update at an unaware removed machine is not a new admission.
-        configure(&c, "Fixture changed", "127.0.0.1:42426").unwrap();
+        configure(&c, Some("Fixture changed"), "127.0.0.1:42426").unwrap();
         merge(&b, a.public_key(), json!(members(&c).unwrap())).unwrap();
         assert!(b.require_trust(c.public_key()).is_err());
         merge(&c, b.public_key(), json!(members(&b).unwrap())).unwrap();

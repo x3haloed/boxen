@@ -25,7 +25,7 @@ Examples below use the native binary. Substitute `bash /path/to/boxen.com` for t
 3. Run `boxen serve` on each host. Defaults are `0.0.0.0:42424` for peers and `127.0.0.1:42425` for local controls. Use `--listen` and `--ui` to override them.
 4. Run `boxen ping HOST:42424 OTHER_PUBLIC_KEY "Hello"`, or open the local control URL, select the trusted peer, enter its LAN address, and click **Send test message**.
 
-Both sides must trust each other. The initiator also pins the selected server identity before sending application content. Labels are local display names, not network addresses or identity authorities.
+Both sides must trust each other. The initiator also pins the selected server identity before sending application content. Labels are shared display names. The public key authenticates the peer.
 
 `boxen peers` lists trusted keys. `boxen untrust PUBLIC_KEY` revokes trust without restarting the daemon. Removal now propagates through the shared network; retained generations prevent stale membership snapshots from undoing it.
 

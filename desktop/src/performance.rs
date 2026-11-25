@@ -54,7 +54,7 @@ fn retained_history_frames() {
         palette_fresh: false,
         query: String::new(),
         choice: 0,
-        connection: false,
+        connections: Default::default(),
         last_save: Instant::now(),
         next_watch: 0,
         next_discovery: Instant::now(),

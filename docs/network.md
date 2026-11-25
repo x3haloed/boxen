@@ -86,10 +86,17 @@ The existing loopback authenticated operation envelope supports:
 ```json
 {"op":"network","args":{"action":"status"}}
 {"op":"network","args":{"action":"admit","key":"PUBLIC_KEY","label":"Other machine","address":"example-host:42424"}}
+{"op":"network","args":{"action":"rename","key":"PUBLIC_KEY","expected_label":"Other machine","label":"Build host"}}
 {"op":"network","args":{"action":"remove","key":"PUBLIC_KEY"}}
 ```
 
-`GET /api/status` includes member endpoints in `peers`; custom clients can discover
+A rename changes the shared display label of an active member, using the existing
+membership revision to propagate it. A stale expected label rejects unless the
+requested name is already current. A daemon restart retains the stored name.
+An explicit `serve --name` sets the name at startup, including on restarts.
+
+`GET /api/status` returns the local display name in `local_label` and includes member
+labels and endpoints in `peers`; custom clients can discover
 them independently of desktop storage. The desktop refreshes membership and uses
 those endpoints for the existing machine, agent and thread projections. The
 ordinary CLI also accepts `boxen request HOST:PORT PUBLIC_KEY JSON` for an

@@ -168,7 +168,9 @@ fn handle(
         );
     }
     if request == "GET /api/status HTTP/1.1" {
-        let status = json!({"api_version":2,"communication":{"resident":"mailbox","anonymous_thread":"request_response"},"identity":state.public_key(),"peers":state.peers()?});
+        let local_label = crate::network::member(state, state.public_key()).ok().map(|peer| peer.label);
+        let status = json!({"api_version":2,"communication":{"resident":"mailbox","anonymous_thread":"request_response"},
+            "identity":state.public_key(),"local_label":local_label,"peers":state.peers()?});
         return respond(
             stream,
             200,

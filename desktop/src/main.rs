@@ -4,6 +4,7 @@ mod attachments;
 mod client;
 mod console_style;
 mod conversation;
+mod connections;
 mod correspondence;
 mod field;
 mod grid;
@@ -46,6 +47,7 @@ use workspace::Workspace;
 struct Saved {
     workspace: Workspace,
     destinations: Vec<Destination>,
+    connection_addresses: HashMap<String, String>,
     hidden_machines: HashSet<String>,
     drafts: Vec<(ThreadKey, String)>,
     new_thread_text: String,
@@ -180,7 +182,7 @@ struct Desktop {
     palette_fresh: bool,
     query: String,
     choice: usize,
-    connection: bool,
+    connections: connections::Dialog,
     last_save: Instant,
     next_watch: u64,
     next_discovery: Instant,
@@ -263,7 +265,7 @@ impl Desktop {
             palette_fresh: false,
             query: String::new(),
             choice: 0,
-            connection: false,
+            connections: Default::default(),
             last_save: Instant::now(),
             next_watch: 0,
             next_discovery: Instant::now() + Duration::from_secs(10),
@@ -284,6 +286,7 @@ impl Desktop {
             menu::Command::Palette if !self.data.new_thread_dialog => self.open_palette(),
             menu::Command::Palette => {}
             menu::Command::ToolApprovals => self.data.tool_approvals.open(),
+            menu::Command::MachineConnections => self.connections.open = true,
         }
     }
     fn open_palette(&mut self) {
@@ -321,6 +324,7 @@ impl Desktop {
         }
         let local = status["identity"].as_str().unwrap_or("");
         self.data.local_key = local.into();
+        self.connections.local_label = status["local_label"].as_str().map(str::to_owned);
         let mut discovered = vec![Destination {
             key: local.into(),
             label: "This machine".into(),
@@ -332,10 +336,8 @@ impl Desktop {
             discovered.push(Destination {
                 key: key.into(),
                 label: p["label"].as_str().unwrap_or("Paired machine").into(),
-                address: p["address"]
-                    .as_str()
-                    .filter(|a| !a.is_empty())
-                    .map(str::to_owned)
+                address: self.data.saved.connection_addresses.get(key).cloned()
+                    .or_else(|| p["address"].as_str().filter(|a| !a.is_empty()).map(str::to_owned))
                     .or_else(|| existing.map(|d| d.address.clone()))
                     .unwrap_or_default(),
             });
@@ -359,17 +361,7 @@ impl Desktop {
             .map(|d| d.key.clone())
             .collect();
         for key in changed {
-            if let Some(stop) = self.polls.remove(&key) {
-                stop.store(true, Ordering::Relaxed);
-            }
-            self.data.watches.retain(|tag, w| {
-                if tag.starts_with(&format!("{key}:")) {
-                    w.stop.store(true, Ordering::Relaxed);
-                    false
-                } else {
-                    true
-                }
-            });
+            self.reconnect_destination(&key);
         }
         self.data.saved.destinations = discovered;
         if !self.ready {
@@ -377,6 +369,87 @@ impl Desktop {
         }
         self.ready = true;
     }
+    fn reconnect_destination(&mut self, key: &str) {
+        if let Some(stop) = self.polls.remove(key) {
+            stop.store(true, Ordering::Relaxed);
+        }
+        let prefix = format!("{key}:");
+        self.data.watches.retain(|tag, watch| {
+            if tag.starts_with(&prefix) {
+                watch.stop.store(true, Ordering::Relaxed);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn save_machine_connection(&mut self, edit: connections::Edit) {
+        let Some((previous, name)) = edit.name.clone() else {
+            self.machine_connection_saved(edit, Ok(None));
+            return;
+        };
+        let Some(client) = self.client.clone() else {
+            self.connections.finished(&edit, None, Err("Local daemon unavailable".into()));
+            return;
+        };
+        let destination = client.local();
+        let publisher = self.bus.publisher();
+        std::thread::spawn(move || {
+            let reply = client.operation(&destination, json!({"op":"network","args":{
+                "action":"rename","key":edit.key,"label":name,"expected_label":previous
+            }}));
+            let result = reply.and_then(|reply| {
+                reply["member"]["label"].as_str().map(str::to_owned)
+                    .ok_or_else(|| "Daemon did not acknowledge the display name".into())
+            });
+            publisher.send(Update::MachineRenamed(edit, result));
+        });
+    }
+
+    fn machine_connection_saved(&mut self, edit: connections::Edit, result: Result<Option<String>, String>) {
+        let name = match result {
+            Ok(name) => name,
+            Err(error) => {
+                self.connections.finished(&edit, None, Err(error));
+                self.next_discovery = Instant::now();
+                return;
+            }
+        };
+        if let Some(name) = &name {
+            if edit.key == self.data.local_key {
+                self.connections.local_label = Some(name.clone());
+            } else if let Some(destination) = self.data.saved.destinations.iter_mut().find(|d| d.key == edit.key) {
+                destination.label = name.clone();
+            }
+        }
+        let result = edit.address.as_ref().map_or(Ok(()), |address| {
+            self.save_connection_address(&edit.key, address)
+        });
+        self.connections.finished(&edit, name.as_deref(), result);
+        self.next_discovery = Instant::now();
+    }
+
+    fn save_connection_address(&mut self, key: &str, address: &str) -> Result<(), String> {
+        let index = self.data.saved.destinations.iter().position(|d| d.key == key)
+            .ok_or("Machine is no longer a network member")?;
+        let previous = self.data.saved.connection_addresses.remove(key);
+        if !address.is_empty() {
+            self.data.saved.connection_addresses.insert(key.to_owned(), address.to_owned());
+        }
+        let old_address = std::mem::replace(&mut self.data.saved.destinations[index].address, address.to_owned());
+        if !self.persist() {
+            self.data.saved.connection_addresses.remove(key);
+            if let Some(previous) = previous {
+                self.data.saved.connection_addresses.insert(key.to_owned(), previous);
+            }
+            self.data.saved.destinations[index].address = old_address;
+            return Err("The peer address could not be saved".into());
+        }
+        self.reconnect_destination(key);
+        Ok(())
+    }
+
     fn persist(&mut self) -> bool {
         let result = serde_json::to_vec_pretty(&self.data.saved)
             .map_err(|e| e.to_string())
@@ -491,6 +564,9 @@ impl Desktop {
                     self.data.tool_approvals.received(machine, result)
                 }
                 Update::Mail(update) => self.mail_update(update),
+                Update::MachineRenamed(edit, result) => {
+                    self.machine_connection_saved(edit, result.map(Some));
+                }
                 Update::Discovered(result) => match result {
                     Ok(status) => self.discovered(status),
                     Err(error) => self.data.notice = format!("Daemon unavailable: {error}"),
@@ -1366,7 +1442,7 @@ impl Desktop {
                             }
                         }
                     }
-                    3 => self.connection = true,
+                    3 => self.connections.open = true,
                     _ => {}
                 }
             }
@@ -1858,20 +1934,10 @@ impl eframe::App for Desktop {
         {
             client.tool_approvals(destination, args, self.bus.publisher());
         }
-        if self.connection {
-            let mut open = true;
-            let mut changed = false;
-            egui::Window::new("Machine connections").open(&mut open).show(&ctx,|ui|{
-                ui.label("The local daemon authenticates already-paired machines. Addresses locate those pinned identities.");
-                for dest in &mut self.data.saved.destinations {if dest.label!="This machine"{ui.label(&dest.label);ui.small(&dest.key);changed|=ui.text_edit_singleline(&mut dest.address).lost_focus();}}
-            });
-            self.connection = open;
-            if changed {
-                for (_, stop) in self.polls.drain() {
-                    stop.store(true, Ordering::Relaxed);
-                }
-                self.persist();
-            }
+        if let Some(edit) = self.connections.show(
+            &ctx, &self.data.local_key, &self.data.saved.destinations, self.ready
+        ) {
+            self.save_machine_connection(edit);
         }
         self.command_palette(&ctx);
         if let Some(field) = &mut self.field
@@ -1931,7 +1997,7 @@ fn fixture_desktop(
         palette_fresh: false,
         query: String::new(),
         choice: 0,
-        connection: false,
+        connections: Default::default(),
         last_save: Instant::now(),
         next_watch: 0,
         next_discovery: Instant::now(),
