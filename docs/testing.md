@@ -150,3 +150,30 @@ and the remote bundle were cleaned up. The normal daemon port 42424 is separate
 from this disposable test listener; no permanent Linux service was installed.
 
 The shared-network regression (`scripts/network-smoke.py`) uses three real daemons and is included in the controlled rotation. It covers indirect admission, shared object access, queued cross-host mail, lost acknowledgments, destination storage failure, pending bounds and membership removal. See [network](network.md).
+
+## Linux journal resource profile
+
+`scripts/journal-profile.py` runs a Linux native binary or the portable APE in
+a temporary daemon home. It measures control API readiness, idle daemon CPU,
+RSS and peak RSS, and acceptance and completion latency for controlled
+resident activations. Each run includes an empty-archive baseline. The
+`--wakes` phase publishes observations without a subscription to exercise
+dispatcher notifications without starting inference. CPU is reported as a
+fraction of one core and RSS measures the daemon process.
+
+The archive is synthetic. Event payload size and historical resident snapshot
+size can vary independently. For a large archive, use a disk-backed scratch
+directory with at least 6 GB available:
+
+```sh
+python3 scripts/journal-profile.py ./boxen.com --scratch /var/tmp \
+  --runs 4300 --events 1700 --payload-bytes 465 \
+  --resident-snapshot-bytes 220000 --wakes 10 --activations 6 --idle-seconds 15
+```
+
+Run the same command with a native Linux binary for comparison. An archive
+generated immediately before startup can be partly cached. Compare results
+under comparable storage and cache conditions. The script prints JSON with the
+binary hash and archive sizes. Optional `--max-idle-core-fraction` and
+`--max-peak-rss-mib` arguments turn environment-specific budgets into failing
+checks. The profile uses neither installed daemon state nor live inference.
