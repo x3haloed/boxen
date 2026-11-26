@@ -681,6 +681,8 @@ pub fn execute(
     );
     launch.runtime(None, &record.runtime_policy);
     launch.record("launch", "attempted", None);
+    let mut selected_version = None;
+    let mut selected_probe_fallback = None;
     let mut child = crate::codex_executable::launch(
         binary, crate::platform::host_os(),
         |selected| {
@@ -695,9 +697,11 @@ pub fn execute(
                 .current_dir(&spec.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
         },
         |selected, retry| {
+            selected_version = selected.version.clone();
+            selected_probe_fallback = selected.probe_fallback.clone();
             launch.runtime(selected.version.as_deref(), &record.runtime_policy);
             run.diagnostic(Level::Info, "process.starting",
-                || json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"probe_fallback":selected.probe_fallback,"rediscovered":retry,"cwd":spec.cwd}), || Value::Null);
+                || json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"probe_fallback":selected.probe_fallback,"skipped_candidates":selected.skipped_candidates,"rediscovered":retry,"cwd":spec.cwd}), || Value::Null);
         },
     ).map_err(|error| {
         launch.record("launch", "failed", Some(crate::infrastructure::reason(&error)));
@@ -939,10 +943,14 @@ pub fn execute(
             || Value::Null,
         );
     }
-    run.append(
-        "backend_thread",
-        json!({"id":thread,"backend":"codex","model":result["model"]}),
-    )?;
+    let mut backend_thread = json!({"id":thread,"backend":"codex","model":result["model"]});
+    if let Some(version) = &selected_version {
+        backend_thread["cli_version"] = json!(version);
+    }
+    if let Some(fallback) = &selected_probe_fallback {
+        backend_thread["probe_fallback"] = json!(fallback);
+    }
+    run.append("backend_thread", backend_thread)?;
     if rpc.cancel_requested {
         return Ok(RunOutcome::Cancelled(
             "Cancelled before inference started".into(),

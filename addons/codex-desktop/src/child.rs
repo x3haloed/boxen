@@ -99,7 +99,7 @@ pub fn submit(executable: &Path, thread: &str, notice: &str, timeout: Duration) 
         |selected, retry| {
             println!(
                 "{}",
-                serde_json::json!({"event":"desktop.codex_starting","at":crate::now(),"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"rediscovered":retry})
+                serde_json::json!({"event":"desktop.codex_starting","at":crate::now(),"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"probe_fallback":selected.probe_fallback,"skipped_candidates":selected.skipped_candidates,"rediscovered":retry})
             )
         },
     )?;

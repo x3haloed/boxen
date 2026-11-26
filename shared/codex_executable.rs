@@ -2,7 +2,7 @@
 //! Explicit paths are pins; `auto` and `codex` discover on every launch.
 use std::{
     cmp::Ordering,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::OsStr,
     fs,
     io::{self, Read},
@@ -15,12 +15,20 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+const DISCOVERY_BUDGET: Duration = Duration::from_secs(5);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const SLOW_RETRY_BUDGET: Duration = Duration::from_secs(5);
+const SLOW_RETRY_MAX: usize = 2;
+const SLOW_RETRY_TIMEOUT: Duration = Duration::from_secs(3);
+const SLOW_RETRY_WITH_FALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[derive(Clone, Debug)]
 pub struct Selection {
     pub path: PathBuf,
     pub version: Option<String>,
     pub automatic: bool,
     pub probe_fallback: Option<String>,
+    pub skipped_candidates: Vec<String>,
 }
 
 pub fn automatic(configured: &str) -> bool {
@@ -65,6 +73,7 @@ pub fn resolve(configured: &str, os: &str) -> io::Result<Selection> {
             version: None,
             automatic: false,
             probe_fallback: None,
+            skipped_candidates: Vec::new(),
         });
     }
     let home = std::env::var_os(if os == "windows" {
@@ -175,89 +184,13 @@ fn checked_probe(
         }
     }
 }
-fn resolve_candidates(
-    desktop: Option<&Path>,
-    fallback: &[PathBuf],
-    mut probe: impl FnMut(&Path, Duration) -> io::Result<String>,
-) -> io::Result<Selection> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut failures = Vec::new();
-    let mut timed_out = Vec::new();
-    let mut cached = HashMap::new();
-    let result = discover(desktop, fallback, |path| {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            failures.push(format!("{}: discovery deadline reached", path.display()));
-            return None;
-        }
-        match checked_probe(path, remaining.min(Duration::from_secs(1)), &mut probe) {
-            Ok((version, used_cache)) => {
-                if used_cache {
-                    cached.insert(
-                        path.to_owned(),
-                        "unchanged previously verified executable; version probe timed out"
-                            .to_owned(),
-                    );
-                }
-                Some(version)
-            }
-            Err(e) => {
-                if e.kind() == io::ErrorKind::TimedOut {
-                    timed_out.push(path.to_owned());
-                }
-                failures.push(format!("{}: {}", path.display(), e));
-                None
-            }
-        }
-    });
-    match result {
-        Ok(mut selection) => {
-            selection.probe_fallback = cached.remove(&selection.path);
-            Ok(selection)
-        }
-        Err(_) => {
-            // Cold starts have no cache: allow a bounded slower retry before any
-            // workload child is spawned. No inference or tool operation is replayed.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            for path in timed_out.into_iter().take(2) {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                match checked_probe(&path, remaining.min(Duration::from_secs(3)), &mut probe) {
-                    Ok((version, _)) => {
-                        return Ok(Selection {
-                            path,
-                            version: Some(version),
-                            automatic: true,
-                            probe_fallback: Some(
-                                "version probe recovered on bounded slow retry".into(),
-                            ),
-                        });
-                    }
-                    Err(e) => failures.push(format!("{}: slow retry: {}", path.display(), e)),
-                }
-            }
-            let reasons = if failures.is_empty() {
-                "no candidate files found in current desktop or CLI locations".to_owned()
-            } else {
-                failures.join("; ")
-            };
-            Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "Codex auto-discovery found no usable executable; candidate probes: {reasons}"
-                ),
-            ))
-        }
-    }
+enum ProbeOutcome {
+    Verified { version: String, used_cache: bool },
+    TimedOut,
+    Failed,
 }
 
-fn discover(
-    desktop: Option<&Path>,
-    fallback: &[PathBuf],
-    mut version: impl FnMut(&Path) -> Option<String>,
-) -> io::Result<Selection> {
+fn desktop_installations(desktop: Option<&Path>) -> Vec<(SystemTime, PathBuf)> {
     let mut installations = Vec::new();
     if let Some(root) = desktop {
         for entry in fs::read_dir(root).into_iter().flatten().flatten().take(256) {
@@ -273,8 +206,228 @@ fn discover(
         }
     }
     installations.sort_by(|a, b| b.cmp(a));
+    installations.truncate(16);
+    installations
+}
+
+fn dedup_fallback(fallback: &[PathBuf]) -> Vec<&Path> {
+    let mut seen = HashSet::new();
+    fallback
+        .iter()
+        .map(PathBuf::as_path)
+        .filter(|p| p.is_file() && seen.insert(*p))
+        .take(16)
+        .collect()
+}
+
+fn resolve_candidates(
+    desktop: Option<&Path>,
+    fallback: &[PathBuf],
+    mut probe: impl FnMut(&Path, Duration) -> io::Result<String>,
+) -> io::Result<Selection> {
+    let mut pass1_spent = Duration::ZERO;
+    let mut retry_spent = Duration::ZERO;
+    let mut retries_used = 0usize;
+    let mut failures: Vec<(PathBuf, String)> = Vec::new();
+    let skipped_for = |failures: &[(PathBuf, String)], chosen: &Path| -> Vec<String> {
+        failures
+            .iter()
+            .filter(|(p, _)| p != chosen)
+            .map(|(_, reason)| reason.clone())
+            .collect()
+    };
+    let probe_fast = |path: &Path,
+                      pass1_spent: &mut Duration,
+                      failures: &mut Vec<(PathBuf, String)>,
+                      probe: &mut dyn FnMut(&Path, Duration) -> io::Result<String>|
+     -> ProbeOutcome {
+        let remaining = DISCOVERY_BUDGET.saturating_sub(*pass1_spent);
+        if remaining.is_zero() {
+            failures.push((
+                path.to_owned(),
+                format!("{}: discovery deadline reached", path.display()),
+            ));
+            return ProbeOutcome::Failed;
+        }
+        let started = Instant::now();
+        let result = checked_probe(path, remaining.min(PROBE_TIMEOUT), &mut |p, d| probe(p, d));
+        *pass1_spent = pass1_spent.saturating_add(started.elapsed());
+        match result {
+            Ok((version, used_cache)) => ProbeOutcome::Verified {
+                version,
+                used_cache,
+            },
+            Err(error) => {
+                failures.push((path.to_owned(), format!("{}: {}", path.display(), error)));
+                if error.kind() == io::ErrorKind::TimedOut {
+                    ProbeOutcome::TimedOut
+                } else {
+                    ProbeOutcome::Failed
+                }
+            }
+        }
+    };
+    let probe_slow_retry = |path: &Path,
+                            cap: Duration,
+                            retries_used: &mut usize,
+                            retry_spent: &mut Duration,
+                            failures: &mut Vec<(PathBuf, String)>,
+                            probe: &mut dyn FnMut(&Path, Duration) -> io::Result<String>|
+     -> Option<String> {
+        if *retries_used >= SLOW_RETRY_MAX {
+            return None;
+        }
+        let remaining = SLOW_RETRY_BUDGET.saturating_sub(*retry_spent);
+        if remaining.is_zero() {
+            return None;
+        }
+        *retries_used += 1;
+        let started = Instant::now();
+        let result = checked_probe(path, remaining.min(cap), &mut |p, d| probe(p, d));
+        *retry_spent = retry_spent.saturating_add(started.elapsed());
+        match result {
+            Ok((version, _)) => Some(version),
+            Err(error) => {
+                failures.push((
+                    path.to_owned(),
+                    format!("{}: slow retry: {}", path.display(), error),
+                ));
+                None
+            }
+        }
+    };
+
+    // Desktop installations (Windows): probe all current versions and give
+    // timed-out installations a bounded slow retry before settling on an older
+    // version, so a cold upgraded binary does not silently downgrade.
+    let mut valid_desktop = Vec::new();
+    let mut desktop_timed_out = Vec::new();
+    for (modified, path) in desktop_installations(desktop) {
+        match probe_fast(&path, &mut pass1_spent, &mut failures, &mut probe) {
+            ProbeOutcome::Verified {
+                version,
+                used_cache,
+            } => {
+                if let Some(number) = Version::parse(&version) {
+                    let note = used_cache.then(|| {
+                        "unchanged previously verified executable; version probe timed out"
+                            .to_owned()
+                    });
+                    valid_desktop.push((number, modified, path, version, note));
+                }
+            }
+            ProbeOutcome::TimedOut => desktop_timed_out.push((modified, path)),
+            ProbeOutcome::Failed => {}
+        }
+    }
+    if !desktop_timed_out.is_empty() {
+        let cap = if valid_desktop.is_empty() {
+            SLOW_RETRY_TIMEOUT
+        } else {
+            SLOW_RETRY_WITH_FALLBACK_TIMEOUT
+        };
+        for (modified, path) in desktop_timed_out {
+            if let Some(version) = probe_slow_retry(
+                &path,
+                cap,
+                &mut retries_used,
+                &mut retry_spent,
+                &mut failures,
+                &mut probe,
+            ) && let Some(number) = Version::parse(&version)
+            {
+                valid_desktop.push((
+                    number,
+                    modified,
+                    path,
+                    version,
+                    Some("version probe recovered on bounded slow retry".into()),
+                ));
+            }
+        }
+    }
+    valid_desktop.sort_by(|a, b| (&b.0, &b.1, &b.2).cmp(&(&a.0, &a.1, &a.2)));
+    if let Some((_, _, path, version, probe_fallback)) = valid_desktop.into_iter().next() {
+        let skipped_candidates = skipped_for(&failures, &path);
+        return Ok(Selection {
+            path,
+            version: Some(version),
+            automatic: true,
+            probe_fallback,
+            skipped_candidates,
+        });
+    }
+
+    // Fallback candidates (macOS/Linux and non-desktop CLI paths): probe in
+    // priority order and retry a timed-out candidate before falling through to
+    // lower-priority (potentially older) installations.
+    for path in dedup_fallback(fallback) {
+        match probe_fast(path, &mut pass1_spent, &mut failures, &mut probe) {
+            ProbeOutcome::Verified {
+                version,
+                used_cache,
+            } if Version::parse(&version).is_some() => {
+                return Ok(Selection {
+                    path: path.to_owned(),
+                    version: Some(version),
+                    automatic: true,
+                    probe_fallback: used_cache.then(|| {
+                        "unchanged previously verified executable; version probe timed out"
+                            .to_owned()
+                    }),
+                    skipped_candidates: skipped_for(&failures, path),
+                });
+            }
+            ProbeOutcome::TimedOut => {
+                if let Some(version) = probe_slow_retry(
+                    path,
+                    SLOW_RETRY_TIMEOUT,
+                    &mut retries_used,
+                    &mut retry_spent,
+                    &mut failures,
+                    &mut probe,
+                ) && Version::parse(&version).is_some()
+                {
+                    return Ok(Selection {
+                        path: path.to_owned(),
+                        version: Some(version),
+                        automatic: true,
+                        probe_fallback: Some(
+                            "version probe recovered on bounded slow retry".into(),
+                        ),
+                        skipped_candidates: skipped_for(&failures, path),
+                    });
+                }
+            }
+            ProbeOutcome::Failed | ProbeOutcome::Verified { .. } => {}
+        }
+    }
+
+    let reasons = if failures.is_empty() {
+        "no candidate files found in current desktop or CLI locations".to_owned()
+    } else {
+        failures
+            .into_iter()
+            .map(|(_, reason)| reason)
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "Codex auto-discovery found no usable executable; candidate probes: {reasons}"
+        ),
+    ))
+}
+
+#[cfg(test)]
+fn discover(
+    desktop: Option<&Path>,
+    fallback: &[PathBuf],
+    mut version: impl FnMut(&Path) -> Option<String>,
+) -> io::Result<Selection> {
     let mut valid = Vec::new();
-    for (modified, path) in installations.into_iter().take(16) {
+    for (modified, path) in desktop_installations(desktop) {
         if let Some(text) = version(&path)
             && let Some(number) = Version::parse(&text)
         {
@@ -288,17 +441,19 @@ fn discover(
             version: Some(text),
             automatic: true,
             probe_fallback: None,
+            skipped_candidates: Vec::new(),
         });
     }
-    for path in fallback.iter().filter(|p| p.is_file()).take(16) {
+    for path in dedup_fallback(fallback) {
         if let Some(text) = version(path)
             && Version::parse(&text).is_some()
         {
             return Ok(Selection {
-                path: path.clone(),
+                path: path.to_owned(),
                 version: Some(text),
                 automatic: true,
                 probe_fallback: None,
+                skipped_candidates: Vec::new(),
             });
         }
     }
@@ -761,6 +916,7 @@ mod tests {
                         version: None,
                         automatic: true,
                         probe_fallback: None,
+                        skipped_candidates: Vec::new(),
                     })
                 },
                 &mut |_| {
@@ -786,6 +942,7 @@ mod tests {
                     version: None,
                     automatic: true,
                     probe_fallback: None,
+                    skipped_candidates: Vec::new(),
                 })
             },
             &mut |_| {
@@ -809,6 +966,7 @@ mod tests {
                     version: None,
                     automatic: true,
                     probe_fallback: None,
+                    skipped_candidates: Vec::new(),
                 })
             },
             &mut |_| {
@@ -839,6 +997,127 @@ mod tests {
             .path,
             npm
         );
+    }
+    #[test]
+    fn timed_out_higher_priority_fallback_retries_before_older_fallback() {
+        let f = Fixture::new();
+        let primary = f.file("primary/codex");
+        let stale = f.file("stale/codex");
+        let mut probed = Vec::new();
+        let mut primary_attempts = 0;
+        let selected = resolve_candidates(None, &[primary.clone(), stale.clone()], |p, duration| {
+            probed.push((p.to_owned(), duration));
+            if p == primary {
+                primary_attempts += 1;
+                if primary_attempts == 1 {
+                    Err(timeout())
+                } else {
+                    Ok("codex-cli 0.171.0-alpha.13.2".into())
+                }
+            } else {
+                Ok("codex-cli 0.149.0".into())
+            }
+        })
+        .unwrap();
+        assert_eq!(selected.path, primary);
+        assert_eq!(
+            selected.version.as_deref(),
+            Some("codex-cli 0.171.0-alpha.13.2")
+        );
+        assert!(selected.probe_fallback.unwrap().contains("slow retry"));
+        assert!(selected.skipped_candidates.is_empty());
+        assert_eq!(probed.len(), 2);
+        assert!(probed.iter().all(|(p, _)| p == &primary));
+        assert!(probed[0].1 <= Duration::from_secs(1));
+        assert!(probed[1].1 > Duration::from_secs(1) && probed[1].1 <= Duration::from_secs(3));
+    }
+    #[test]
+    fn permanently_hung_higher_priority_fallback_falls_through_and_reports_skipped() {
+        let f = Fixture::new();
+        let hung = f.file("hung/codex");
+        let working = f.file("working/codex");
+        let mut hung_attempts = 0;
+        let selected = resolve_candidates(None, &[hung.clone(), working.clone()], |p, _| {
+            if p == hung {
+                hung_attempts += 1;
+                Err(timeout())
+            } else {
+                Ok("codex-cli 0.149.0".into())
+            }
+        })
+        .unwrap();
+        assert_eq!(selected.path, working);
+        assert_eq!(selected.version.as_deref(), Some("codex-cli 0.149.0"));
+        assert!(selected.probe_fallback.is_none());
+        assert_eq!(hung_attempts, 2);
+        assert_eq!(selected.skipped_candidates.len(), 2);
+        assert!(selected.skipped_candidates[0].contains("fixture probe timed out"));
+        assert!(selected.skipped_candidates[1].contains("slow retry"));
+    }
+    #[test]
+    fn cold_newer_desktop_installation_retries_before_settling_on_older_desktop() {
+        let f = Fixture::new();
+        let _old = f.file("old/codex.exe");
+        let new = f.file("new/codex.exe");
+        let mut new_calls = Vec::new();
+        let selected = resolve_candidates(Some(&f.0), &[], |p, duration| {
+            if p == new {
+                new_calls.push(duration);
+                if new_calls.len() == 1 {
+                    Err(timeout())
+                } else {
+                    Ok("codex-cli 0.171.0".into())
+                }
+            } else {
+                Ok("codex-cli 0.149.0".into())
+            }
+        })
+        .unwrap();
+        assert_eq!(selected.path, new);
+        assert_eq!(selected.version.as_deref(), Some("codex-cli 0.171.0"));
+        assert!(selected.probe_fallback.unwrap().contains("slow retry"));
+        assert!(selected.skipped_candidates.is_empty());
+        assert_eq!(new_calls.len(), 2);
+        assert!(new_calls[0] <= Duration::from_secs(1));
+        assert!(new_calls[1] > Duration::from_secs(1) && new_calls[1] <= Duration::from_secs(2));
+
+        let f2 = Fixture::new();
+        let old2 = f2.file("old/codex.exe");
+        let hung = f2.file("hung/codex.exe");
+        let fallback = resolve_candidates(Some(&f2.0), &[], |p, _| {
+            if p == hung {
+                Err(timeout())
+            } else {
+                Ok("codex-cli 0.149.0".into())
+            }
+        })
+        .unwrap();
+        assert_eq!(fallback.path, old2);
+        assert!(fallback.probe_fallback.is_none());
+        assert_eq!(fallback.skipped_candidates.len(), 2);
+        assert!(fallback.skipped_candidates[1].contains("slow retry"));
+    }
+    #[test]
+    fn duplicate_fallback_paths_are_probed_once() {
+        let f = Fixture::new();
+        let primary = f.file("primary/codex");
+        let secondary = f.file("secondary/codex");
+        let mut primary_attempts = 0;
+        let selected = resolve_candidates(
+            None,
+            &[primary.clone(), primary.clone(), secondary.clone()],
+            |p, _| {
+                if p == primary {
+                    primary_attempts += 1;
+                    Err(timeout())
+                } else {
+                    Ok("codex-cli 1.0.0".into())
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.path, secondary);
+        assert_eq!(primary_attempts, 2);
     }
     #[test]
     fn unusable_candidates_produce_a_discovery_error() {

@@ -147,7 +147,7 @@ Workloads use managed CLIs or the built-in inference runtime with Full access on
         let selected = codex_executable::resolve(&configured, platform::host_os())?;
         println!(
             "{}",
-            serde_json::json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"probe_fallback":selected.probe_fallback})
+            serde_json::json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"probe_fallback":selected.probe_fallback,"skipped_candidates":selected.skipped_candidates})
         );
         return Ok(());
     }
