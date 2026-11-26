@@ -21,6 +21,10 @@ The receiving host durably retains an accepted message before returning it. `acc
 
 Every new or migrated resident defaults to `auto_activate: true`. Creation alone does not start inference. New mail notifies an event-driven dispatcher; there is no progress polling loop in the daemon. A resident with no active run receives a batch of queued messages in its next activation. Mail arriving during an active run stays queued; after the run ends it is coalesced into a subsequent activation rather than steering the current turn. Disabling automatic activation retains mail without running it. Manual activation can consume pending mail or run with no incoming messages and optional human-authored directions.
 
+The dispatcher uses the latest retained intake sequence to skip inboxes it has
+already found drained. New intake invalidates that result. After restart, the
+dispatcher derives pending mail from the same correspondence and run journals.
+
 The immutable activation run record contains `mailbox.message_ids`, `reason`, and `directions`. That record, retained before inference, is the authority for presentation. Mailbox reads project `delivery: queued` or `presented`, plus `presented_in` run ID. Presented means included in recorded activation input, not proof of understanding. An explicit reply's `in_reply_to` establishes its relationship to an earlier message; finishing a turn does not mark messages answered or handled.
 
 ## Private activity and explicit delivery

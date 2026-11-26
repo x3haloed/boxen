@@ -304,6 +304,16 @@ impl Residents {
     pub(crate) fn contains(&self, id: &str) -> bool {
         self.entries.lock().unwrap().contains_key(id)
     }
+    pub fn auto_activation_targets(&self) -> Vec<(String, String)> {
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|stored| stored.resident.auto_activate)
+            .map(|stored| (stored.resident.owner.clone(), stored.resident.id.clone()))
+            .collect()
+    }
+
     pub fn all(&self) -> Vec<Resident> {
         self.entries
             .lock()

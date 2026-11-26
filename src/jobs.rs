@@ -866,6 +866,10 @@ impl Run {
     pub fn snapshot(&self) -> Snapshot {
         self.inner.lock().unwrap().snapshot.clone()
     }
+
+    fn is_active(&self) -> bool {
+        !terminal(&self.inner.lock().unwrap().snapshot.status)
+    }
     pub fn append(&self, kind: &str, data: Value) -> Result<Event> {
         let mut inner = self.inner.lock().unwrap();
         let event = self.append_locked(&mut inner, kind, data)?;
@@ -1528,7 +1532,7 @@ pub struct Jobs {
 }
 
 enum ActivationCause {
-    Mail,
+    Mail(Vec<Message>),
     Manual,
     Schedule(crate::scheduler::Origin),
     Observations,
@@ -1830,6 +1834,16 @@ impl Jobs {
         );
     }
 
+    fn thread_is_active(&self, owner: Option<&str>, thread: &str) -> bool {
+        self.runs.lock().unwrap().values().any(|run| {
+            let inner = run.inner.lock().unwrap();
+            let snapshot = &inner.snapshot;
+            !terminal(&snapshot.status)
+                && snapshot.record.spec.thread_id == thread
+                && owner.is_none_or(|owner| snapshot.record.owner == owner)
+        })
+    }
+
     fn dispatch_schedules(self: &Arc<Self>) {
         let mut jobs = self.schedules.all();
         jobs.sort_by_key(|j| (j.next_at_ms, j.definition.id.clone()));
@@ -1901,16 +1915,16 @@ impl Jobs {
                 {
                     return Ok(());
                 }
-                let runs: Vec<_> = self
-                    .runs
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .map(|r| r.snapshot())
-                    .collect();
-                if runs.iter().any(|s| {
-                    s.record.spec.thread_id == job.definition.target.id() && !terminal(&s.status)
-                }) || runs.iter().filter(|s| !terminal(&s.status)).count() >= 8
+                if self.thread_is_active(None, job.definition.target.id())
+                    || self
+                        .runs
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .filter(|run| run.is_active())
+                        .take(8)
+                        .count()
+                        >= 8
                 {
                     if !job.blocked || job.retry_at_ms <= time {
                         self.schedules.defer(&job,true,"Target is active or the host's execution slots are occupied; the occurrence remains pending until capacity is available.")?;
@@ -2083,10 +2097,7 @@ impl Jobs {
         for (owner, target) in self.observations.pending_targets() {
             let _t = self.transitions.lock().unwrap();
             if !self.observations.wake_allowed(&owner, target.id())
-                || self.runs.lock().unwrap().values().any(|r| {
-                    r.snapshot().record.spec.thread_id == target.id()
-                        && !terminal(&r.snapshot().status)
-                })
+                || self.thread_is_active(None, target.id())
             {
                 continue;
             }
@@ -2687,11 +2698,92 @@ impl Jobs {
         wake.pending = true;
         self.wake.1.notify_one();
     }
+    fn dispatch_mail(self: &Arc<Self>, drained: &mut HashMap<String, u64>, retry_at: &mut u64) {
+        if let Err(error) = self.mailboxes.check() {
+            logging::record(
+                Level::Warn,
+                Target::Workload,
+                "mailbox.dispatch_unavailable",
+                Context::default(),
+                || json!({"error":error.to_string()}),
+                || Value::Null,
+            );
+            return;
+        }
+        for (owner, id) in self.residents.auto_activation_targets() {
+            // Capture the intake sequence before checking pending mail. An intake
+            // concurrent with the check either joins the batch or invalidates a
+            // cached empty result on the next wake.
+            let sequence = self.mailboxes.resident_mail_sequence(&owner, &id);
+            if sequence == 0 || drained.get(&id) == Some(&sequence) {
+                continue;
+            }
+            let _transition = self.transitions.lock().unwrap();
+            let result = (|| -> Result<()> {
+                let resident = self.residents.get(&owner, &id)?;
+                if !resident.auto_activate || self.thread_is_active(Some(&owner), &id) {
+                    return Ok(());
+                }
+                if let Some(until) =
+                    self.payment_cooldown(&owner, &id, &resident.backend, &resident.model, now())
+                {
+                    *retry_at = (*retry_at).min(until);
+                    Self::report_payment_deferral(&owner, &id, "mail", until);
+                    return Ok(());
+                }
+                let presented = self.assigned_mail(&owner, &id).into_keys().collect();
+                let batch = self.mailboxes.pending(&owner, &id, &presented);
+                if batch.is_empty() {
+                    if !self.mailboxes.has_pending(&owner, &id, &presented) {
+                        drained.insert(id.clone(), sequence);
+                        logging::record(
+                            Level::Debug,
+                            Target::Workload,
+                            "mailbox.activation_drained",
+                            Context {
+                                peer_id: Some(&owner),
+                                thread_id: Some(&id),
+                                ..Context::default()
+                            },
+                            || json!({"intake_sequence":sequence}),
+                            || Value::Null,
+                        );
+                    }
+                    return Ok(());
+                }
+                self.activate_locked(
+                    &owner,
+                    &id,
+                    state::random_hex()?,
+                    String::new(),
+                    ActivationCause::Mail(batch),
+                    Requirements::new(),
+                )?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                logging::record(
+                    Level::Warn,
+                    Target::Workload,
+                    "mailbox.activation_deferred",
+                    Context {
+                        peer_id: Some(&owner),
+                        thread_id: Some(&id),
+                        ..Context::default()
+                    },
+                    || json!({"error":error.to_string()}),
+                    || Value::Null,
+                );
+            }
+        }
+    }
+
     pub fn start_dispatcher(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         let signal = self.wake.clone();
         std::thread::spawn(move || {
             let mut delay = Duration::from_secs(60);
+            let mut drained_mailboxes = HashMap::new();
             loop {
                 {
                     let mut wake = signal.0.lock().unwrap();
@@ -2722,44 +2814,7 @@ impl Jobs {
                 jobs.dispatch_schedules();
                 let mut retry_at = u64::MAX;
                 jobs.dispatch_observations(&mut retry_at);
-                for resident in jobs.residents.all() {
-                    if !resident.auto_activate {
-                        continue;
-                    }
-                    let _transition = jobs.transitions.lock().unwrap();
-                    if let Some(until) = jobs.payment_cooldown(
-                        &resident.owner,
-                        &resident.id,
-                        &resident.backend,
-                        &resident.model,
-                        now(),
-                    ) {
-                        retry_at = retry_at.min(until);
-                        Self::report_payment_deferral(&resident.owner, &resident.id, "mail", until);
-                        continue;
-                    }
-                    if let Err(error) = jobs.activate_locked(
-                        &resident.owner,
-                        &resident.id,
-                        state::random_hex().unwrap_or_default(),
-                        String::new(),
-                        ActivationCause::Mail,
-                        Requirements::new(),
-                    ) {
-                        logging::record(
-                            Level::Warn,
-                            Target::Workload,
-                            "mailbox.activation_deferred",
-                            Context {
-                                peer_id: Some(&resident.owner),
-                                thread_id: Some(&resident.id),
-                                ..Context::default()
-                            },
-                            || json!({"error":error.to_string()}),
-                            || Value::Null,
-                        );
-                    }
-                }
+                jobs.dispatch_mail(&mut drained_mailboxes, &mut retry_at);
                 let time = now();
                 delay = jobs
                     .schedules
@@ -2938,8 +2993,15 @@ impl Jobs {
                 if record.owner != owner || record.spec.resident_id.as_deref() != Some(resident) {
                     return None;
                 }
-                let batch = record.mailbox.as_ref()?;
-                Some((record.spec.id.clone(), snapshot.activation_input_seq, batch.message_ids.clone()))
+                let batch = record
+                    .mailbox
+                    .as_ref()
+                    .filter(|batch| !batch.message_ids.is_empty())?;
+                Some((
+                    record.spec.id.clone(),
+                    snapshot.activation_input_seq,
+                    batch.message_ids.clone(),
+                ))
             })
             .flat_map(|(run, input, ids)| ids.into_iter().map(move |id| (id, (run.clone(), input))))
             .collect()
@@ -2996,11 +3058,11 @@ impl Jobs {
         cause: ActivationCause,
         required_capabilities: Requirements,
     ) -> Result<Option<Snapshot>> {
-        let (manual, reason, scheduled) = match cause {
-            ActivationCause::Mail => (false, "mail", None),
-            ActivationCause::Manual => (true, "manual", None),
-            ActivationCause::Schedule(origin) => (true, "schedule", Some(origin)),
-            ActivationCause::Observations => (true, "observations", None),
+        let (mail, reason, scheduled) = match cause {
+            ActivationCause::Mail(batch) => (Some(batch), "mail", None),
+            ActivationCause::Manual => (None, "manual", None),
+            ActivationCause::Schedule(origin) => (None, "schedule", Some(origin)),
+            ActivationCause::Observations => (None, "observations", None),
         };
         self.mailboxes.check()?;
         valid_id(&run_id)?;
@@ -3022,22 +3084,18 @@ impl Jobs {
             return Err("activation id already accepted with different input".into());
         }
         let resident = self.residents.get(owner, id)?;
-        if self
-            .list(owner)
-            .iter()
-            .any(|r| r.record.spec.thread_id == id && !terminal(&r.status))
-        {
+        let manual = mail.is_none();
+        if self.thread_is_active(Some(owner), id) {
             return if manual {
                 Err("resident is already active; incoming messages remain queued for the next activation".into())
             } else {
                 Ok(None)
             };
         }
-        let presented = self.assigned_mail(owner, id).into_keys().collect();
-        let mut batch = self.mailboxes.pending(owner, id, &presented);
-        if batch.is_empty() && !manual {
-            return Ok(None);
-        }
+        let mut batch = mail.unwrap_or_else(|| {
+            let presented = self.assigned_mail(owner, id).into_keys().collect();
+            self.mailboxes.pending(owner, id, &presented)
+        });
         let mut activation = Activation {
             message_ids: batch.iter().map(|m| m.id.clone()).collect(),
             reason: reason.into(),
@@ -3783,18 +3841,16 @@ impl Jobs {
         }
         let requested_cwd = spec.cwd.clone();
         spec.cwd = self.resolve_working_directory(&spec.thread_id, &requested_cwd, false)?;
-        if runs
-            .values()
-            .filter(|run| !terminal(&run.snapshot().status))
-            .count()
-            >= 8
-        {
+        if runs.values().filter(|run| run.is_active()).take(8).count() >= 8 {
             return Err("this prototype allows eight active runs per machine".into());
         }
         let mut previous: Vec<_> = runs
             .values()
-            .map(|r| r.snapshot())
-            .filter(|r| r.record.spec.thread_id == spec.thread_id)
+            .filter_map(|run| {
+                let inner = run.inner.lock().unwrap();
+                (inner.snapshot.record.spec.thread_id == spec.thread_id)
+                    .then(|| inner.snapshot.clone())
+            })
             .collect();
         previous.sort_by_key(|s| (s.record.created_at, s.record.spec.id.clone()));
         let head = previous.last();
@@ -3993,7 +4049,7 @@ impl Jobs {
             // or after a wall-clock correction. Follow-ups must resume the latest run.
             created_at: now().max(
                 runs.values()
-                    .map(|r| r.snapshot().record.created_at)
+                    .map(|run| run.inner.lock().unwrap().snapshot.record.created_at)
                     .max()
                     .unwrap_or(0)
                     .saturating_add(1),

@@ -113,6 +113,7 @@ struct Inner {
     file: Option<File>,
     seq: u64,
     messages: Vec<Message>,
+    resident_mail_sequences: HashMap<String, HashMap<String, u64>>,
     ids: HashMap<String, usize>,
     sources: HashMap<String, String>,
     residents: HashSet<String>,
@@ -189,6 +190,7 @@ impl Mailboxes {
                         file: None,
                         seq: 0,
                         messages: Vec::new(),
+                        resident_mail_sequences: HashMap::new(),
                         ids: HashMap::new(),
                         sources: HashMap::new(),
                         residents: HashSet::new(),
@@ -220,6 +222,7 @@ impl Mailboxes {
             file: Some(OpenOptions::new().append(true).open(&path)?),
             seq: 0,
             messages: Vec::new(),
+            resident_mail_sequences: HashMap::new(),
             ids: HashMap::new(),
             sources: HashMap::new(),
             residents: HashSet::new(),
@@ -289,6 +292,13 @@ impl Mailboxes {
                     inner.receipts.insert(message.id.clone(), delivery.clone());
                 }
                 inner.ids.insert(message.id.clone(), inner.messages.len());
+                if let Address::Resident { id } = &message.to {
+                    inner
+                        .resident_mail_sequences
+                        .entry(message.owner.clone())
+                        .or_default()
+                        .insert(id.clone(), inner.seq);
+                }
                 inner.messages.push(message);
             }
             Some("connector_receipt") => {
@@ -1020,6 +1030,17 @@ impl Mailboxes {
         }
         Ok((messages, next_after))
     }
+    /// Sequence of the latest retained intake for this owner and resident.
+    pub fn resident_mail_sequence(&self, owner: &str, resident: &str) -> u64 {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .resident_mail_sequences
+            .get(owner)
+            .and_then(|inboxes| inboxes.get(resident))
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn has_pending(&self, owner: &str, resident: &str, presented: &HashSet<String>) -> bool {
         let target = Address::Resident {
             id: resident.into(),
@@ -1044,10 +1065,7 @@ impl Mailboxes {
             .iter()
             .filter(|m| {
                 m.owner == owner
-                    && m.to
-                        == Address::Resident {
-                            id: resident.into(),
-                        }
+                    && matches!(&m.to, Address::Resident { id } if id == resident)
                     && !presented.contains(&m.id)
             })
             .take(32)

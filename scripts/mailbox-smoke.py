@@ -155,6 +155,9 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert len(runs(recipient["id"]))==1
         print("PASS explicit resident-to-resident mail activates the destination without automatic reply loops")
 
+        drain_trace=pathlib.Path(temporary)/"mailbox-drained.jsonl"
+        request({"op":"log_file","path":str(drain_trace),
+                 "filter":{"level":"debug","events":["mailbox.activation_drained"]}})
         auto=resident("Automatic resident");aid=auto["id"];assert auto["auto_activate"]
         initial,_=send(aid,"SLOW SILENT",clients[0])
         active=wait_runs(aid,1)[0]
@@ -171,6 +174,17 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert inbox(clients[0])==[]
         print("PASS default automatic activation, serialized canonical execution and coalesced mail arriving during a run")
 
+        deadline=time.monotonic()+10
+        while True:
+            drained=[]
+            if drain_trace.exists():
+                retained=drain_trace.read_text()
+                drained=[json.loads(line) for line in retained.split("\n")[:-1]]
+            if any(row.get("context",{}).get("thread_id")==aid and row["fields"]["intake_sequence"]==more[-1]["seq"]
+                   for row in drained):
+                break
+            assert time.monotonic()<deadline,"Dispatcher did not observe a drained mailbox"
+            time.sleep(.05)
         interrupted_message,_=send(aid,"SLOW SILENT crash",clients[0])
         active=wait_runs(aid,3)[-1]
         with request({"id":active["record"]["spec"]["id"],"after":0},watch=True) as stream:
@@ -187,12 +201,13 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
         assert final["status"]=="completed" and any(e["kind"]=="recovery_notice" for e in events)
         old=next(r for r in runs(aid) if r["record"]["spec"]["id"]==active["record"]["spec"]["id"])
         assert old["status"]=="interrupted"
+        assert old["record"]["mailbox"]["message_ids"]==[interrupted_message["id"]]
         restored={m["id"]:m for m in request({"op":"resident_inbox","id":ident})["messages"]}
         assert all(restored[m["id"]]["activation_input"]=={"run_id":first["record"]["spec"]["id"],"seq":first_input} for m in messages)
         all_ids=[m for r in runs(aid) for m in r["record"]["mailbox"]["message_ids"]]
         assert all_ids.count(interrupted_message["id"])==1 and all_ids.count(pending["id"])==1
         assert len(inbox(clients[1]))==1
-        print("PASS crash/torn-tail recovery preserves accepted mail, batch ownership and private narration without replaying interrupted work")
+        print("PASS new intake wakes a drained mailbox; crash/torn-tail recovery preserves batch ownership and never replays interrupted work")
 
         huge,_=send(aid,"\x01"*(32*1024),clients[0])
         last=wait_runs(aid,5)[-1]
