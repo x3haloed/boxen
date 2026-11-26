@@ -533,7 +533,6 @@ pub fn operation(jobs: &Arc<Jobs>, owner: &str, request: &Value) -> Result<Value
                             .ok_or("activation_id required")?
                             .into(),
                         request["directions"].as_str().unwrap_or("").into(),
-                        true,
                         requirements,
                     )?,
                 )?)

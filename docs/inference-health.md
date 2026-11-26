@@ -4,7 +4,8 @@ Provider rejection is an execution outcome, not undelivered mail. The original
 mail remains presented and the interrupted run retains its accepted input and
 observed provider frames. A payment failure does not require a daemon restart,
 clearing history, acknowledging uncertainty, or resending the incoming message.
-New ordinary messages and scheduled activations remain available independently.
+New input can still arrive, and an explicit activation or continuation remains
+available.
 
 ## Coalesced health
 
@@ -31,6 +32,28 @@ failures do not append one agent-facing error message per attempt. Original run
 records remain exact and independently retrievable; older prepared inputs retain
 the historical context they actually received.
 
+## Automatic payment cooldown
+
+Two workload HTTP 402 responses from distinct runs within ten minutes pause
+automatic mail, schedule and observation dispatch for 60 seconds after the
+latest rejection. The gate is scoped to the executing host, canonical
+conversation, backend and selected model setting. A later completed run on that route clears it early. Summary
+inference and other HTTP statuses do not count toward the threshold.
+
+Incoming mail is accepted into the durable mailbox while execution is delayed.
+The dispatcher delays new schedule claims and preserves normal coalescing.
+Existing claims still reconcile against accepted runs.
+Waking observations remain pending under their existing retention and expiry
+rules. The existing dispatcher wakes at the deadline and can accept work that
+is then pending. Another 402 can extend the cooldown. The daemon does not make
+standalone billing probes or retry a previous run. Explicit activations and
+continuations can attempt inference during the cooldown.
+
+The cooldown comes from retained run journals, so a daemon restart does not
+clear it. A workload payment incident can include
+`automatic_cooldown_until_ms` for the conversation's currently selected
+route. The schedule API exposes the deferred occurrence and its retry time.
+
 ## Explicit continuation
 
 ```sh
@@ -52,7 +75,7 @@ A stable new run ID makes exact retries idempotent, including after restart and
 later conversation evolution. Conflicting IDs and stale source runs reject.
 Acceptance means the new run exists, not that billing is repaired or inference
 will complete. Repeated payment failures remain visible in the same incident.
-There is no automatic billing probe, retry timer, credit purchase or effect replay.
+Explicit continuation only accepts the new request.
 
 GUI delivery is deferred. The authenticated paginated incident API exposes durable
 source-run references, counts and active/resolved state for future user alerts or
@@ -62,6 +85,9 @@ diagnostic logging.
 `scripts/inference-health-smoke.py` uses paired daemons and a controlled provider
 to test repeated 402s, coalescing, restart, owner isolation, next-input notices,
 completed tool preservation, stale/exact-ID continuation and normal anonymous
-responses. Live billing failures are separate evidence; tests do not spend credit.
+responses. The cooldown test checks queued mail, deferred schedules and waking
+observations across restart, independent conversations, and timer-driven
+acceptance of fresh work. Live billing failures are separate evidence. The
+fixture tests use no credit.
 
 Machine-operator queries now aggregate host-local incident namespaces across original owners; resident context and runtime operations retain canonical identity scope. See [network](network.md).

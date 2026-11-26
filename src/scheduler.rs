@@ -568,13 +568,22 @@ impl Schedules {
         })
     }
     pub fn defer(&self, job: &Job, blocked: bool, reason: &str) -> Result<Job> {
+        self.defer_until(job, blocked, jobs::now().saturating_add(30000), reason)
+    }
+    pub fn defer_until(
+        &self,
+        job: &Job,
+        blocked: bool,
+        retry_at_ms: u64,
+        reason: &str,
+    ) -> Result<Job> {
         self.change(
             &job.owner,
             &job.definition.id,
             "deferred",
             json!({"blocked":blocked,"reason":reason}),
             |j| {
-                j.retry_at_ms = jobs::now().saturating_add(30000);
+                j.retry_at_ms = retry_at_ms;
                 j.blocked = blocked;
                 j.last = Some(json!({"outcome":"deferred","reason":reason,"at":jobs::now()}));
                 Ok(())

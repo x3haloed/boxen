@@ -133,7 +133,24 @@ impl Jobs {
             )
         });
         let total = rows.len();
-        let page: Vec<_> = rows.into_iter().skip(offset).take(50).collect();
+        let mut page: Vec<_> = rows.into_iter().skip(offset).take(50).collect();
+        let time = jobs::now();
+        for row in &mut page {
+            if row["active"] != true || row["category"] != "payment" || row["purpose"] != "workload"
+            {
+                continue;
+            }
+            let id = row["thread_id"].as_str().unwrap_or_default().to_owned();
+            use crate::scheduler::Handler;
+            let target = if row["resident_id"].is_string() {
+                Handler::Resident { id }
+            } else {
+                Handler::Thread { id }
+            };
+            if let Some(until) = self.automatic_payment_cooldown(owner, &target, time) {
+                row["automatic_cooldown_until_ms"] = json!(until);
+            }
+        }
         let next = offset.saturating_add(page.len());
         logging::record(
             Level::Debug,

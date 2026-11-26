@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Paired daemon text import: exact roles/provenance, no inference/effect replay, real next-input projection."""
-import concurrent.futures
+"""Paired daemons, retained inference incidents, payment cooldown, and continuation."""
 import http.server
 from smoke_helpers import fake_codex
 from smoke_helpers import python_shell
@@ -49,9 +48,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-health-') as temp:
   try:fn()
   except urllib.error.HTTPError as e:assert e.code==422;return
   raise AssertionError('operation was not rejected')
- def create(backend='openrouter'):
-  return api({'op':'resident_create','spec':{'id':secrets.token_hex(32),'name':'Text import fixture','backend':backend,'cwd':temp,'model':'current-model','identity':'A small exact identity.','auto_activate':False}})
- def import_(spec):return api({'op':'transcript_import','spec':spec})
+ def create(backend='openrouter',auto_activate=False):
+  return api({'op':'resident_create','spec':{'id':secrets.token_hex(32),'name':'Text import fixture','backend':backend,'cwd':temp,'model':'current-model','identity':'A small exact identity.','auto_activate':auto_activate}})
  try:
   daemon(0);daemon(1)
   resident=create();rid=resident['id']
@@ -73,6 +71,7 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-health-') as temp:
   reject(lambda:api(request|{'id':secrets.token_hex(32)}))
   processes[1].terminate();processes[1].wait(timeout=10);daemon(1)
   assert health()==h and api(request)==second
+  assert h[0]['automatic_cooldown_until_ms']>time.time_ns()//1_000_000
   mode='effect_then_payment'
   third=wait(api({'op':'inference_resume','failed_run_id':ident,'id':secrets.token_hex(32)}));assert third['status']=='interrupted'
   assert (base/'effect.txt').read_text()=='x'
@@ -93,6 +92,76 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-health-') as temp:
   mode='success';anon_id=secrets.token_hex(32)
   resumed=json.loads(cli(0,'inference-resume',f'127.0.0.1:{peers[1]}',keys[1],anonymous['record']['spec']['id'],'--id',anon_id));assert wait(resumed)['status']=='completed'
   assert api({'op':'thread_result','id':anon_id})['response']=='PRIVATE_RESUMED'
+  # Automatic mail, schedule and observation delivery share the retained cooldown.
+  auto=create(auto_activate=True)['id']
+  def runs(thread):
+   return [r for r in api({'op':'list'}) if r['record']['spec']['thread_id']==thread]
+  def until(check,seconds=15):
+   deadline=time.monotonic()+seconds
+   while time.monotonic()<deadline:
+    result=check()
+    if result:return result
+    time.sleep(.1)
+   raise AssertionError('Condition did not become true before deadline')
+  def mail(thread,body):
+   return api({'op':'mailbox_send','client_id':keys[0],'message':
+    {'id':secrets.token_hex(32),'to':{'type':'resident','id':thread},
+     'subject':'Cooldown fixture','body':body}})['id']
+  def inbox(thread):
+   return {m['id']:m for m in api({'op':'resident_inbox','id':thread})['messages']}
+  def now_ms():return time.time_ns()//1_000_000
+  mode='payment'
+  first_mail=[]
+  for count in (1,2):
+   first_mail.append(mail(auto,'Original activation '+str(count)))
+   active=until(lambda:runs(auto) if len(runs(auto))==count else None)
+   latest=max(active,key=lambda r:r['record']['created_at'])
+   assert wait(latest)['status']=='interrupted'
+  def payment():
+   return next(row for row in health() if row['thread_id']==auto and row['category']=='payment')
+  cooldown=payment()['automatic_cooldown_until_ms']
+  assert payment()['count']==2 and cooldown>now_ms()
+  pending=[mail(auto,'Queued during cooldown '+str(index)) for index in range(2)]
+  assert [inbox(auto)[mid]['delivery'] for mid in first_mail+pending]==['presented']*2+['queued']*2
+  schedule_id=secrets.token_hex(32)
+  schedule={'id':schedule_id,'name':'Pending payment cooldown','target':{'type':'resident','id':auto},
+            'directions':'Scheduled fresh work.','at_ms':now_ms()}
+  api({'op':'schedule','args':{'action':'create','spec':schedule}})
+  def scheduled():
+   return api({'op':'schedule','args':{'action':'get','id':schedule_id}})
+  until(lambda:scheduled().get('retry_at_ms')==cooldown)
+  assert scheduled().get('claimed') is None
+  def event(action,**args):return api({'op':'events','args':{'action':action,**args}})
+  source_id=secrets.token_hex(32);subscription_id=secrets.token_hex(32)
+  source=event('create_source',spec={'id':source_id,'name':'Cooldown observation','cwd':temp,
+                'command':[],'interval_ms':1000,'mode':'ordered','timeout_ms':1000,'tools':[]})
+  event('subscribe',spec={'id':subscription_id,'source':source_id,'target':{'type':'resident','id':auto},
+                         'interval_ms':1000,'waking':True,'lifetime':'persistent'})
+  event('publish',id=source_id,generation=source['generation'],sequence=1,
+        response={'protocol':'boxen-adapter-v1','observations':[
+          {'id':'fresh','observed_at_ms':now_ms(),'payload':{'proof':'recover-once'}}]})
+  def subscription():return event('subscription',id=subscription_id)
+  until(lambda:subscription()['cutoff']==1)
+  assert subscription()['cursor']==0 and len(runs(auto))==2
+  processes[1].terminate();processes[1].wait(timeout=10);daemon(1)
+  assert payment()['automatic_cooldown_until_ms']==cooldown
+  assert len(runs(auto))==2 and all(inbox(auto)[mid]['delivery']=='queued' for mid in pending)
+  mode='success'
+  unrelated=create(auto_activate=True)['id']
+  mail(unrelated,'Unrelated resident remains available')
+  assert wait(until(lambda:next(iter(runs(unrelated)),None)))['status']=='completed'
+  assert now_ms()<cooldown and len(runs(auto))==2
+  before=len(observed)
+  recovered=until(lambda:next((r for r in runs(auto) if r['record'].get('scheduled')),None),
+                  seconds=75)
+  assert wait(recovered)['status']=='completed'
+  assert recovered['record']['mailbox']['message_ids']==pending
+  assert 'recover-once' in json.dumps(recovered['record']['observations'])
+  assert subscription()['cursor']==1
+  assert len(runs(auto))==3 and len(observed)==before+1
+  assert not payment()['active'] and 'automatic_cooldown_until_ms' not in payment()
+  assert all(inbox(auto)[mid]['delivery']=='presented' for mid in pending)
+  print('PASS repeated HTTP 402 delays automatic mail, schedule and observation delivery across restart; unrelated resident runs and timer dispatches only fresh work',flush=True)
   print('PASS payment classification, shared operator access, bounded/coalesced projection, restart, exact-ID continuation and stale rejection; successful resolution; source-qualified next-input notice; completed tools not replayed; CLI and ordinary request/response recovery')
  finally:
   provider.shutdown();provider.server_close()

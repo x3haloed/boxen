@@ -589,8 +589,7 @@ pub fn terminal(status: &str) -> bool {
 #[derive(Deserialize)]
 struct JournalRow<'a> {
     seq: u64,
-    #[serde(rename = "at")]
-    _at: u64,
+    at: u64,
     #[serde(borrow)]
     kind: Cow<'a, str>,
     #[serde(borrow)]
@@ -606,11 +605,15 @@ struct BackendRoute<'a> {
 #[derive(Deserialize)]
 struct InferenceRoute<'a> {
     #[serde(borrow)]
+    purpose: Option<Cow<'a, str>>,
+    #[serde(borrow)]
     event: InferenceFrameType<'a>,
 }
 
 #[derive(Deserialize)]
 struct InferenceFrameType<'a> {
+    #[serde(borrow)]
+    status: Option<&'a RawValue>,
     #[serde(rename = "type", borrow)]
     kind: Cow<'a, str>,
 }
@@ -622,6 +625,7 @@ enum EventProjection {
     NativeSession,
     CompletedItem,
     InferenceHealth,
+    WorkloadPayment,
 }
 
 impl EventProjection {
@@ -633,8 +637,11 @@ impl EventProjection {
         }
     }
 
-    fn inference(kind: &str) -> Self {
+    fn inference(kind: &str, purpose: &str, status: Option<u16>) -> Self {
         match kind {
+            "response_headers" if purpose == "workload" && status == Some(402) => {
+                Self::WorkloadPayment
+            }
             "response_headers" | "exchange_failed" => Self::InferenceHealth,
             _ => Self::None,
         }
@@ -652,6 +659,8 @@ struct Journal {
     native_sessions: Vec<usize>,
     completed_items: Vec<usize>,
     inference_health_frames: Vec<usize>,
+    workload_payment_at: Option<u64>,
+    last_at: u64,
 }
 
 impl Journal {
@@ -664,6 +673,8 @@ impl Journal {
             native_sessions: Vec::new(),
             completed_items: Vec::new(),
             inference_health_frames: Vec::new(),
+            workload_payment_at: None,
+            last_at: 0,
         }
     }
 
@@ -671,7 +682,8 @@ impl Journal {
         self.ends.last().copied().unwrap_or(0)
     }
 
-    fn index(&mut self, kind: &str, bytes: usize, projection: EventProjection) {
+    fn index(&mut self, kind: &str, at: u64, bytes: usize, projection: EventProjection) {
+        self.last_at = at;
         let index = self.ends.len();
         self.ends.push(self.len() + bytes as u64);
         if let Some(indices) = self.by_kind.get_mut(kind) {
@@ -684,18 +696,26 @@ impl Journal {
             EventProjection::NativeSession => self.native_sessions.push(index),
             EventProjection::CompletedItem => self.completed_items.push(index),
             EventProjection::InferenceHealth => self.inference_health_frames.push(index),
+            EventProjection::WorkloadPayment => {
+                self.inference_health_frames.push(index);
+                self.workload_payment_at = Some(at);
+            }
         }
     }
 
     fn index_event(&mut self, event: &Event, bytes: usize) {
         let projection = match event.kind.as_str() {
             "backend" => EventProjection::backend(event.data["method"].as_str().unwrap_or("")),
-            "inference_frame" => {
-                EventProjection::inference(event.data["event"]["type"].as_str().unwrap_or(""))
-            }
+            "inference_frame" => EventProjection::inference(
+                event.data["event"]["type"].as_str().unwrap_or(""),
+                event.data["purpose"].as_str().unwrap_or("workload"),
+                event.data["event"]["status"]
+                    .as_u64()
+                    .and_then(|status| status.try_into().ok()),
+            ),
             _ => EventProjection::None,
         };
-        self.index(&event.kind, bytes, projection);
+        self.index(&event.kind, event.at, bytes, projection);
     }
 
     fn positions(&self, kind: &str) -> &[usize] {
@@ -1313,7 +1333,16 @@ fn load_run(path: &std::path::Path, id: &str) -> Result<Arc<Run>> {
                 .map(|event| EventProjection::backend(&event.method))
                 .unwrap_or_default(),
             "inference_frame" => serde_json::from_str::<InferenceRoute<'_>>(row.data.get())
-                .map(|frame| EventProjection::inference(&frame.event.kind))
+                .map(|frame| {
+                    EventProjection::inference(
+                        &frame.event.kind,
+                        frame.purpose.as_deref().unwrap_or("workload"),
+                        frame
+                            .event
+                            .status
+                            .and_then(|status| status.get().parse().ok()),
+                    )
+                })
                 .unwrap_or_default(),
             "activation_input" => {
                 snapshot.activation_input_seq.get_or_insert(row.seq);
@@ -1331,7 +1360,7 @@ fn load_run(path: &std::path::Path, id: &str) -> Result<Arc<Run>> {
             _ => EventProjection::None,
         };
         snapshot.last_seq = row.seq;
-        journal.index(&row.kind, line.len(), projection);
+        journal.index(&row.kind, row.at, line.len(), projection);
     }
     journal.loaded_events = journal.ends.len();
     logging::record(
@@ -1717,6 +1746,90 @@ impl Jobs {
         }
         result
     }
+    fn payment_cooldown(
+        &self,
+        owner: &str,
+        thread: &str,
+        backend: &str,
+        model: &str,
+        time: u64,
+    ) -> Option<u64> {
+        const WINDOW_MS: u64 = 10 * 60_000;
+        const COOLDOWN_MS: u64 = 60_000;
+        if !crate::runtime::is_inference(backend) {
+            return None;
+        }
+        let mut latest = 0;
+        let mut previous = 0;
+        let mut completed = 0;
+        let cutoff = time.saturating_sub(WINDOW_MS + COOLDOWN_MS);
+        for (id, run) in self.runs.lock().unwrap().iter() {
+            let inner = run.inner.lock().unwrap();
+            let record = &inner.snapshot.record;
+            if record.spec.thread_id != thread
+                || record.owner != owner
+                || record.spec.backend != backend
+                || record.spec.model != model
+                || inner.journal.last_at < cutoff
+            {
+                continue;
+            }
+            if inner.snapshot.status == "completed" {
+                completed = completed.max(inner.journal.last_at);
+            } else if let Some(at) = inner.journal.workload_payment_at
+                && at >= cutoff
+                && self
+                    .run_machine(id)
+                    .is_ok_and(|machine| machine == self.machine_id())
+            {
+                if at >= latest {
+                    previous = latest;
+                    latest = at;
+                } else {
+                    previous = previous.max(at);
+                }
+            }
+        }
+        let deadline = latest.saturating_add(COOLDOWN_MS);
+        (previous > completed && latest - previous <= WINDOW_MS && deadline > time)
+            .then_some(deadline)
+    }
+
+    fn automatic_payment_cooldown(
+        &self,
+        owner: &str,
+        target: &crate::scheduler::Handler,
+        time: u64,
+    ) -> Option<u64> {
+        use crate::scheduler::Handler;
+        match target {
+            Handler::Resident { id } => {
+                let resident = self.residents.get(owner, id).ok()?;
+                self.payment_cooldown(owner, id, &resident.backend, &resident.model, time)
+            }
+            Handler::Thread { id } => {
+                let spec = self.anonymous_thread_spec(owner, id).ok()?;
+                self.payment_cooldown(owner, id, &spec.backend, &spec.model, time)
+            }
+            _ => None,
+        }
+    }
+
+    fn report_payment_deferral(owner: &str, thread: &str, trigger: &str, until: u64) {
+        logging::record(
+            Level::Debug,
+            Target::Workload,
+            "inference.payment_cooldown_deferred",
+            Context {
+                peer_id: Some(owner),
+                thread_id: Some(thread),
+                ..Context::default()
+            },
+            || json!({"trigger":trigger,"retry_at_ms":until,"http_status":402}),
+            || Value::Null,
+        );
+    }
+
     fn dispatch_schedules(self: &Arc<Self>) {
         let mut jobs = self.schedules.all();
         jobs.sort_by_key(|j| (j.next_at_ms, j.definition.id.clone()));
@@ -1808,6 +1921,25 @@ impl Jobs {
                             Context::peer(&job.owner),
                             || json!({"schedule_id":job.definition.id,"thread_id":job.definition.target.id()}),
                             || Value::Null,
+                        );
+                    }
+                    return Ok(());
+                }
+                if let Some(until) =
+                    self.automatic_payment_cooldown(&job.owner, &job.definition.target, time)
+                {
+                    if !job.blocked || job.retry_at_ms != until {
+                        self.schedules.defer_until(
+                            &job,
+                            true,
+                            until,
+                            "Repeated HTTP 402 responses delayed this occurrence; it remains pending until the inference cooldown ends.",
+                        )?;
+                        Self::report_payment_deferral(
+                            &job.owner,
+                            job.definition.target.id(),
+                            "schedule",
+                            until,
                         );
                     }
                     return Ok(());
@@ -1947,7 +2079,7 @@ impl Jobs {
             .acknowledge(&record.owner, &batches, true)?;
         Ok(json!({"batches":batches}))
     }
-    fn dispatch_observations(self: &Arc<Self>) {
+    fn dispatch_observations(self: &Arc<Self>, retry_at: &mut u64) {
         for (owner, target) in self.observations.pending_targets() {
             let _t = self.transitions.lock().unwrap();
             if !self.observations.wake_allowed(&owner, target.id())
@@ -1956,6 +2088,11 @@ impl Jobs {
                         && !terminal(&r.snapshot().status)
                 })
             {
+                continue;
+            }
+            if let Some(until) = self.automatic_payment_cooldown(&owner, &target, now()) {
+                *retry_at = (*retry_at).min(until);
+                Self::report_payment_deferral(&owner, target.id(), "observations", until);
                 continue;
             }
             let result = (|| -> Result<()> {
@@ -2583,17 +2720,30 @@ impl Jobs {
                 }
                 jobs.dispatch_holds();
                 jobs.dispatch_schedules();
-                jobs.dispatch_observations();
+                let mut retry_at = u64::MAX;
+                jobs.dispatch_observations(&mut retry_at);
                 for resident in jobs.residents.all() {
                     if !resident.auto_activate {
                         continue;
                     }
-                    if let Err(error) = jobs.activate(
+                    let _transition = jobs.transitions.lock().unwrap();
+                    if let Some(until) = jobs.payment_cooldown(
+                        &resident.owner,
+                        &resident.id,
+                        &resident.backend,
+                        &resident.model,
+                        now(),
+                    ) {
+                        retry_at = retry_at.min(until);
+                        Self::report_payment_deferral(&resident.owner, &resident.id, "mail", until);
+                        continue;
+                    }
+                    if let Err(error) = jobs.activate_locked(
                         &resident.owner,
                         &resident.id,
                         state::random_hex().unwrap_or_default(),
                         String::new(),
-                        false,
+                        ActivationCause::Mail,
                         Requirements::new(),
                     ) {
                         logging::record(
@@ -2610,7 +2760,11 @@ impl Jobs {
                         );
                     }
                 }
-                delay = jobs.schedules.delay(now());
+                let time = now();
+                delay = jobs
+                    .schedules
+                    .delay(time)
+                    .min(Duration::from_millis(retry_at.saturating_sub(time).max(1)));
             }
         });
         self.notify();
@@ -2821,7 +2975,6 @@ impl Jobs {
         id: &str,
         run_id: String,
         directions: String,
-        manual: bool,
         requirements: Requirements,
     ) -> Result<Option<Snapshot>> {
         let _transition = self.transitions.lock().unwrap();
@@ -2830,11 +2983,7 @@ impl Jobs {
             id,
             run_id,
             directions,
-            if manual {
-                ActivationCause::Manual
-            } else {
-                ActivationCause::Mail
-            },
+            ActivationCause::Manual,
             requirements,
         )
     }
