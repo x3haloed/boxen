@@ -100,10 +100,18 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-probe-') as temp:
         {'role': 'tool', 'tool_call_id': call['id'], 'content': 'hello'}]}))
     result, resumed, _ = probe('reply')
     assert result.returncode == 0 and resumed['assistant']['content'] == 'Result received.'
-    for case in ['cut', 'error', 'redirect', 'slow', 'large']:
-        result, projection, _ = probe(case)
+    for case, expected in {
+        'cut': ('stream','missing_done'),
+        'error': ('stream','provider_stream_error'),
+        'redirect': ('http','http_rejected'),
+        'slow': ('timeout','stream_timeout'),
+        'large': ('frame','line_too_large'),
+    }.items():
+        result, projection, journal = probe(case)
         assert result.returncode != 0, case
         assert not projection['completed'] and projection['assistant'] is None, case
+        terminal=json.loads(journal.read_text().splitlines()[-1])
+        assert terminal['type']=='exchange_failed' and (terminal['stage'],terminal['code'])==expected,(case,terminal)
     result, projection, _ = probe('length')
     assert result.returncode == 0 and projection['finish_reason'] == 'length'
     # Consumers cannot mistake a partial journal tail for a completed exchange.
@@ -135,6 +143,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-probe-') as temp:
         f'https://127.0.0.1:{tls_server.server_port}/good', '--request', str(request),
         '--journal', str(root/'untrusted.jsonl')], capture_output=True, timeout=8)
     assert untrusted.returncode != 0
+    tls_failure=json.loads((root/'untrusted.jsonl').read_text().splitlines()[-1])
+    assert (tls_failure['stage'],tls_failure['code'])==('connection','tls_failed'),tls_failure
     tls_server.shutdown()
     # Existing journals never get overwritten, and a fixture cannot obtain credentials.
     repeat = subprocess.run(command + ['inference-probe', '--endpoint', endpoint+'/good', '--request', str(request), '--journal', str(journal)], capture_output=True)

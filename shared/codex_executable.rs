@@ -45,7 +45,7 @@ pub fn launch<T>(
 ) -> io::Result<T> {
     launch_with(|| resolve(configured, os), &mut start, &mut observe)
 }
-fn launch_with<T>(
+pub(crate) fn launch_with<T>(
     mut locate: impl FnMut() -> io::Result<Selection>,
     start: &mut impl FnMut(&Selection) -> io::Result<T>,
     observe: &mut impl FnMut(&Selection, bool),

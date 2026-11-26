@@ -25,7 +25,16 @@ class Provider(http.server.BaseHTTPRequestHandler):
   messages=value['messages'];tool_results=[m for m in messages if m['role']=='tool']
   if mode=='payment' or (mode=='effect_then_payment' and tool_results):
    self.send_response(402);self.end_headers();self.wfile.write(b'{"error":{"message":"fixture billing"}}');return
-  self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+  self.send_response(200)
+  self.send_header('Content-Type','text/html' if mode=='wrong_content_type' else 'text/event-stream')
+  self.end_headers()
+  if mode=='wrong_content_type':return
+  if mode=='malformed_frame':
+   self.wfile.write(b'data: fixture private non-JSON payload\n\n');return
+  if mode=='truncated_stream':
+   self.wfile.write(b'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n');return
+  if mode=='unsupported_projection':
+   self.wfile.write(b'data: {"choices":[{"index":1,"delta":{"content":"other"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');return
   def emit(delta,finish=None):self.wfile.write(('data: '+json.dumps({'id':'fixture','choices':[{'index':0,'delta':delta,'finish_reason':finish}]})+'\n\n').encode());self.wfile.flush()
   if mode=='effect_then_payment':
    emit({'tool_calls':[{'index':0,'id':'effect-once','type':'function','function':{'name':'boxen_shell','arguments':json.dumps({'command':python_shell("from pathlib import Path; p=Path('effect.txt'); p.open('a').write('x')")})}}]});emit({},'tool_calls')
@@ -39,8 +48,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-health-') as temp:
  def cli(i,*args):return subprocess.check_output(COMMAND+['--data-dir',str(homes[i]),*args],text=True,timeout=20).strip()
  keys=[cli(i,'identity') for i in range(2)]
  for i in range(2):cli(i,'trust',keys[1-i],'Transcript test peer')
- def daemon(i):
-  p=subprocess.Popen(COMMAND+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(fake_codex()),'--openrouter-endpoint',f'http://127.0.0.1:{provider.server_port}/chat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+ def daemon(i, endpoint_port=None):
+  endpoint_port=provider.server_port if endpoint_port is None else endpoint_port
+  p=subprocess.Popen(COMMAND+['--data-dir',str(homes[i]),'serve','--listen',f'127.0.0.1:{peers[i]}','--ui',f'127.0.0.1:{uis[i]}','--codex',str(fake_codex()),'--openrouter-endpoint',f'http://127.0.0.1:{endpoint_port}/chat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
   processes[i]=p;lines=[p.stdout.readline() for _ in range(3)];assert 'Local controls:' in lines[-1];tokens[i]=lines[-1].strip().split('#')[1]
  def api(request,i=0):
   r=urllib.request.Request(f'http://127.0.0.1:{uis[i]}/api/operation',headers={'Authorization':'Bearer '+tokens[i],'Content-Type':'application/json'},data=json.dumps({'peer':keys[1],'address':f'127.0.0.1:{peers[1]}','request':request}).encode());return json.load(urllib.request.urlopen(r,timeout=20))
@@ -53,8 +63,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-health-') as temp:
  try:
   daemon(0);daemon(1)
   resident=create();rid=resident['id']
-  def wait(snapshot):
-   ident=snapshot['record']['spec']['id'];deadline=time.monotonic()+20
+  def wait(snapshot,seconds=20):
+   ident=snapshot['record']['spec']['id'];deadline=time.monotonic()+seconds
    while True:
     s=api({'op':'get','id':ident})
     if s['status'] in ['completed','interrupted','failed','cancelled']:return s
@@ -63,6 +73,8 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-health-') as temp:
   def health():return api({'op':'inference_health'})['incidents']
   first=activate();assert first['status']=='interrupted'
   h=health();assert len(h)==1 and h[0]['category']=='payment' and h[0]['http_status']==402 and h[0]['count']==1 and h[0]['active']
+  assert (h[0]['failure_stage'],h[0]['failure_code'])==('http','http_rejected')
+  assert 'fixture billing' not in json.dumps(h)
   assert api({'op':'inference_health'},1)['incidents']==h
   ident=secrets.token_hex(32);request={'op':'inference_resume','failed_run_id':first['record']['spec']['id'],'id':ident}
   second=wait(api(request));assert second['status']=='interrupted' and second['record']['spec']['thread_id']==rid
@@ -162,6 +174,32 @@ with tempfile.TemporaryDirectory(prefix='boxen-inference-health-') as temp:
   assert not payment()['active'] and 'automatic_cooldown_until_ms' not in payment()
   assert all(inbox(auto)[mid]['delivery']=='presented' for mid in pending)
   print('PASS repeated HTTP 402 delays automatic mail, schedule and observation delivery across restart; unrelated resident runs and timer dispatches only fresh work',flush=True)
+  def assert_failure(expected, http_status):
+   thread=secrets.token_hex(32)
+   failed=wait(api({'op':'start','spec':{'id':thread,'thread_id':thread,'backend':'openrouter',
+       'cwd':temp,'model':'fixture','prompt':'Controlled failure stage.'}}),seconds=35)
+   assert failed['status']=='interrupted'
+   incident=next(row for row in health() if row['thread_id']==thread)
+   actual=(incident['failure_stage'],incident['failure_code'])
+   assert actual in expected and incident['http_status']==http_status,incident
+   journal=homes[1]/'runs'/thread/'events.jsonl'
+   failures=[e['data']['event'] for e in map(json.loads,journal.read_text().splitlines())
+             if e['kind']=='inference_frame' and e['data']['event']['type']=='exchange_failed']
+   assert len(failures)==1 and (failures[0]['stage'],failures[0]['code'])==actual
+   assert 'fixture private non-JSON payload' not in json.dumps(failures)
+  for mode, stage, code in [
+   ('wrong_content_type','response_headers','unexpected_content_type'),
+   ('malformed_frame','frame','invalid_json'),
+   ('truncated_stream','stream','missing_done'),
+   ('unsupported_projection','projection','unsupported_projection'),
+  ]:
+   assert_failure({(stage,code)},200)
+  with socket.socket() as refused:
+   refused.bind(('127.0.0.1',0))
+   processes[1].terminate();processes[1].wait(timeout=10);daemon(1,refused.getsockname()[1])
+   # A platform connector can exhaust its address budget after a refusal.
+   assert_failure({('connection','connect_failed'),('timeout','connect_timeout')},None)
+  print('PASS credential-free runtime failure evidence distinguishes connection, HTTP, headers, framing, stream termination and projection')
   print('PASS payment classification, shared operator access, bounded/coalesced projection, restart, exact-ID continuation and stale rejection; successful resolution; source-qualified next-input notice; completed tools not replayed; CLI and ordinary request/response recovery')
  finally:
   provider.shutdown();provider.server_close()

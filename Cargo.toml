@@ -12,6 +12,7 @@ snow = { version = "0.10", default-features = false, features = ["default-resolv
 fs2 = "0.4"
 httparse = "=1.10.1"
 libc = "0.2"
+rustls = { version = "0.23", default-features = false }
 ureq = { version = "=3.5.0", default-features = false, features = ["rustls", "json"] }
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 sha2 = "0.10"

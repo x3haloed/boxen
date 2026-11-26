@@ -215,7 +215,9 @@ with tempfile.TemporaryDirectory(prefix='boxen-runtime-') as temp:
         abandoned_events,abandoned_state=collect(abandoned)
         assert abandoned_state['status']=='interrupted'
         assert any(e['kind']=='inference_frame' and
-                   e['data']['event'].get('idle_timeout_seconds')==2 for e in abandoned_events)
+                   e['data']['event'].get('idle_timeout_seconds')==2 and
+                   e['data']['event']['stage']=='timeout' and
+                   e['data']['event']['code']=='idle_timeout' for e in abandoned_events)
         print('PASS explicit inactivity policy is captured and recorded on abandonment')
         if '--long-stream' in sys.argv[2:]:
             start_time=time.monotonic()

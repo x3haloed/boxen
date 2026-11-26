@@ -87,14 +87,8 @@ pub fn run(command: &str, mut args: Vec<String>) -> Result<()> {
         Some(seconds),
         &mut |event| journal.append(event),
     );
-    // Transport setup errors are sanitized at the boundary; HTTP error bodies are not formatted.
-    if let Err(error) = &result {
-        let reason = error.to_string();
-        let reason = key.as_deref().map_or_else(
-            || reason.clone(),
-            |key| reason.replace(key, "[credential redacted]"),
-        );
-        journal.append(json!({"type":"exchange_failed","reason":reason}))?;
+    if let Err(error) = result {
+        journal.append(error.event())?;
     }
     logging::record(
         Level::Info,
@@ -104,7 +98,7 @@ pub fn run(command: &str, mut args: Vec<String>) -> Result<()> {
         || json!({"ok":result.is_ok()}),
         || Value::Null,
     );
-    result
+    result.map_err(Into::into)
 }
 
 struct Journal {

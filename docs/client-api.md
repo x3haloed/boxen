@@ -101,6 +101,8 @@ and session data recorded by the adapter. It is null when setup produced no
 session evidence. Antigravity also records the selectors reported by its native
 session. For OpenRouter the session reference is the retained Boxen conversation.
 Historical observations remain readable after the native process exits.
+Managed Codex runs with phase evidence also expose a `startup` array, even
+when setup never reached a native session. See [Codex startup phases](workloads.md#codex-startup-phases).
 
 
 A request requiring a capability uses `start_checked` with a nonempty
@@ -323,7 +325,9 @@ legacy mailbox endpoints retain their original behavior.
 ## Built-in inference health and continuation
 
 `{"op":"inference_health","offset":0}` returns host-wide operator-visible coalesced incident
-rows with pagination. `{"op":"inference_resume","failed_run_id":"FAILED_RUN_ID","id":"NEW_RUN_ID"}`
+rows with pagination. Recent failures can include `failure_stage` and
+`failure_code` in addition to the incident category and HTTP status.
+`{"op":"inference_resume","failed_run_id":"FAILED_RUN_ID","id":"NEW_RUN_ID"}`
 accepts an explicit continuation in the same canonical conversation. The source
 must remain its latest interrupted built-in run; stable exact IDs are retry-safe.
 Neither operation replays historical effects or delivers private narration as

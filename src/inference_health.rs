@@ -60,6 +60,7 @@ pub(crate) fn project(runs: &[Arc<Run>]) -> Result<Vec<Value>> {
                 Some(429) => "rate_limit",
                 Some(400..=499) => "request_rejected",
                 Some(500..=599) => "provider_unavailable",
+                _ if frame["stage"] == "credential" => "credential",
                 _ if frame["reason"]
                     .as_str()
                     .unwrap_or("")
@@ -91,6 +92,8 @@ pub(crate) fn project(runs: &[Arc<Run>]) -> Result<Vec<Value>> {
             v["last_at"] = json!(e.at);
             v["last_run_id"] = json!(s.record.spec.id);
             v["http_status"] = json!(status);
+            v["failure_stage"] = json!(frame["stage"].as_str());
+            v["failure_code"] = json!(frame["code"].as_str());
             v["model"] = json!(s.record.inference_model());
             v["description"] = json!(description);
             v["active"] = json!(true);

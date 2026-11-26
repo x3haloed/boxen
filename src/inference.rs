@@ -144,12 +144,14 @@ pub fn worker() -> Result<()> {
     let key = match config.credential() {
         Ok(key) => key,
         Err(_) => {
-            println!(
-                "{}",
-                json!({"type":"exchange_failed","reason":"The executing host credential is unavailable or malformed; no provider request was made"})
+            let failure = chat::Failure::new(
+                "credential",
+                "credential_unavailable",
+                "The executing host credential is unavailable or malformed; no provider request was made",
             );
+            println!("{}", failure.event());
             std::io::stdout().flush()?;
-            return Err("inference credential unavailable".into());
+            return Err(failure.into());
         }
     };
     let result = chat::exchange(
@@ -164,15 +166,11 @@ pub fn worker() -> Result<()> {
             Ok(())
         },
     );
-    if result.is_err() {
-        println!(
-            "{}",
-            json!({"type":"exchange_failed","reason":"inference transport or protocol failed; retained frames and response status describe the observed exchange"})
-        );
+    if let Err(failure) = result {
+        println!("{}", failure.event());
         std::io::stdout().flush()?;
     }
-    // Never format provider/HTTP client errors that could contain credentials.
-    result.map_err(|_| "inference exchange failed".into())
+    result.map_err(Into::into)
 }
 
 struct Process {
@@ -569,6 +567,25 @@ fn fallback_reasoning_effort(current: Option<&str>, had_reasoning: bool) -> Opti
     }
 }
 
+fn retain_exchange_failure(
+    run: &Run,
+    step: usize,
+    purpose: &str,
+    failure: chat::Failure,
+) -> Result<ExchangeOutcome> {
+    run.append(
+        "inference_frame",
+        json!({"step":step,"purpose":purpose,"event":failure.event()}),
+    )?;
+    run.diagnostic(
+        Level::Warn,
+        "inference.exchange_failed",
+        || json!({"step":step,"purpose":purpose,"stage":failure.stage,"code":failure.code,"reason":failure.reason}),
+        || Value::Null,
+    );
+    Err(failure.into())
+}
+
 fn exchange(
     run: &Arc<Run>,
     config: &Config,
@@ -580,7 +597,16 @@ fn exchange(
 ) -> Result<ExchangeOutcome> {
     let payload = serde_json::to_vec(&json!({"config":config,"body":body}))?;
     if payload.len() > media::REQUEST_LIMIT {
-        return Err("inference request exceeds 24 MiB; full history remains retained".into());
+        return retain_exchange_failure(
+            run,
+            step,
+            purpose,
+            chat::Failure::new(
+                "request",
+                "request_too_large",
+                "Inference request exceeds 24 MiB; full history remains retained",
+            ),
+        );
     }
     run.append("inference_attempt",json!({"step":step,"model":body["model"],"endpoint":config.endpoint,"request_bytes":payload.len(),"reasoning_effort":body["reasoning"]["effort"],"purpose":purpose}))?;
     run.diagnostic(
@@ -607,30 +633,62 @@ fn exchange(
             .stderr(Stdio::null())
             .spawn()?)
     })();
-    let mut child = child.inspect_err(|error| {
-        launch.record(
-            "launch",
-            "failed",
-            Some(crate::infrastructure::reason(error.as_ref())),
-        );
-    })?;
+    let child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            launch.record(
+                "launch",
+                "failed",
+                Some(crate::infrastructure::reason(error.as_ref())),
+            );
+            return retain_exchange_failure(
+                run,
+                step,
+                purpose,
+                chat::Failure::new(
+                    "worker",
+                    "launch_failed",
+                    "Inference worker could not be launched",
+                ),
+            );
+        }
+    };
     launch.record("launch", "completed", None);
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("inference worker has no stdout")?;
     let mut process = Process {
         child,
         group: false,
         armed: true,
         run: run.clone(),
     };
-    process
+    let Some(stdout) = process.child.stdout.take() else {
+        return retain_exchange_failure(
+            run,
+            step,
+            purpose,
+            chat::Failure::new(
+                "worker",
+                "missing_stdout",
+                "Inference worker output pipe is unavailable",
+            ),
+        );
+    };
+    if !process
         .child
         .stdin
         .take()
-        .ok_or("inference worker has no stdin")?
-        .write_all(&payload)?;
+        .is_some_and(|mut stdin| stdin.write_all(&payload).is_ok())
+    {
+        return retain_exchange_failure(
+            run,
+            step,
+            purpose,
+            chat::Failure::new(
+                "worker",
+                "request_pipe_failed",
+                "Inference worker did not receive the request",
+            ),
+        );
+    }
     let (tx, events) = mpsc::sync_channel(32);
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -648,9 +706,24 @@ fn exchange(
                     let size = line.len() - usize::from(line.ends_with(b"\n"));
                     serde_json::from_slice::<Value>(&line)
                         .map(|event| (event, size))
-                        .map_err(|_| "invalid inference worker frame".to_owned())
+                        .map_err(|_| {
+                            chat::Failure::new(
+                                "worker",
+                                "invalid_worker_frame",
+                                "Inference worker emitted an invalid frame",
+                            )
+                        })
                 }
-                _ => Err("inference worker output failed or exceeded 4 MiB".to_owned()),
+                Ok(_) => Err(chat::Failure::new(
+                    "worker",
+                    "worker_frame_too_large",
+                    "Inference worker frame exceeds 4 MiB",
+                )),
+                Err(_) => Err(chat::Failure::new(
+                    "worker",
+                    "worker_read_failed",
+                    "Inference worker output could not be read",
+                )),
             };
             if tx.send(value).is_err() {
                 break;
@@ -702,7 +775,11 @@ fn exchange(
                 loop {
                     let (event, frame_bytes) = frame;
                     if bytes + frame_bytes > 16 * 1024 * 1024 {
-                        error = Some("inference exchange exceeds 16 MiB".into());
+                        error = Some(chat::Failure::new(
+                            "stream",
+                            "exchange_too_large",
+                            "Inference exchange exceeds 16 MiB",
+                        ));
                         break;
                     }
                     bytes += frame_bytes;
@@ -755,7 +832,7 @@ fn exchange(
                     return Ok(ExchangeOutcome::Runaway(reason));
                 }
                 if let Some(error) = error {
-                    return Err(error.into());
+                    return retain_exchange_failure(run, step, purpose, error);
                 }
                 let last = retained
                     .last()
@@ -768,38 +845,60 @@ fn exchange(
                     run.diagnostic(
                         Level::Warn,
                         "inference.exchange_failed",
-                        || json!({"step":step,"purpose":purpose,"reason":failure_reason}),
+                        || json!({"step":step,"purpose":purpose,"stage":last["stage"],"code":last["code"],"reason":failure_reason}),
                         || Value::Null,
                     );
                     return Err(failure_reason.into());
                 }
                 if complete {
-                    let projection = chat::project(retained)?;
-                    if projection["assistant"].is_null() {
-                        return Err("provider state cannot be safely projected; native frames remain retained".into());
-                    }
+                    let projection = match chat::project(retained) {
+                        Ok(projection) if !projection["assistant"].is_null() => projection,
+                        result => {
+                            let code = if result.is_ok() {
+                                "unsupported_projection"
+                            } else {
+                                "invalid_projection"
+                            };
+                            return retain_exchange_failure(
+                                run,
+                                step,
+                                purpose,
+                                chat::Failure::new(
+                                    "projection",
+                                    code,
+                                    "Provider state cannot be safely projected; native frames remain retained",
+                                ),
+                            );
+                        }
+                    };
                     run.append("inference_exchange_completed",json!({"step":step,"finish_reason":projection["finish_reason"],"usage":projection["usage"],"purpose":purpose}))?;
                     run.diagnostic(Level::Info,"inference.exchange.completed",||json!({"step":step,"finish_reason":projection["finish_reason"],"usage":projection["usage"]}),||Value::Null);
                     return Ok(ExchangeOutcome::Completed(projection));
                 }
             }
-            Ok(Err(error)) => return Err(error.into()),
+            Ok(Err(error)) => return retain_exchange_failure(run, step, purpose, error),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let quiet = last_frame.elapsed();
                 if abandonment.is_some_and(|limit| quiet >= limit) {
-                    let reason =
-                        "inference exchange abandoned under the configured inactivity policy";
+                    let failure = chat::Failure::new(
+                        "timeout",
+                        "idle_timeout",
+                        "Inference exchange abandoned under the configured inactivity policy",
+                    );
+                    let mut event = failure.event();
+                    event["idle_timeout_seconds"] =
+                        json!(record.runtime_policy.inference_idle_timeout_seconds);
                     run.append(
                         "inference_frame",
-                        json!({"step":step,"purpose":purpose,"event":{"type":"exchange_failed","reason":reason,"idle_timeout_seconds":record.runtime_policy.inference_idle_timeout_seconds}}),
+                        json!({"step":step,"purpose":purpose,"event":event}),
                     )?;
                     run.diagnostic(
                         Level::Warn,
                         "inference.exchange_abandoned",
-                        || json!({"step":step,"purpose":purpose,"idle_ms":quiet.as_millis()}),
+                        || json!({"step":step,"purpose":purpose,"stage":failure.stage,"code":failure.code,"idle_ms":quiet.as_millis(),"idle_timeout_seconds":record.runtime_policy.inference_idle_timeout_seconds}),
                         || Value::Null,
                     );
-                    return Err(reason.into());
+                    return Err(failure.into());
                 }
                 if !waiting_reported && quiet >= WAIT_NOTICE {
                     run.status(
@@ -816,7 +915,16 @@ fn exchange(
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("inference worker ended before exchange completion".into());
+                return retain_exchange_failure(
+                    run,
+                    step,
+                    purpose,
+                    chat::Failure::new(
+                        "worker",
+                        "worker_exited",
+                        "Inference worker ended before exchange completion",
+                    ),
+                );
             }
         }
     }

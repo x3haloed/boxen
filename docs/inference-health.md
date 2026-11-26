@@ -32,6 +32,24 @@ failures do not append one agent-facing error message per attempt. Original run
 records remain exact and independently retrievable; older prepared inputs retain
 the historical context they actually received.
 
+## Failure stages
+
+New `inference_frame` events with `event.type = "exchange_failed"` retain a
+stable `stage` and `code` alongside the causal reason, exchange step and
+purpose. The coalesced incident exposes the latest `failure_stage` and
+`failure_code`. Those fields are null for historical failures without stage
+evidence. Older journals retain their existing category and HTTP status. A non-200 status remains in the corresponding
+`response_headers` frame. HTTP 200 followed by a stream or frame failure
+means the provider accepted the HTTP exchange before the stream failed.
+
+Stages distinguish connection setup, request/response headers, HTTP rejection,
+timeout, stream termination, malformed frames, native-state projection and
+worker failures. For example, `connection/connect_failed`, `stream/missing_done`,
+`frame/invalid_json`, and `projection/unsupported_projection` identify different
+boundaries. Reason codes come from Boxen. Failure records and health summaries
+carry no raw provider error bodies, credentials, or authorization headers.
+Existing private native frame retention continues to provide replay evidence.
+
 ## Automatic payment cooldown
 
 Two workload HTTP 402 responses from distinct runs within ten minutes pause
@@ -87,7 +105,9 @@ to test repeated 402s, coalescing, restart, owner isolation, next-input notices,
 completed tool preservation, stale/exact-ID continuation and normal anonymous
 responses. The cooldown test checks queued mail, deferred schedules and waking
 observations across restart, independent conversations, and timer-driven
-acceptance of fresh work. Live billing failures are separate evidence. The
+acceptance of fresh work. Controlled endpoint failures exercise the stage
+codes and their authenticated health projection. Live billing failures are
+separate evidence. The
 fixture tests use no credit.
 
 Machine-operator queries now aggregate host-local incident namespaces across original owners; resident context and runtime operations retain canonical identity scope. See [network](network.md).

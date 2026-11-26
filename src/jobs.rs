@@ -2484,6 +2484,13 @@ impl Jobs {
                 "required_capabilities":record.spec.required_capabilities},
             "observed":observed,
         });
+        let phases = inner.journal.positions("backend_startup_phase");
+        if !phases.is_empty() {
+            let startup = inner.journal.read(phases.iter().copied())
+                .map(|event| event.map(|event| event.data))
+                .collect::<Result<Vec<_>>>()?;
+            info["startup"] = json!(startup);
+        }
         let backend_id = record.spec.backend.clone();
         drop(inner);
         let execution = self

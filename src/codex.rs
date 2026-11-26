@@ -10,7 +10,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
-    io::{BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, mpsc},
     time::{Duration, Instant},
@@ -24,6 +24,72 @@ impl std::fmt::Display for BackendRejected {
     }
 }
 impl std::error::Error for BackendRejected {}
+
+#[derive(Debug)]
+struct RpcTimeout(String);
+impl std::fmt::Display for RpcTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Codex {} timed out", self.0)
+    }
+}
+impl std::error::Error for RpcTimeout {}
+
+#[derive(Debug)]
+struct RpcClosed {
+    detail: String,
+    code: &'static str,
+}
+impl RpcClosed {
+    fn new(detail: impl Into<String>, code: &'static str) -> Self {
+        Self {
+            detail: detail.into(),
+            code,
+        }
+    }
+}
+impl std::fmt::Display for RpcClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+impl std::error::Error for RpcClosed {}
+
+fn startup_io_code(error: &io::Error) -> &'static str {
+    match error.kind() {
+        io::ErrorKind::NotFound => "not_found",
+        io::ErrorKind::PermissionDenied => "permission_denied",
+        io::ErrorKind::TimedOut => "timeout",
+        _ => "io_error",
+    }
+}
+
+fn startup_phase(
+    run: &Run,
+    phase: &str,
+    attempt: usize,
+    elapsed: Duration,
+    code: Option<&str>,
+) -> Result<()> {
+    let outcome = if code.is_some() {
+        "failed"
+    } else {
+        "completed"
+    };
+    run.append(
+        "backend_startup_phase",
+        json!({
+            "backend":"codex","phase":phase,"attempt":attempt,"elapsed_ms":elapsed.as_millis(),
+            "outcome":outcome,"code":code
+        }),
+    )?;
+    run.diagnostic(
+        if code.is_some() { Level::Warn } else { Level::Info },
+        "codex.startup_phase",
+        || json!({"phase":phase,"attempt":attempt,"elapsed_ms":elapsed.as_millis(),"outcome":outcome,"code":code}),
+        || Value::Null,
+    );
+    Ok(())
+}
 
 struct Process(Child, Arc<Run>);
 impl Drop for Process {
@@ -42,7 +108,7 @@ impl Drop for Process {
 
 enum Incoming {
     Message(Value),
-    Closed(String),
+    Closed(RpcClosed),
 }
 
 struct Rpc {
@@ -88,13 +154,18 @@ fn read_lines(
             {
                 Ok(0) => {
                     if !stderr {
-                        let _ =
-                            sender.send(Incoming::Closed("Codex app-server closed stdout".into()));
+                        let _ = sender.send(Incoming::Closed(RpcClosed::new(
+                            "Codex app-server closed stdout",
+                            "transport_closed",
+                        )));
                     }
                     break;
                 }
                 Ok(_) if line.len() > 4 * 1024 * 1024 => {
-                    let _ = sender.send(Incoming::Closed("Codex output line exceeds 4 MiB".into()));
+                    let _ = sender.send(Incoming::Closed(RpcClosed::new(
+                        "Codex output line exceeds 4 MiB",
+                        "protocol_error",
+                    )));
                     break;
                 }
                 Ok(_) => {
@@ -116,7 +187,10 @@ fn read_lines(
                                 || json!({"error":error.to_string(),"bytes":line.len()}),
                                 || json!({"text":String::from_utf8_lossy(&line)}),
                             );
-                            Incoming::Closed(format!("Invalid Codex app-server JSON: {error}"))
+                            Incoming::Closed(RpcClosed::new(
+                                format!("Invalid Codex app-server JSON: {error}"),
+                                "protocol_error",
+                            ))
                         }
                     };
                     if sender.send(item).is_err() {
@@ -124,7 +198,10 @@ fn read_lines(
                     }
                 }
                 Err(error) => {
-                    let _ = sender.send(Incoming::Closed(error.to_string()));
+                    let _ = sender.send(Incoming::Closed(RpcClosed::new(
+                        error.to_string(),
+                        startup_io_code(&error),
+                    )));
                     break;
                 }
             }
@@ -173,7 +250,7 @@ impl Rpc {
                     || json!({"method":method,"id":id}),
                     || Value::Null,
                 );
-                return Err(format!("Codex {method} timed out").into());
+                return Err(RpcTimeout(method.to_owned()).into());
             }
             self.tick()?;
             // A terminal turn notification may precede the start acknowledgement.
@@ -291,7 +368,9 @@ impl Rpc {
             Ok(Incoming::Message(message)) => self.ingest(message)?,
             Ok(Incoming::Closed(error)) => return Err(error.into()),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("Codex app-server disconnected".into());
+                return Err(
+                    RpcClosed::new("Codex app-server disconnected", "transport_closed").into(),
+                );
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -683,9 +762,17 @@ pub fn execute(
     launch.record("launch", "attempted", None);
     let mut selected_version = None;
     let mut selected_probe_fallback = None;
-    let mut child = crate::codex_executable::launch(
-        binary, crate::platform::host_os(),
-        |selected| {
+    let mut discoveries = Vec::new();
+    let mut spawns = Vec::new();
+    let launched = crate::codex_executable::launch_with(
+        || {
+            let started = Instant::now();
+            let result = crate::codex_executable::resolve(binary, crate::platform::host_os());
+            discoveries.push((started.elapsed(), result.as_ref().err().map(startup_io_code)));
+            result
+        },
+        &mut |selected| {
+            let started = Instant::now();
             let mut command = record.execution.as_ref().map_or_else(
                 || Command::new(&selected.path),
                 |execution| execution.command(&selected.path),
@@ -693,43 +780,55 @@ pub fn execute(
             if let Some(bridge) = &bridge {
                 command.env(crate::resident_bridge::TOKEN_ENV, &bridge.token);
             }
-            command.args(["app-server", "--listen", "stdio://"])
-                .current_dir(&spec.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+            let result = command.args(["app-server", "--listen", "stdio://"])
+                .current_dir(&spec.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+            spawns.push((started.elapsed(), result.as_ref().err().map(startup_io_code)));
+            result
         },
-        |selected, retry| {
+        &mut |selected, retry| {
             selected_version = selected.version.clone();
             selected_probe_fallback = selected.probe_fallback.clone();
             launch.runtime(selected.version.as_deref(), &record.runtime_policy);
             run.diagnostic(Level::Info, "process.starting",
                 || json!({"executable":selected.path,"version":selected.version,"automatic":selected.automatic,"probe_fallback":selected.probe_fallback,"skipped_candidates":selected.skipped_candidates,"rediscovered":retry,"cwd":spec.cwd}), || Value::Null);
         },
-    ).map_err(|error| {
+    ).map(|child| Process(child, run.clone())).map_err(|error| {
         launch.record("launch", "failed", Some(crate::infrastructure::reason(&error)));
         run.diagnostic(Level::Error, "process.start_failed", ||json!({"detail":error.to_string()}), ||Value::Null);
         format!("Cannot start Codex: {error}")
-    })?;
-    launch.record("launch", "completed", None);
-    let stdin = child.stdin.take().ok_or("missing app-server stdin")?;
+    });
+    if launched.is_ok() {
+        launch.record("launch", "completed", None);
+    }
+    let attempt = discoveries.len();
+    let mut spawns = spawns.into_iter();
+    for (index, (elapsed, code)) in discoveries.into_iter().enumerate() {
+        startup_phase(&run, "discovery", index + 1, elapsed, code)?;
+        if let Some((elapsed, code)) = spawns.next() {
+            startup_phase(&run, "launch", index + 1, elapsed, code)?;
+        }
+    }
+    let mut process = launched?;
+    let stdin = process.0.stdin.take().ok_or("missing app-server stdin")?;
     run.diagnostic(
         Level::Info,
         "process.started",
-        || json!({"pid":child.id()}),
+        || json!({"pid":process.0.id()}),
         || Value::Null,
     );
     let (sender, incoming) = mpsc::sync_channel(256);
     read_lines(
-        child.stdout.take().ok_or("missing stdout")?,
+        process.0.stdout.take().ok_or("missing stdout")?,
         sender.clone(),
         false,
         run.clone(),
     );
     read_lines(
-        child.stderr.take().ok_or("missing stderr")?,
+        process.0.stderr.take().ok_or("missing stderr")?,
         sender,
         true,
         run.clone(),
     );
-    let _process = Process(child, run.clone());
     let mut rpc = Rpc {
         stdin,
         incoming,
@@ -753,8 +852,24 @@ pub fn execute(
         resident: resident.clone(),
         jobs,
     };
-    rpc.request("initialize", json!({"clientInfo":{"name":"boxen","title":"Boxen","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
-    rpc.write(json!({"method":"initialized"}))?;
+    let started = Instant::now();
+    let initialized = rpc.request("initialize", json!({"clientInfo":{"name":"boxen","title":"Boxen","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))
+        .and_then(|_| rpc.write(json!({"method":"initialized"})));
+    let code = initialized.as_ref().err().map(|error| {
+        if error.is::<RpcTimeout>() {
+            "timeout"
+        } else if error.is::<BackendRejected>() {
+            "rejected"
+        } else if let Some(error) = error.downcast_ref::<RpcClosed>() {
+            error.code
+        } else if let Some(error) = error.downcast_ref::<io::Error>() {
+            startup_io_code(error)
+        } else {
+            "handshake_failed"
+        }
+    });
+    startup_phase(&run, "initialize", attempt, started.elapsed(), code)?;
+    initialized?;
     let mut params = json!({"cwd":spec.cwd,"sandbox":"danger-full-access","approvalPolicy":"on-request","approvalsReviewer":"user"});
     run.append("backend_execution_policy", json!({"sandbox":"danger-full-access","approval_policy":"on-request","approvals_reviewer":"user"}))?;
     run.diagnostic(Level::Info, "backend.execution_policy", || json!({"sandbox":"danger-full-access","approval_policy":"on-request","approvals_reviewer":"user"}), || Value::Null);

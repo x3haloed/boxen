@@ -68,6 +68,7 @@ dependencies = [
  "fs2",
  "httparse",
  "libc",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

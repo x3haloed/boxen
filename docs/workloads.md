@@ -121,6 +121,23 @@ boxen respond HOST:42424 PEER_KEY RUN_ID REQUEST_ID_JSON RESULT_JSON
 
 `watch` prints each event as JSON as it arrives. It automatically reconnects with exponential backoff (0.5–5 seconds) and resumes after the last event written to stdout; connection notices go to stderr. Use `--once` to exit on transport failure. Explicit server rejections terminate rather than retrying forever. Both the GUI and CLI retain backend event payloads through the same protocol. Structured backend questions and common command/file approvals have simple controls; other server requests expose their payload and a JSON response field. Unrestricted filesystem/network execution remains the default (`danger-full-access`), with `approvalPolicy: on-request` and the client/user as approval reviewer. This permits Codex to send an approval request for operations its execution policy otherwise blocks under `never`. Boxen retains requests and accepts explicit control responses; automatic operator-defined approval policy is a separate capability.
 
+## Codex startup phases
+
+Codex startup retains `backend_startup_phase` events with
+`phase`, `attempt`, `elapsed_ms`, `outcome` and a stable failure `code`.
+Discovery includes executable selection and version probes. Launch measures
+starting the selected app-server process. Initialize measures the JSON-RPC
+handshake through the `initialized` notification. An initialize timeout
+is recorded in that phase even if discovery and launch succeeded. Each
+replacement selection after a disappearing executable has its own attempt
+number. Startup timing adds no retries or backend changes.
+
+The authenticated per-run `runtime_info` response exposes these events in
+`startup`, including on runs that failed before opening a native session.
+The same outcomes are available as `codex.startup_phase` diagnostics.
+Historical runs without phase events omit the field. The workload smoke test
+uses controlled delayed and timed-out handshakes and a missing executable.
+
 ## Identities and authority
 
 Each submission has a client-generated run ID and a Boxen thread ID. The first run normally uses its own ID as the thread ID. Backend thread IDs are separately retained. A completed run stays immutable while follow-up runs resume its backend conversation. Only one run per thread may execute at a time.

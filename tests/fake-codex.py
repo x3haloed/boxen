@@ -363,6 +363,13 @@ for line in sys.stdin:
     if method == "initialized":
         continue
     if method == "initialize":
+        mode_path = pathlib.Path("boxen-fixture-initialize")
+        if mode_path.is_file():
+            mode = mode_path.read_text().strip()
+            if mode == "timeout":
+                continue
+            if mode == "delay":
+                time.sleep(.2)
         result = {"userAgent": "fixture"}
     elif method == "model/list":
         assert request["params"].get("includeHidden") is False

@@ -33,9 +33,9 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
     def cli(i, *args):
         return subprocess.check_output(command + ["--data-dir", directories[i], *args], text=True, timeout=10).strip()
 
-    def start_daemon(i):
+    def start_daemon(i, codex=fixture):
         process = subprocess.Popen(command + ["--data-dir", directories[i], "serve", "--listen", f"127.0.0.1:{peers[i]}",
-                                   "--ui", f"127.0.0.1:{uis[i]}", "--codex", str(fixture)], text=True,
+                                   "--ui", f"127.0.0.1:{uis[i]}", "--codex", str(codex)], text=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         processes.append(process)
         lines = [process.stdout.readline().strip() for _ in range(3)]
@@ -270,6 +270,46 @@ with tempfile.TemporaryDirectory(prefix="boxen-workloads-") as temporary:
                      "expected_revision": r["revision"], "reasoning_effort": "high"}})
         assert activate("high")["backend_thread"] == resident_first["backend_thread"]
         print("PASS Codex reasoning effort for new, updated and reset threads and revisioned residents")
+
+        phase_dir=pathlib.Path(temporary)/"startup-phases"
+        phase_dir.mkdir()
+        mode=phase_dir/"boxen-fixture-initialize"
+        mode.write_text("delay")
+        delayed={**spec("Delayed initialize fixture"),"cwd":str(phase_dir)}
+        request({"op":"start","spec":delayed})
+        events, snapshot=collect(delayed["id"])
+        assert snapshot["status"]=="completed"
+        startup=[e["data"] for e in events if e["kind"]=="backend_startup_phase"]
+        assert [row["phase"] for row in startup]==["discovery","launch","initialize"]
+        assert all(row["outcome"]=="completed" and row["attempt"]==1 and row["code"] is None for row in startup)
+        assert startup[-1]["elapsed_ms"]>=150
+        assert request({"op":"runtime_info","run_id":delayed["id"]})["startup"]==startup
+
+        mode.write_text("timeout")
+        stalled={**spec("Initialize timeout fixture"),"cwd":str(phase_dir)}
+        request({"op":"start","spec":stalled})
+        events, snapshot=collect(stalled["id"])
+        assert snapshot["status"]=="failed"
+        startup=[e["data"] for e in events if e["kind"]=="backend_startup_phase"]
+        assert [(row["phase"],row["outcome"]) for row in startup]==[
+            ("discovery","completed"),("launch","completed"),("initialize","failed")]
+        assert startup[-1]["code"]=="timeout" and startup[-1]["elapsed_ms"]>=59000
+        assert request({"op":"runtime_info","run_id":stalled["id"]})["startup"]==startup
+
+        processes[-1].terminate()
+        processes[-1].wait(timeout=5)
+        # Exercise a direct spawn failure even on hosts with a login-session launcher.
+        (pathlib.Path(directories[1])/"execution.json").write_text(json.dumps({"mode":"inherit"}))
+        tokens[1]=start_daemon(1,phase_dir/"missing-codex")
+        assert request({"op":"runtime_info","run_id":stalled["id"]})["startup"]==startup
+        missing=spec("Launch failure fixture")
+        request({"op":"start","spec":missing})
+        events, snapshot=collect(missing["id"])
+        assert snapshot["status"]=="failed"
+        startup=[e["data"] for e in events if e["kind"]=="backend_startup_phase"]
+        assert [(row["phase"],row["outcome"],row["code"]) for row in startup]==[
+            ("discovery","completed",None),("launch","failed","not_found")],startup
+        print("PASS retained Codex phase durations distinguish a delayed handshake, initialize timeout, and process launch failure")
 
     finally:
         for process in processes:
